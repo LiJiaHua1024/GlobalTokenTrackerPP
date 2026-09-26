@@ -97,9 +97,18 @@
 - **测试**：+3（日期边界：23:30Z 事件在 +08:00 下滚入次日且旧日行被清、幂等两次重建行数一致、prune 保留 rollup）。
 - **真机验证**：rollup 180 行，与 `usage_events` 原始总量逐字段相等（52,797 ev / 1.67B in / 35.36M out / $7,311.96）；export 160 行 16 列 CSV python 解析无误；`prune --keep-days 36500` 链路跑通删 0 行（破坏性路径未对真库执行）。
 
+## M1b Direct2D 趋势图 ✅
+
+- **`windows-canvas` reactor 集成**：`windows-canvas = { features = ["reactor"] }` —— `canvas()` 按需绘制 `View`（`GpuDevice::new_or_warp` 自动回退软件渲染），挂在 `SwapChainPanel` 上，解包模式正常运行。
+- **图表实现**（`trend_strip` 重写）：圆角柱（当日全 alpha、历史 0.45 形成层级）、50% 虚感中网格线 + 发丝基线、DirectWrite 画最大值标签与首/末 `MM-DD` 日期刻度；0 值日画 1.5px 占位线不消失。
+- **顺带解锁字体配置**：`theme.font_family` 喂给 `TextFormat::new(family, size)`——reactor 0.100.0 无 XAML font setter，D2D 文字是当前唯一可换字体的面（ThemeConfig 注释已更新）。
+- **皮肤联动**：`Theme` 新增 `accent_cf/subtle_cf/divider_cf`（`ColorF`）——hex 配置精确映射；命名主题刷无 RGB 可读回，回退 Fluent 常量（accent 默认 #76B9ED Win11 暗色 accent）。
+- **真机验证**：截图确认柱形/标签/刻度正常渲染，进程长跑含 watch 触发扫描后重绘无崩溃。
+- **限制**：需求驱动绘制（数据快照随 view() 重建重绘）；无 tooltip/hover（D2D 画布不产 XAML 命中测试，悬停明细留待后续交互层）。
+
 ## 待办（S9+）
 - [ ] 托盘"最小化到托盘"依赖 reactor 暴露 window hide 或 HWND（上游）
-- [ ] 趋势图升级 windows-canvas Direct2D
+- [ ] 趋势图悬停交互（D2D 层自管命中测试 + 明细浮层）
 - [ ] CodeBuddy/Gemini 适配器（本机无数据，待真实文件出现）
 - [ ] Qoder：cookie/API 通道（M3）
 - [ ] OTel 接收器 + wham/Cursor 配额通道（M2/M3）

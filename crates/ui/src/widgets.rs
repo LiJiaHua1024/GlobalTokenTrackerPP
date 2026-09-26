@@ -149,33 +149,97 @@ pub fn stat_card(
     )
 }
 
-/// 30-day token trend — minimal Rectangle bars (Direct2D comes with M1 chart).
+/// 30-day token trend — Direct2D demand canvas: rounded bars (today at full
+/// alpha, history softened), faint mid gridline + hairline baseline, sparse
+/// date ticks and a max label drawn by DirectWrite — `theme.font_family` is
+/// honored here (the one place family config takes effect on 0.100.0).
 pub fn trend_strip(theme: &Theme, daily: &[(String, u64, f64)]) -> View {
-    let max = daily.iter().map(|d| d.1).max().unwrap_or(1).max(1);
-    let bars: Vec<View> = daily
+    let days: Vec<(String, u64)> = daily
         .iter()
         .rev()
         .take(30)
-        .collect::<Vec<_>>()
-        .into_iter()
         .rev()
-        .map(|(d, v, _)| {
-            let h = ((*v as f64 / max as f64) * 72.0).max(2.0);
-            Rectangle::new()
-                .width(10.0)
-                .height(h)
-                .fill(theme.accent)
-                .radius_x(3.0)
-                .radius_y(3.0)
-                .vertical_alignment(VerticalAlignment::Bottom)
-                .tooltip(format!("{d}  {}", fmt::tokens(*v)))
-        })
+        .map(|(d, v, _)| (d.clone(), *v))
         .collect();
-    StackPanel::new()
-        .orientation(Orientation::Horizontal)
-        .spacing(4.0)
-        .height(84.0)
-        .keyed_children(crate::pages::keyed(bars))
+    let accent = theme.accent_cf;
+    let subtle = theme.subtle_cf;
+    let divider = theme.divider_cf;
+    let family = theme.font_family.clone();
+    let label_pt = theme.label_size as f32;
+    Border::new().height(160.0).content(windows_canvas::canvas(
+        move |ctx| {
+            let (w, h) = (ctx.width, ctx.height);
+            if w < 16.0 || h < 24.0 || days.is_empty() {
+                return Ok(());
+            }
+            use windows_canvas::{ColorF, Rect, TextAlignment, TextFormat, Vector2};
+            ctx.clear(ColorF::TRANSPARENT);
+
+            let tf = TextFormat::new(&family, label_pt)?;
+            let tf_r = tf.clone().with_alignment(TextAlignment::Trailing);
+            let ink = ctx.create_solid_brush(subtle)?;
+            let line = ctx.create_solid_brush(divider)?;
+
+            // Layout: 18px top label strip, plot area, 16px bottom ticks.
+            let top = 18.0f32;
+            let bottom = h - 16.0;
+            let plot_h = (bottom - top).max(1.0);
+            let max = days.iter().map(|d| d.1).max().unwrap_or(1).max(1) as f32;
+
+            // Max label (top-left) + faint mid gridline.
+            ctx.draw_text(
+                &fmt::tokens(max as u64),
+                &tf,
+                &Rect::new(0.0, 0.0, 120.0, top),
+                &ink,
+            );
+            let mid_y = top + plot_h * 0.5;
+            ctx.draw_line(Vector2::new(0.0, mid_y), Vector2::new(w, mid_y), &line, 1.0);
+            ctx.draw_line(
+                Vector2::new(0.0, bottom),
+                Vector2::new(w, bottom),
+                &line,
+                1.0,
+            );
+
+            let n = days.len() as f32;
+            let slot = w / n;
+            let bar_w = (slot * 0.62).clamp(3.0, 20.0);
+            let last = days.len() - 1;
+            for (i, (_, v)) in days.iter().enumerate() {
+                let bh = ((*v as f32) / max * plot_h).max(if *v > 0 { 3.0 } else { 1.5 });
+                let x = slot * i as f32 + (slot - bar_w) * 0.5;
+                let a = if i == last { 1.0 } else { 0.45 };
+                let brush = ctx.create_solid_brush(ColorF::new(
+                    accent.r, accent.g, accent.b, accent.a * a,
+                ))?;
+                ctx.fill_rounded_rect(
+                    &windows_canvas::RoundedRect::new(
+                        Rect::new(x, bottom - bh, x + bar_w, bottom),
+                        2.5,
+                        2.5,
+                    ),
+                    &brush,
+                );
+            }
+
+            // Sparse date ticks: first / last day (MM-DD tail of ISO date).
+            let tick = |d: &str| d.get(5..10).unwrap_or(d).to_string();
+            ctx.draw_text(
+                &tick(&days[0].0),
+                &tf,
+                &Rect::new(0.0, bottom + 2.0, 80.0, h),
+                &ink,
+            );
+            ctx.draw_text(
+                &tick(&days[last].0),
+                &tf_r,
+                &Rect::new(w - 80.0, bottom + 2.0, w, h),
+                &ink,
+            );
+            Ok(())
+        },
+    ))
 }
 
 /// Two-column row; right-aligned meta. Hairline divider under the row when the

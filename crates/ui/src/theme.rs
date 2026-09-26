@@ -4,6 +4,7 @@
 //! resolve to solid colors for full custom skins.
 
 use serde::{Deserialize, Serialize};
+use windows_canvas::ColorF;
 use windows_reactor::{Brush, Color, ThemeBrush, Thickness};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -28,8 +29,8 @@ pub struct ThemeConfig {
     pub line_separators: Option<bool>,
     /// Thin accent strip on the left edge of cards.
     pub accent_edge: Option<bool>,
-    /// Reserved: reactor 0.100.0 has no font-family setter yet; honored when
-    /// the API lands. Kept so configs stay forward-compatible.
+    /// Honored by Direct2D chart text (DirectWrite); XAML controls follow the
+    /// system font until reactor exposes a family setter.
     pub font_family: Option<String>,
     pub title_size: Option<f64>,
     pub h2_size: Option<f64>,
@@ -51,6 +52,14 @@ pub struct Theme {
     pub card_border: Brush,
     pub divider: Brush,
     pub page_bg: Option<Brush>,
+    /// Direct2D copies of key colors — hex config values map exactly; named
+    /// theme brushes fall back to Fluent constants below (theme brushes have
+    /// no RGB at this layer).
+    pub accent_cf: ColorF,
+    pub subtle_cf: ColorF,
+    pub divider_cf: ColorF,
+    /// DirectWrite family for chart text.
+    pub font_family: String,
     pub radius: f64,
     pub pad: f64,
     pub gap: f64,
@@ -79,6 +88,31 @@ fn brush_of(s: Option<&str>, default: Brush) -> Brush {
         "solid" | "background" => Brush::Theme(ThemeBrush::SolidBackground),
         hex => parse_hex(hex).map(Brush::Solid).unwrap_or(default),
     }
+}
+
+/// Canvas colors: hex strings map 1:1; named theme brushes can't be read back
+/// as RGB, so they resolve to the Fluent defaults below.
+fn colorf_of(s: Option<&str>, default: ColorF) -> ColorF {
+    let Some(s) = s else { return default };
+    let s = s.trim();
+    let h = s.strip_prefix('#').unwrap_or(s);
+    u32::from_str_radix(h, 16)
+        .ok()
+        .map(|v| match h.len() {
+            6 => ColorF::from_rgb8(
+                ((v >> 16) & 0xff) as u8,
+                ((v >> 8) & 0xff) as u8,
+                (v & 0xff) as u8,
+            ),
+            8 => ColorF::from_rgba8(
+                ((v >> 16) & 0xff) as u8,
+                ((v >> 8) & 0xff) as u8,
+                (v & 0xff) as u8,
+                ((v >> 24) & 0xff) as u8,
+            ),
+            _ => default,
+        })
+        .unwrap_or(default)
 }
 
 fn parse_hex(s: &str) -> Option<Color> {
@@ -125,6 +159,23 @@ impl Theme {
                 .page_bg
                 .as_deref()
                 .map(|s| brush_of(Some(s), Brush::Theme(ThemeBrush::SolidBackground))),
+            // Win11 dark accent #76B9ED; hex overrides map exactly.
+            accent_cf: colorf_of(
+                cfg.accent.as_deref(),
+                ColorF::from_rgb8(0x76, 0xB9, 0xED),
+            ),
+            subtle_cf: colorf_of(
+                cfg.subtle.as_deref(),
+                ColorF::from_rgba8(0x9E, 0x9E, 0x9E, 0xFF),
+            ),
+            divider_cf: colorf_of(
+                cfg.divider.as_deref(),
+                ColorF::from_rgba8(0x80, 0x80, 0x80, 0x44),
+            ),
+            font_family: cfg
+                .font_family
+                .clone()
+                .unwrap_or_else(|| "Segoe UI".into()),
             radius: cfg.radius.unwrap_or(8.0),
             pad: cfg.card_pad.unwrap_or(16.0),
             gap: cfg.gap.unwrap_or(12.0),
