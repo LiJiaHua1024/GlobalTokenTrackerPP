@@ -240,3 +240,13 @@
 - **复查发现**：持久化过滤集可能残留已从账本消失的工具名（数据被清理后死名阻止 `Some`→`None` 塌缩）——`Msg::Loaded` 里加活数据交集清理，覆盖全部活工具时自动归零。
 - **逐项核过**：`scope_where` 占位符编号在 time/app/limit/offset 三段连续无错位；`app` 过滤命中既有 `idx_events_app(app, ts_start)` 索引；`load_all` 明细固定取第 0 页——过滤变化无越界页风险；`app_names` 保持无过滤（勾选框始终可见）；明细页也挂了同一行勾选器。
 - **验证**：19/19 测试、clippy 0、工作区无临时文件混入。
+
+## S17 Devin 适配器（SQLite 源）✅ + 兼容性盘点
+
+- **源**：`<data_dir>/devin/cli/sessions.db`（`dirs::data_dir`——Win `%APPDATA%` / mac `~/Library/Application Support` / Linux `~/.local/share`，跨平台口径一致）。
+- **数据面（实地验证）**：`message_nodes.chat_message` 每行一条聊天消息 JSON；assistant 节点带 `metadata.metrics{input/output/cache_read/cache_creation_tokens, ttft_ms, total_time_ms, tpot_ms, tokens_per_sec}`——**全适配器里最全遥测**（唯一原生 TTFT/TPOT）。`metadata.request_id` 每次推理共享（同一消息在 tool_call 落地后被重存为 ~2 个快照行，token 指标相同、时延字段后补全）→ `dedup_key=devin:{request_id}` 配完备度 UPSERT 收敛成一条。
+- **字段映射**：`generation_model`→model、`working_directory`→project、`started_generation_at/created_at`（RFC3339）→ts_start/end、`finish_reason`→status、ttft/total→ttft_ms/duration_ms。`sessions.metadata.total_acu_cost` 是会话级累计计数器，**刻意不映射**（会重复计费）；本地 backend 恒为 0。
+- **性能**：SQL 侧 `json_extract($.metadata)` 只回传小对象（`chat_message` 含 thinking/tool_calls 可达 MB 级）；`LIKE '%"role":"assistant"%'` 做字节级粗筛再进 json_extract。首扫 513MB 库含全量解析 **3.3s**，增量 135ms。水位 = `row_id` AUTOINCREMENT。
+- **实测**：4,971 事件落库（10,535 快照行去重收敛），swe-2-max 正确归 unpriced；UI 勾选行/按工具表出现 devin，截图核对。
+- **其余目标盘点（实地核查后如实标记）**：Copilot 日志只有进程生命周期无 token；Gemini/Antigravity 装了没用（conversations/ 空）；CodeBuddy 只有 memwatch+空 expert-history；Qoder 只有基础设施日志；Windsurf `.codeium` 全是 protobuf 上下文；Cursor 7,761 条 bubble `tokenCount` 全 0（服务端计费）配额 RPC 已是上限；cli-proxy-api 是代理层不采。
+- **测试**：+1（request_id 快照去重/字段映射/水位推进/二次扫描幂等），20/20 绿、clippy 0。
