@@ -83,6 +83,17 @@ pub struct EventRow {
     pub raw_ref: Option<String>,
 }
 
+/// One row of the trend tooltip query: bucket ("YYYY-MM-DD"/"HH:00") × model.
+#[derive(Debug, Clone)]
+pub struct BucketModelRow {
+    pub bucket: String,
+    pub model: String,
+    pub events: u64,
+    /// input+output+cache_read — the headline token count (trend convention).
+    pub tokens: u64,
+    pub cost_usd: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct DailyRow {
     pub date: String, // YYYY-MM-DD in `tz`
@@ -249,6 +260,46 @@ impl super::Store {
                 cache_write_tokens: r.get::<_, i64>(7)? as u64,
                 cost_usd: r.get(8)?,
                 credits: r.get(9)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Per-bucket × model aggregation feeding the trend tooltip (top-3 models
+    /// per day/hour). `hourly` switches the bucket strftime to "HH:00".
+    pub fn bucket_models(
+        &self,
+        from_ms: Option<i64>,
+        hourly: bool,
+        utc_offset: &str,
+        apps: Option<&[String]>,
+    ) -> Result<Vec<BucketModelRow>> {
+        let b = utc_offset.as_bytes();
+        anyhow::ensure!(
+            b.len() == 6
+                && matches!(b[0], b'+' | b'-')
+                && b[3] == b':'
+                && [1, 2, 4, 5].iter().all(|&i| b[i].is_ascii_digit()),
+            "invalid utc_offset: {utc_offset}"
+        );
+        let fmt = if hourly { "%H:00" } else { "%Y-%m-%d" };
+        let (w, p) = scope_where(from_ms, None, apps);
+        let mut st = self.conn().prepare(&format!(
+            "SELECT strftime('{fmt}', ts_start/1000, 'unixepoch', '{utc_offset}') AS k,
+                    COALESCE(NULLIF(model,''), NULLIF(request_model,''), NULLIF(pricing_model,''), '?'),
+                    COUNT(*),
+                    COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens),0),
+                    COALESCE(SUM(cost_usd),0)
+             FROM usage_events {w}
+             GROUP BY k, 2 ORDER BY k"
+        ))?;
+        let rows = st.query_map(rusqlite::params_from_iter(p.iter()), |r| {
+            Ok(BucketModelRow {
+                bucket: r.get(0)?,
+                model: r.get(1)?,
+                events: r.get::<_, i64>(2)? as u64,
+                tokens: r.get::<_, i64>(3)? as u64,
+                cost_usd: r.get(4)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)

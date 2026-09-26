@@ -156,9 +156,14 @@ pub fn stat_card(
 /// Shared trend-hover state: pointer callbacks write `hover` via a Msg round
 /// trip; the D2D draw closure reads it every invalidated frame. `width`/`count`
 /// are written by the draw pass so hover math uses the real surface size.
+/// `tip` is the delayed-tooltip index — armed by `TrendTip` after the pointer
+/// has dwelled on one bar (~450ms), cleared on move/leave.
 #[derive(Default)]
 pub struct TrendShared {
     pub hover: Cell<Option<usize>>,
+    pub tip: Cell<Option<usize>>,
+    /// Bar the dwell timer is armed for — moving bars rearms it.
+    pub pending: Cell<Option<usize>>,
     pub width: Cell<f32>,
     pub count: Cell<usize>,
 }
@@ -183,20 +188,16 @@ impl Default for TrendHandle {
 /// alpha, history softened), faint mid gridline + hairline baseline, sparse
 /// date ticks and a max label drawn by DirectWrite — `theme.font_family` is
 /// honored here (the one place family config takes effect on 0.100.0).
-/// Pointer hover lifts the bar to full alpha and prints its date·tokens.
+/// Pointer hover lifts the bar to full alpha and prints its date·tokens;
+/// dwelling ~450ms opens a tooltip card with events/cost/top-3 models.
 pub fn trend_strip(
     theme: &Theme,
-    daily: &[(String, u64, f64)],
+    daily: &[globaltokentracker_core::viewmodel::TrendBucket],
     trend: &TrendHandle,
     ctx: &mut ViewContext<Shell>,
 ) -> View {
-    let days: Vec<(String, u64)> = daily
-        .iter()
-        .rev()
-        .take(60)
-        .rev()
-        .map(|(d, v, _)| (d.clone(), *v))
-        .collect();
+    let days: Vec<globaltokentracker_core::viewmodel::TrendBucket> =
+        daily.iter().rev().take(60).rev().cloned().collect();
     let accent = theme.accent_cf;
     let subtle = theme.subtle_cf;
     let divider = theme.divider_cf;
@@ -205,6 +206,9 @@ pub fn trend_strip(
     let shared = trend.shared.clone();
     Border::new()
         .height(160.0)
+        // Null Background = XAML skips hit-testing entirely; Transparent keeps
+        // the canvas invisible yet receives PointerMoved/Exited.
+        .background(Brush::Solid(Color::argb(0, 0, 0, 0)))
         .on_pointer_moved(ctx.callback(|e: PointerEventInfo| Msg::TrendHover(e.x)))
         .on_pointer_exited(ctx.callback(|_| Msg::TrendLeave))
         .content(windows_canvas::canvas_invalidated(
@@ -226,7 +230,7 @@ pub fn trend_strip(
             let top = 18.0f32;
             let bottom = h - 16.0;
             let plot_h = (bottom - top).max(1.0);
-            let max = days.iter().map(|d| d.1).max().unwrap_or(1).max(1) as f32;
+            let max = days.iter().map(|d| d.tokens).max().unwrap_or(1).max(1) as f32;
 
             // Max label (top-left) + faint mid gridline.
             ctx.draw_text(
@@ -249,10 +253,22 @@ pub fn trend_strip(
             let bar_w = (slot * 0.62).clamp(3.0, 20.0);
             let last = days.len() - 1;
             let hover = shared.hover.get().filter(|&i| i <= last);
+            // GTT_TIPTEST=<idx> forces the tooltip in test builds — injected
+            // pointer input never reaches WinUI3's content island, so this is
+            // the screenshot-verifiable path for the popup itself.
+            let tip = shared
+                .tip
+                .get()
+                .or_else(|| {
+                    std::env::var("GTT_TIPTEST")
+                        .ok()
+                        .and_then(|v| v.parse::<usize>().ok())
+                })
+                .filter(|&i| i <= last);
             shared.width.set(w);
             shared.count.set(days.len());
-            for (i, (d, v)) in days.iter().enumerate() {
-                let bh = ((*v as f32) / max * plot_h).max(if *v > 0 { 3.0 } else { 1.5 });
+            for (i, d) in days.iter().enumerate() {
+                let bh = ((d.tokens as f32) / max * plot_h).max(if d.tokens > 0 { 3.0 } else { 1.5 });
                 let x = slot * i as f32 + (slot - bar_w) * 0.5;
                 let lit = i == last || hover == Some(i);
                 let brush = ctx.create_solid_brush(ColorF::new(
@@ -269,9 +285,13 @@ pub fn trend_strip(
                 ctx.fill_rounded_rect(&bar, &brush);
                 if hover == Some(i) {
                     ctx.draw_rounded_rect(&bar, &ink, 1.0);
-                    // Hover detail top-right: "MM-DD · 12.3M tok".
+                    // Hover detail top-right: "MM-DD · 1,234 tok".
                     ctx.draw_text(
-                        &format!("{} · {} tok", d.get(5..10).unwrap_or(d), fmt::tokens_exact(*v)),
+                        &format!(
+                            "{} · {} tok",
+                            d.date.get(5..10).unwrap_or(&d.date),
+                            fmt::tokens_exact(d.tokens)
+                        ),
                         &tf_r,
                         &Rect::new(w - 220.0, 0.0, w, top),
                         &ink,
@@ -279,16 +299,69 @@ pub fn trend_strip(
                 }
             }
 
+            // Delayed tooltip card — drawn last so it floats above the plot.
+            if let Some(i) = tip {
+                let d = &days[i];
+                let day_label = if d.date.len() > 10 {
+                    d.date.clone()
+                } else {
+                    d.date.get(5..10).unwrap_or(&d.date).to_string()
+                };
+                let mut lines: Vec<String> = vec![
+                    format!("{} tok · {}", fmt::tokens_exact(d.tokens), fmt::usd(d.cost_usd)),
+                    format!("{} 事件", fmt::tokens_exact(d.events)),
+                ];
+                for (m, t) in &d.top {
+                    lines.push(format!(
+                        "{}  {}",
+                        if m.chars().count() > 20 {
+                            format!("{}…", m.chars().take(19).collect::<String>())
+                        } else {
+                            m.clone()
+                        },
+                        fmt::tokens_exact(*t)
+                    ));
+                }
+                let line_h = label_pt + 4.0;
+                let pw = 216.0f32;
+                let ph = 26.0 + lines.len() as f32 * line_h + 10.0;
+                let px = (slot * i as f32 + slot * 0.5 - pw * 0.5).clamp(4.0, (w - pw - 4.0).max(4.0));
+                let py = top + 2.0;
+                let panel = windows_canvas::RoundedRect::new(Rect::new(px, py, px + pw, py + ph), 7.0, 7.0);
+                // Near-opaque dark card (Fluent tooltip idiom; reads on both themes).
+                let bg = ctx.create_solid_brush(ColorF::from_rgba8(28, 28, 30, 242))?;
+                let frame = ctx.create_solid_brush(ColorF::from_rgba8(255, 255, 255, 36))?;
+                let head = ctx.create_solid_brush(accent)?;
+                let body = ctx.create_solid_brush(ColorF::from_rgba8(235, 235, 235, 255))?;
+                ctx.fill_rounded_rect(&panel, &bg);
+                ctx.draw_rounded_rect(&panel, &frame, 1.0);
+                ctx.draw_text(
+                    &day_label,
+                    &tf,
+                    &Rect::new(px + 10.0, py + 7.0, px + pw - 10.0, py + 7.0 + line_h),
+                    &head,
+                );
+                for (li, l) in lines.iter().enumerate() {
+                    let y = py + 7.0 + (li + 1) as f32 * line_h;
+                    ctx.draw_text(
+                        l,
+                        &tf,
+                        &Rect::new(px + 10.0, y, px + pw - 10.0, y + line_h),
+                        &body,
+                    );
+                }
+            }
+
             // Sparse date ticks: first / last day (MM-DD tail of ISO date).
             let tick = |d: &str| d.get(5..10).unwrap_or(d).to_string();
             ctx.draw_text(
-                &tick(&days[0].0),
+                &tick(&days[0].date),
                 &tf,
                 &Rect::new(0.0, bottom + 2.0, 80.0, h),
                 &ink,
             );
             ctx.draw_text(
-                &tick(&days[last].0),
+                &tick(&days[last].date),
                 &tf_r,
                 &Rect::new(w - 80.0, bottom + 2.0, w, h),
                 &ink,

@@ -83,6 +83,8 @@ pub enum Msg {
     HideWidget(String, String, bool),
     /// Pointer x (canvas-local DIPs) over the trend chart.
     TrendHover(f64),
+    /// Dwell timer fired for bar `usize` — arms the tooltip if still hovering.
+    TrendTip(usize),
     TrendLeave,
     /// Statistics range changed (label text from the selector).
     SetRange(String),
@@ -390,6 +392,7 @@ impl Component for Shell {
                 self.config.set_hidden(&page, &id, hidden);
             }
             Msg::TrendHover(x) => {
+                diag!("[trend] hover x={x}");
                 let sh = &self.trend.shared;
                 let (w, n) = (sh.width.get(), sh.count.get());
                 // Index under the pointer; unchanged → no repaint churn.
@@ -400,11 +403,31 @@ impl Component for Shell {
                 };
                 if idx != sh.hover.get() {
                     sh.hover.set(idx);
+                    sh.tip.set(None);
+                    sh.pending.set(idx);
+                    // Dwell arm: tooltip shows only if the pointer is still on
+                    // the same bar when the timer lands (~450ms, Fluent-ish).
+                    if let Some(i) = idx {
+                        context.spawn_background(move |_| {
+                            std::thread::sleep(std::time::Duration::from_millis(450));
+                            Msg::TrendTip(i)
+                        });
+                    }
+                    self.trend.inv.invalidate();
+                }
+            }
+            Msg::TrendTip(i) => {
+                let sh = &self.trend.shared;
+                if sh.pending.get() == Some(i) && sh.hover.get() == Some(i) {
+                    sh.tip.set(Some(i));
                     self.trend.inv.invalidate();
                 }
             }
             Msg::TrendLeave => {
-                if self.trend.shared.hover.take().is_some() {
+                let sh = &self.trend.shared;
+                sh.pending.set(None);
+                sh.tip.set(None);
+                if sh.hover.take().is_some() {
                     self.trend.inv.invalidate();
                 }
             }

@@ -64,6 +64,17 @@ impl Range {
     }
 }
 
+/// One trend bar's data: `date` is "YYYY-MM-DD" (or "HH:00" for the Today
+/// range); `top` = the day's top-3 models by tokens, for the hover popup.
+#[derive(Debug, Clone)]
+pub struct TrendBucket {
+    pub date: String,
+    pub events: u64,
+    pub tokens: u64,
+    pub cost_usd: f64,
+    pub top: Vec<(String, u64)>,
+}
+
 #[derive(Debug, Clone)]
 pub struct OverviewVm {
     /// Always today — the tray tooltip and badges stay day-scoped regardless
@@ -74,9 +85,9 @@ pub struct OverviewVm {
     pub all: Totals,
     pub range: Range,
     pub by_app: Vec<AppSummary>,
-    /// Trend series for the selected range: ("YYYY-MM-DD"|"HH:00", tokens, cost).
-    /// Today → hourly buckets; other ranges → per local day.
-    pub daily: Vec<(String, u64, f64)>,
+    /// Trend buckets for the selected range: per local day, or per local hour
+    /// for `Today`. Each bucket carries its tooltip payload (top-3 models).
+    pub daily: Vec<TrendBucket>,
     /// All tool names present in the ledger — the app-filter checkbox list
     /// must show tools even when the filter excludes them.
     pub apps: Vec<String>,
@@ -112,19 +123,32 @@ impl Store {
         let t0 = day_start_ms(0);
         let start = range.start_ms();
         let tz = local_utc_offset();
-        // Fold apps into one series per bucket for the trend strip.
-        let raw = if range == Range::Today {
-            self.hourly(t0, &tz, apps)?
-        } else {
-            self.daily(start, None, &tz, apps)?
-        };
-        let mut series: std::collections::BTreeMap<String, (u64, f64)> =
+        // Per-bucket × model rows fold into trend buckets carrying the
+        // tooltip payload (events + top-3 models by tokens).
+        let mut buckets: std::collections::BTreeMap<String, TrendBucket> =
             std::collections::BTreeMap::new();
-        for d in raw {
-            let e = series.entry(d.date).or_default();
-            e.0 += d.output_tokens + d.cache_read_tokens + d.input_tokens;
-            e.1 += d.cost_usd;
+        for r in self.bucket_models(start, range == Range::Today, &tz, apps)? {
+            let key = r.bucket.clone();
+            let b = buckets.entry(key.clone()).or_insert_with(|| TrendBucket {
+                date: key,
+                events: 0,
+                tokens: 0,
+                cost_usd: 0.0,
+                top: Vec::new(),
+            });
+            b.events += r.events;
+            b.tokens += r.tokens;
+            b.cost_usd += r.cost_usd;
+            b.top.push((r.model, r.tokens));
         }
+        let daily: Vec<TrendBucket> = buckets
+            .into_values()
+            .map(|mut b| {
+                b.top.sort_by_key(|m| std::cmp::Reverse(m.1));
+                b.top.truncate(3);
+                b
+            })
+            .collect();
         let span = self.totals(start, None, apps)?;
         Ok(OverviewVm {
             today: self.totals(Some(t0), None, apps)?,
@@ -132,7 +156,7 @@ impl Store {
             all: self.totals(None, None, apps)?,
             range,
             by_app: self.by_app(start, None, apps)?,
-            daily: series.into_iter().map(|(d, (t, c))| (d, t, c)).collect(),
+            daily,
             apps: self.app_names()?,
             quotas: self.latest_quotas()?,
             unpriced: self.unpriced_models()?,

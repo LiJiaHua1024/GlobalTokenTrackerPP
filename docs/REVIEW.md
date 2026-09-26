@@ -224,3 +224,13 @@
 - **语义**：全勾或缺省=全部；只勾 claude 后实测卡片 11,323 事件/4,996,899,992 tok/$2764 与按工具行精确一致；全不勾=空视图（不偷换为"全部"）。
 - **验证**：截图核对全选/单选两态；测试 +1（None/subset/empty 三态 + app_names + 分页过滤）19/19 绿；clippy 0。
 - **顺修**：panic 日志文件名 `cl_panic.log`→`gtt_panic.log`（改名遗漏）。
+
+## S16 趋势柱悬停浮窗（延迟弹出）✅
+
+- **需求**：柱上悬停片刻弹小浮窗：当日 tokens/价格/事件数/Top3 模型。
+- **数据**：新增 `bucket_models()`——桶（日/时）× 模型二维聚合一次取回；`viewmodel` 折叠成 `TrendBucket{date,events,tokens,cost_usd,top[3]}`（按 tokens 降序截 3），`OverviewVm.daily` 升级为该类型（口径沿用旧趋势 input+output+cache_read）。与 app 过滤联动。
+- **延迟机制**：`TrendShared{hover,tip,pending}`——换柱才重置 pending 并 `spawn_background` 睡 450ms → `Msg::TrendTip(idx)`，仍悬停同柱才置 `tip` 并 invalidate；同柱内微移不重置计时（“停留片刻”语义）；`TrendLeave` 全清。
+- **绘制**：D2D 画布末段画近不透明深色卡片（Fluent tooltip 惯例）：accent 日期头、`tokens·$cost`、`N 事件`、Top3 模型行（20 字截断），锚定柱顶居中并 clamp 进画布。
+- **关键坑（记录）**：注入输入（SendInput/SetCursorPos）对 WinUI3 `DesktopChildSiteBridge` 不产生 PointerMoved——无法用脚本做悬停端到端。另发现 `Background=null` 的 Border 不做命中测试，补 `Transparent` 背景（这是真实 bug 修复）。渲染链路用 `GTT_TIPTEST=<idx>` 环境变量强制弹窗截图验证（09-08 桶：197.3M tok/$238/586 事件/Top3 正确）。
+- **残留风险**：真实鼠标的 PointerMoved 走同一订阅/分发链（Button Click、SelectorBar 已实证该泵工作），置信度高但未能注入验证——发布前建议真机手动悬停一次确认。
+- **验证**：19/19 测试、clippy 0。
