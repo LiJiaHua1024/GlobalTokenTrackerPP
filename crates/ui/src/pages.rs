@@ -462,49 +462,129 @@ pub fn overview_page(
 
 // ---------------------------------------------------------------- detail
 
-fn event_row(theme: &Theme, r: &EventRow) -> View {
+/// Shared column shape for header + every data row — identical widths on each
+/// per-row Grid keep columns aligned without one giant 200-row measure pass.
+const DETAIL_COLS: [GridLength; 8] = [
+    GridLength::Pixel(96.0),  // 时间
+    GridLength::Pixel(72.0),  // 工具
+    GridLength::STAR,         // 模型
+    GridLength::Pixel(96.0),  // 输入
+    GridLength::Pixel(96.0),  // 输出
+    GridLength::Pixel(96.0),  // 缓存
+    GridLength::Pixel(92.0),  // 成本
+    GridLength::Pixel(72.0),  // 时长
+];
+
+fn dcell(col: i32, v: View) -> View {
+    Border::new().grid_column(col).content(v)
+}
+
+fn dtext(theme: &Theme, text: String, right: bool) -> TextBlock {
+    let t = TextBlock::new()
+        .text(text)
+        .font_size(theme.body_size)
+        .vertical_alignment(VerticalAlignment::Center);
+    if right {
+        t.horizontal_alignment(HorizontalAlignment::Right)
+    } else {
+        t.horizontal_alignment(HorizontalAlignment::Left)
+    }
+}
+
+fn detail_header(theme: &Theme) -> View {
+    let h = |theme: &Theme, text: &str, col: i32, right: bool| -> View {
+        dcell(
+            col,
+            dtext(theme, text.into(), right)
+                .font_size(theme.label_size)
+                .font_weight(FontWeight::SEMI_BOLD)
+                .foreground(theme.subtle)
+                .into(),
+        )
+    };
+    Border::new()
+        .padding(Thickness::xy(10.0, 6.0))
+        .border_brush(theme.divider)
+        .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0))
+        .content(
+            Grid::new()
+                .columns(DETAIL_COLS)
+                .children([
+                    h(theme, "时间", 0, false),
+                    h(theme, "工具", 1, false),
+                    h(theme, "模型", 2, false),
+                    h(theme, "输入", 3, true),
+                    h(theme, "输出", 4, true),
+                    h(theme, "缓存", 5, true),
+                    h(theme, "成本", 6, true),
+                    h(theme, "时长", 7, true),
+                ]),
+        )
+}
+
+fn event_row(theme: &Theme, r: &EventRow, zebra: bool) -> View {
     let model = r
         .model
         .clone()
         .or_else(|| r.pricing_model.clone())
         .unwrap_or_else(|| "—".into());
-    let cost = r
+    let mut cost = r
         .cost_usd
         .map(fmt::usd)
         .or_else(|| r.credits.map(|c| format!("{c:.1}cr")))
         .unwrap_or_else(|| "—".into());
-    let badge = match r.cost_source.as_deref() {
-        Some("estimated") => "≈",
-        Some("provider_reported") => "↺",
-        _ => "",
-    };
-    let line = format!(
-        "{:<15} {:<9} {:<24} in {:>7} out {:>7} cache {:>8} {:>8}{}  {}",
-        fmt::ts_short(r.ts_start),
-        r.app,
-        truncate(&model, 24),
-        fmt::tokens_exact(r.input_tokens),
-        fmt::tokens_exact(r.output_tokens),
-        fmt::tokens_exact(r.cache_read_tokens + r.cache_write_tokens),
-        cost,
-        badge,
-        fmt::duration(r.duration_ms),
-    );
-    let mut row_children: Vec<View> = vec![TextBlock::new()
-        .text(line)
-        .font_size(theme.body_size)
-        .tooltip(r.raw_ref.clone().unwrap_or_default())];
-    if r.cost_source.as_deref() == Some("unpriced") {
-        row_children.push(w::badge(theme, "unpriced".into(), w::BadgeTone::Warn));
+    match r.cost_source.as_deref() {
+        Some("estimated") => cost.push_str(" ≈"),
+        Some("provider_reported") => cost.push_str(" ↺"),
+        _ => {}
     }
-    Border::new()
-        .padding(Thickness::xy(10.0, 6.0))
-        .content(
+    let mut cost_children: Vec<View> = vec![dtext(theme, cost, true).into()];
+    if r.cost_source.as_deref() == Some("unpriced") {
+        cost_children.push(w::badge(theme, "unpriced".into(), w::BadgeTone::Warn));
+    }
+    let cells: [View; 8] = [
+        dcell(0, dtext(theme, fmt::ts_short(r.ts_start), false).into()),
+        dcell(1, dtext(theme, r.app.clone(), false).into()),
+        dcell(
+            2,
+            dtext(theme, truncate(&model, 40), false)
+                .foreground(theme.subtle)
+                .into(),
+        ),
+        dcell(3, dtext(theme, fmt::tokens_exact(r.input_tokens), true).into()),
+        dcell(4, dtext(theme, fmt::tokens_exact(r.output_tokens), true).into()),
+        dcell(
+            5,
+            dtext(
+                theme,
+                fmt::tokens_exact(r.cache_read_tokens + r.cache_write_tokens),
+                true,
+            )
+            .foreground(theme.subtle)
+            .into(),
+        ),
+        dcell(
+            6,
             StackPanel::new()
                 .orientation(Orientation::Horizontal)
                 .spacing(6.0)
-                .keyed_children(keyed(row_children)),
-        )
+                .horizontal_alignment(HorizontalAlignment::Right)
+                .keyed_children(keyed(cost_children)),
+        ),
+        dcell(7, dtext(theme, fmt::duration(r.duration_ms), true).into()),
+    ];
+    let mut row = Border::new().padding(Thickness::xy(10.0, 5.0));
+    if theme.line_separators {
+        row = row
+            .border_brush(theme.divider)
+            .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0));
+    }
+    if zebra {
+        // ~4% gray reads on both light and dark Fluent surfaces.
+        row = row.background(Brush::Solid(Color::argb(10, 128, 128, 128)));
+    }
+    row.content(Grid::new().columns(DETAIL_COLS).children(cells))
+        .tooltip(r.raw_ref.clone().unwrap_or_default())
 }
 
 fn truncate(s: &str, n: usize) -> String {
@@ -520,7 +600,12 @@ pub fn detail_page(snap: Option<&Snapshot>, theme: &Theme, ctx: &mut ViewContext
         return loading(theme, true);
     };
     let d = &s.detail;
-    let list: Vec<View> = d.rows.iter().map(|r| event_row(theme, r)).collect();
+    let list: Vec<View> = d
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| event_row(theme, r, i % 2 == 1))
+        .collect();
     let pages = (d.total as i64 + DETAIL_PAGE_SIZE - 1) / DETAIL_PAGE_SIZE;
     let page = d.page;
     let mut nav: Vec<View> = Vec::new();
@@ -565,7 +650,13 @@ pub fn detail_page(snap: Option<&Snapshot>, theme: &Theme, ctx: &mut ViewContext
                         .spacing(8.0)
                         .keyed_children(keyed(nav))],
                 ),
-                vstack(2.0, list),
+                w::card(
+                    theme,
+                    vstack(
+                        0.0,
+                        std::iter::once(detail_header(theme)).chain(list).collect(),
+                    ),
+                ),
             ],
         ),
     )
