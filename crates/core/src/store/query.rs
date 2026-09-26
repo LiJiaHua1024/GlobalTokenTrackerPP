@@ -226,6 +226,19 @@ impl super::Store {
             .map_err(Into::into)
     }
 
+    /// `(file_path, adapter_state)` for a source — reconcile rebuilds session
+    /// watermarks from these (Codex stores each file's last cumulative counter).
+    pub fn adapter_states(&self, source: &str) -> Result<Vec<(String, String)>> {
+        let mut st = self.conn().prepare(
+            "SELECT file_path, adapter_state FROM sync_cursors
+             WHERE source=?1 AND adapter_state IS NOT NULL",
+        )?;
+        let rows = st.query_map(params![source], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     /// Latest quota snapshot per (app, window_kind) — for the quota page/tray.
     pub fn latest_quotas(&self) -> Result<Vec<QuotaRow>> {
         let mut st = self.conn().prepare(

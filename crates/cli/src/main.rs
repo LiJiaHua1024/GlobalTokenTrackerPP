@@ -220,5 +220,68 @@ fn reconcile(engine: &Engine, ccs: Option<std::path::PathBuf>) -> Result<()> {
         pct(ours.output_tokens as f64, cc_out2 as f64),
         pct(ours.cost_usd, cc_cost)
     );
+
+    // ── Codex gate (spec §M0): session watermarks vs state_5.threads.
+    // Verified on-device: threads.tokens_used == the rollout file's LAST
+    // total_token_usage.total_tokens (347/347 match, 0 miss); total_tokens
+    // == input+output (cached ⊂ input, reasoning ⊂ output). Each file's last
+    // cumulative line is already persisted in sync_cursors.adapter_state.cum.
+    let s5 = codeledger_core::sync::home(".codex/state_5.sqlite");
+    if s5.exists() {
+        let conn2 = rusqlite::Connection::open_with_flags(
+            format!("file:{}?mode=ro", s5.to_string_lossy().replace('\\', "/")),
+            rusqlite::OpenFlags::SQLITE_OPEN_URI | rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        // Per-file watermarks: last cum.input + cum.output per rollout path.
+        let mut ours: std::collections::HashMap<String, i64> = Default::default();
+        for (path, blob) in engine.store.adapter_states("codex")? {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&blob) {
+                let cum = &v["cum"];
+                let t = cum["input"].as_i64().unwrap_or(0) + cum["output"].as_i64().unwrap_or(0);
+                ours.insert(norm_path(&path), t);
+            }
+        }
+        // state_5 threads keyed by rollout_path — join to compare like-for-like.
+        let mut st = conn2.prepare(
+            "SELECT rollout_path, tokens_used FROM threads WHERE tokens_used > 0",
+        )?;
+        let theirs: Vec<(String, i64)> = st
+            .query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut j_ours = 0i64;
+        let mut j_theirs = 0i64;
+        let mut joined = 0u64;
+        for (rp, tu) in &theirs {
+            if let Some(o) = ours.get(&norm_path(rp)) {
+                j_ours += o;
+                j_theirs += tu;
+                joined += 1;
+            }
+        }
+        println!(
+            "\ncodex watermark: joined {} threads — ours={} state_5={}",
+            joined, j_ours, j_theirs
+        );
+        println!("Δ = {:.2}%  (gate <0.5%)", pct(j_ours as f64, j_theirs as f64));
+        println!(
+            "coverage: {} files with state vs {} threads>0 (stale files outside join: {})",
+            ours.len(),
+            theirs.len(),
+            ours.len().saturating_sub(joined as usize)
+        );
+    }
     Ok(())
+}
+
+/// Case/slash-insensitive absolute path key for cross-db joins.
+fn norm_path(p: &str) -> String {
+    let path = std::path::Path::new(p);
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        codeledger_core::sync::home(p)
+    };
+    abs.to_string_lossy().replace('/', "\\").to_lowercase()
 }

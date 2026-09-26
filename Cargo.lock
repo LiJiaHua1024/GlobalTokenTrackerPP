@@ -244,6 +244,7 @@ dependencies = [
  "codeledger-core",
  "jiff",
  "rusqlite",
+ "serde_json",
  "tabled",
  "tracing",
  "tracing-subscriber",

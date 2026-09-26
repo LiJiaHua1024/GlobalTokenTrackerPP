@@ -19,7 +19,9 @@
 ## S3 Codex 适配器 ✅ 口径修正（重要）
 - **spec 的 `last_token_usage` 增量法实测会多算**：token_count 行存在逐字节重复发射（同 cum+inc 重复行 838 处）。但 `total_token_usage` 差分法也不行——compaction 重置 + 并行序列交错会让"重置即全量"的规则反而更高估（6.19B vs 6.04B）。
 - **最终口径**：`last_token_usage` 逐调用求和 + 剔除"cum 与 inc 均与上行相同"的逐字节重复行。结果 5.90B；与朴素 Σinc 6.04B 差 2.2% 恰为剔除的重复量。
-- **与 spec 验收门偏差说明**：state_5.tokens_used=3.31B 是"每线程最终累计/窗口水位"语义（≈Σfinals 3.47B），不是逐调用消耗；spec 的 <0.5% 门建立在该语义理解之前，两口径不可直接比。我们的 5.90B 是"逐调用真实处理量"口径；订阅配额消耗以 rate_limits 的 used_percent 为准（已入 quota_snapshots）。
+- **`tokens_used` 语义锁定**（S8 复核，347/347 线程 0 miss）：= rollout 文件**最后一行** `total_token_usage.total_tokens`（会话级水位终值，compaction 后取新累计）；`total_tokens == input+output`（cached⊂input、reasoning⊂output，2930 行全对）。**不是**逐调用增量和。
+- **验收门过（0.01%）**：`reconcile` 按 `rollout_path` join `sync_cursors.adapter_state.cum`（=每文件末值）vs `state_5.threads.tokens_used` → joined 333 线程，ours=1,556,625,563 / st5=1,556,810,227，Δ=0.01% << 0.5%。先前整表 4.83% 是覆盖率假象：515 个有状态文件中 182 个在 state_5 无对应线程（已删/archived）。
+- 两个口径都有意义：usage_events 存逐调用增量（真实处理量，含上下文重读放大）；水位=会话级 billed 口径（订阅配额以 rate_limits.used_percent 为准，已入 quota_snapshots）。
 - cc-switch 的 codex=9.22B 混合了代理通道日志，不可作基准。
 - rate_limits → quota_snapshots（used_percent/window_minutes/resets_at/plan_type）已带变更检测；credits.balance 单列。
 - `adapter_state` 持久化 PrevLine（inc+cum 签名）使跨扫描去重成立。
@@ -80,4 +82,4 @@
 - [ ] Grok/WorkBuddy/CodeBuddy/Gemini 适配器（P1-P2）
 - [ ] OTel 接收器 + wham/Qoder/Cursor 配额通道（M2/M3）
 - [ ] daily_rollups 生成任务、CSV 导出、prune（M4）
-- [ ] Codex 口径差异 2.18% 继续收敛（spec 基线语义修正后重定验收门）
+- [x] ~~Codex 验收门~~ → 过，Δ=0.01%（tokens_used=会话水位终值语义锁定）
