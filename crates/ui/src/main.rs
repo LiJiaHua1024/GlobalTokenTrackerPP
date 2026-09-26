@@ -64,6 +64,8 @@ pub struct Shell {
     quota_at: Option<std::time::Instant>,
     /// Overview statistics window (persisted in ui.json).
     range: Range,
+    /// Checked tools for the stats filter; `None` = all (persisted in ui.json).
+    app_filter: Option<Vec<String>>,
 }
 
 pub enum Msg {
@@ -84,6 +86,8 @@ pub enum Msg {
     TrendLeave,
     /// Statistics range changed (label text from the selector).
     SetRange(String),
+    /// Tool checkbox toggled (app name, new checked state).
+    ToggleApp(String, bool),
     /// Background quota poll finished (rows written, channel errors).
     QuotaDone(usize, Vec<String>),
 }
@@ -111,7 +115,7 @@ fn db_path() -> PathBuf {
     default_db_path()
 }
 
-fn load_all(range: Range) -> Result<Snapshot, String> {
+fn load_all(range: Range, apps: Option<Vec<String>>) -> Result<Snapshot, String> {
     let store = Store::open(&db_path()).map_err(|e| e.to_string())?;
     let engine = Engine::new(store).map_err(|e| e.to_string())?;
     let t = std::time::Instant::now();
@@ -128,10 +132,13 @@ fn load_all(range: Range) -> Result<Snapshot, String> {
             Err(e) => diag!("[prices] refresh failed: {e}"),
         }
     }
-    let vm = engine.store.overview(range).map_err(|e| e.to_string())?;
+    let vm = engine
+        .store
+        .overview(range, apps.as_deref())
+        .map_err(|e| e.to_string())?;
     let d = engine
         .store
-        .detail(0, DETAIL_PAGE_SIZE)
+        .detail(0, DETAIL_PAGE_SIZE, apps.as_deref())
         .map_err(|e| e.to_string())?;
     let sources = engine.store.source_health().map_err(|e| e.to_string())?;
     let prices = engine.store.price_rows(5000).map_err(|e| e.to_string())?;
@@ -202,7 +209,8 @@ impl Component for Shell {
     fn create(_input: &(), context: &ComponentContext<Self>) -> Self {
         let config = UiConfig::load();
         let range = Range::from_key(&config.range);
-        context.spawn_background(move |_| match load_all(range) {
+        let app_filter = config.apps.clone();
+        context.spawn_background(move |_| match load_all(range, app_filter) {
             Ok(s) => Msg::Loaded(Box::new(s)),
             Err(e) => Msg::Failed(e),
         });
@@ -228,6 +236,7 @@ impl Component for Shell {
             scanning: true,
             pending_rescan: false,
             last_error: None,
+            app_filter: config.apps.clone(),
             config,
             range,
             theme,
@@ -289,6 +298,36 @@ impl Component for Shell {
                     self.start_scan(context);
                 }
             }
+            Msg::ToggleApp(app, on) => {
+                let all: Vec<String> = self
+                    .snap
+                    .as_ref()
+                    .map(|s| s.vm.apps.clone())
+                    .unwrap_or_default();
+                // Checked set: explicit filter, else every known tool.
+                let mut set: std::collections::BTreeSet<String> = self
+                    .app_filter
+                    .clone()
+                    .unwrap_or_else(|| all.to_vec())
+                    .into_iter()
+                    .collect();
+                if on {
+                    set.insert(app);
+                } else {
+                    set.remove(&app);
+                }
+                // Full coverage collapses back to None (no filter) so the
+                // persisted config stays clean.
+                self.app_filter = if all.iter().all(|a| set.contains(a)) {
+                    None
+                } else {
+                    Some(set.into_iter().collect())
+                };
+                self.config.apps = self.app_filter.clone();
+                self.config.save();
+                self.scanning = false;
+                self.start_scan(context);
+            }
             Msg::WatchFired => {
                 diag!("[watch] fired, scanning={}", self.scanning);
                 arm_watcher(context);
@@ -325,8 +364,11 @@ impl Component for Shell {
                 };
             }
             Msg::DetailPage(page) => {
+                let apps = self.app_filter.clone();
                 context.spawn_background(move |_| {
-                    match Store::open(&db_path()).and_then(|s| s.detail(page, DETAIL_PAGE_SIZE)) {
+                    match Store::open(&db_path())
+                        .and_then(|s| s.detail(page, DETAIL_PAGE_SIZE, apps.as_deref()))
+                    {
                         Ok(d) => Msg::DetailLoaded(d.rows, d.total_events, page),
                         Err(e) => Msg::Failed(e.to_string()),
                     }
@@ -388,14 +430,17 @@ impl Component for Shell {
         let content: View = match self.page {
             Page::Overview => overview_page(
                 snap,
-                self.scanning,
                 theme,
-                &self.config,
-                self.editing,
                 context,
-                &self.trend,
+                &OverviewArgs {
+                    scanning: self.scanning,
+                    config: &self.config,
+                    editing: self.editing,
+                    trend: &self.trend,
+                    app_filter: &self.app_filter,
+                },
             ),
-            Page::Detail => detail_page(snap, theme, context),
+            Page::Detail => detail_page(snap, theme, context, &self.app_filter),
             Page::Quota => quota_page(snap, theme),
             Page::Sources => sources_page(snap, theme),
             Page::Prices => prices_page(snap, theme),
@@ -483,7 +528,8 @@ impl Shell {
             diag!("[scan] start");
             self.scanning = true;
             let range = self.range;
-            context.spawn_background(move |_| match load_all(range) {
+            let apps = self.app_filter.clone();
+            context.spawn_background(move |_| match load_all(range, apps) {
                 Ok(s) => Msg::Loaded(Box::new(s)),
                 Err(e) => Msg::Failed(e),
             });

@@ -77,6 +77,9 @@ pub struct OverviewVm {
     /// Trend series for the selected range: ("YYYY-MM-DD"|"HH:00", tokens, cost).
     /// Today → hourly buckets; other ranges → per local day.
     pub daily: Vec<(String, u64, f64)>,
+    /// All tool names present in the ledger — the app-filter checkbox list
+    /// must show tools even when the filter excludes them.
+    pub apps: Vec<String>,
     pub quotas: Vec<QuotaRow>,
     pub unpriced: Vec<(String, u64)>,
     /// Local UTC offset "+HH:MM" for display.
@@ -105,15 +108,15 @@ fn day_start_ms(days_ago: i64) -> i64 {
 }
 
 impl Store {
-    pub fn overview(&self, range: Range) -> Result<OverviewVm> {
+    pub fn overview(&self, range: Range, apps: Option<&[String]>) -> Result<OverviewVm> {
         let t0 = day_start_ms(0);
         let start = range.start_ms();
         let tz = local_utc_offset();
         // Fold apps into one series per bucket for the trend strip.
         let raw = if range == Range::Today {
-            self.hourly(t0, &tz)?
+            self.hourly(t0, &tz, apps)?
         } else {
-            self.daily(start, None, &tz)?
+            self.daily(start, None, &tz, apps)?
         };
         let mut series: std::collections::BTreeMap<String, (u64, f64)> =
             std::collections::BTreeMap::new();
@@ -122,24 +125,30 @@ impl Store {
             e.0 += d.output_tokens + d.cache_read_tokens + d.input_tokens;
             e.1 += d.cost_usd;
         }
-        let span = self.totals(start, None)?;
+        let span = self.totals(start, None, apps)?;
         Ok(OverviewVm {
-            today: self.totals(Some(t0), None)?,
+            today: self.totals(Some(t0), None, apps)?,
             span,
-            all: self.totals(None, None)?,
+            all: self.totals(None, None, apps)?,
             range,
-            by_app: self.by_app(start, None)?,
+            by_app: self.by_app(start, None, apps)?,
             daily: series.into_iter().map(|(d, (t, c))| (d, t, c)).collect(),
+            apps: self.app_names()?,
             quotas: self.latest_quotas()?,
             unpriced: self.unpriced_models()?,
             tz_offset: tz,
         })
     }
 
-    pub fn detail(&self, page: i64, page_size: i64) -> Result<DetailVm> {
+    pub fn detail(
+        &self,
+        page: i64,
+        page_size: i64,
+        apps: Option<&[String]>,
+    ) -> Result<DetailVm> {
         Ok(DetailVm {
-            rows: self.events_page(page_size, page * page_size)?,
-            total_events: self.event_count()?,
+            rows: self.events_page(page_size, page * page_size, apps)?,
+            total_events: self.event_count(apps)?,
         })
     }
 }

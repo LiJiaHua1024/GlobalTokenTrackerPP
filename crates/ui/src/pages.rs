@@ -371,18 +371,62 @@ fn overview_widget(
     }
 }
 
+/// Tool-scope checkboxes — every app in the ledger gets a box; `filter`
+/// `None` = all checked. Unchecking everything yields an honest empty view.
+fn app_checks(
+    s: &Snapshot,
+    theme: &Theme,
+    filter: &Option<Vec<String>>,
+    ctx: &mut ViewContext<Shell>,
+) -> View {
+    let mut row: Vec<View> = vec![TextBlock::new()
+        .text("工具")
+        .font_size(theme.label_size)
+        .foreground(theme.subtle)
+        .vertical_alignment(VerticalAlignment::Center)
+        .into()];
+    for name in &s.vm.apps {
+        let checked = filter.as_ref().is_none_or(|f| f.contains(name));
+        let n = name.clone();
+        row.push(CheckBox::new()
+            .is_checked(checked)
+            .on_is_checked_changed(ctx.callback(move |on: bool| {
+                Msg::ToggleApp(n.clone(), on)
+            }))
+            .content(
+                TextBlock::new()
+                    .text(name.clone())
+                    .font_size(theme.body_size),
+            ));
+    }
+    StackPanel::new()
+        .orientation(Orientation::Horizontal)
+        .spacing(12.0)
+        .keyed_children(keyed(row))
+}
+
+/// Bundle for the overview page — keeps the signature under the arg limit
+/// and makes the shell→page handoff explicit.
+pub struct OverviewArgs<'a> {
+    pub scanning: bool,
+    pub config: &'a UiConfig,
+    pub editing: bool,
+    pub trend: &'a w::TrendHandle,
+    pub app_filter: &'a Option<Vec<String>>,
+}
+
 pub fn overview_page(
     snap: Option<&Snapshot>,
-    scanning: bool,
     theme: &Theme,
-    config: &UiConfig,
-    editing: bool,
     ctx: &mut ViewContext<Shell>,
-    trend: &w::TrendHandle,
+    args: &OverviewArgs,
 ) -> View {
+    let (config, editing, trend, app_filter) =
+        (args.config, args.editing, args.trend, args.app_filter);
     let Some(s) = snap else {
-        return loading(theme, scanning);
+        return loading(theme, args.scanning);
     };
+    let scanning = args.scanning;
 
     let registry = w::registry_ids();
     let order = config.order_for("overview", &registry);
@@ -407,11 +451,12 @@ pub fn overview_page(
             ],
         );
 
-    let mut col: Vec<View> = vec![header(
-        theme,
-        "总览",
-        vec![
-            range_sel,
+    let mut col: Vec<View> = vec![
+        header(
+            theme,
+            "总览",
+            vec![
+                range_sel,
             if scanning {
                 ProgressRing::new()
                     .is_indeterminate(true)
@@ -429,10 +474,12 @@ pub fn overview_page(
             Button::new()
                 .on_click(ctx.callback(|_| Msg::Rescan))
                 .content("刷新"),
-        ]
-        .into_iter()
-        .collect(),
-    )];
+            ]
+            .into_iter()
+            .collect(),
+        ),
+        app_checks(s, theme, app_filter, ctx),
+    ];
 
     for id in order.iter() {
         let id_static: &'static str = match registry.iter().find(|r| **r == id) {
@@ -595,7 +642,12 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
-pub fn detail_page(snap: Option<&Snapshot>, theme: &Theme, ctx: &mut ViewContext<Shell>) -> View {
+pub fn detail_page(
+    snap: Option<&Snapshot>,
+    theme: &Theme,
+    ctx: &mut ViewContext<Shell>,
+    app_filter: &Option<Vec<String>>,
+) -> View {
     let Some(s) = snap else {
         return loading(theme, true);
     };
@@ -650,6 +702,7 @@ pub fn detail_page(snap: Option<&Snapshot>, theme: &Theme, ctx: &mut ViewContext
                         .spacing(8.0)
                         .keyed_children(keyed(nav))],
                 ),
+                app_checks(s, theme, app_filter, ctx),
                 w::card(
                     theme,
                     vstack(

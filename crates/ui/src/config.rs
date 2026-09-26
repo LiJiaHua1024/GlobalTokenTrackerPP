@@ -14,6 +14,9 @@ pub struct UiConfig {
     pub theme: ThemeConfig,
     /// Overview statistics range key: today|week|month|all ("" = week).
     pub range: String,
+    /// Checked tool names for the app filter; `None`/absent = all tools.
+    /// `Some(empty)` = user unchecked everything (an honest empty view).
+    pub apps: Option<Vec<String>>,
     /// page name → layout
     pub pages: BTreeMap<String, PageLayout>,
 }

@@ -317,7 +317,7 @@ mod tests {
             .prune_events(BOUNDARY_MS + 86_400_000 * 90)
             .unwrap();
         assert_eq!(pruned, 1);
-        assert_eq!(s.event_count().unwrap(), 1);
+        assert_eq!(s.event_count(None).unwrap(), 1);
         // Both rollup rows survive — the pruned day's aggregate included.
         let kept: i64 = s
             .conn()
@@ -335,10 +335,41 @@ mod tests {
             .unwrap();
         s.upsert_event(&ev_ts("h3", 1_736_937_000_000 + 3_000_000))
             .unwrap();
-        let rows = s.hourly(0, "+00:00").unwrap();
+        let rows = s.hourly(0, "+00:00", None).unwrap();
         let labels: Vec<&str> = rows.iter().map(|r| r.date.as_str()).collect();
         // h1+h2 fold into one 10:00 bucket; h3 lands in 11:00.
         assert_eq!(labels, ["10:00", "11:00"]);
         assert_eq!(rows[0].events, 2);
+    }
+
+    #[test]
+    fn app_filter_scopes_queries() {
+        let s = Store::open_memory().unwrap();
+        let mut a = ev_ts("a1", BOUNDARY_MS);
+        a.app = "claude".into();
+        let mut b = ev_ts("b1", BOUNDARY_MS);
+        b.app = "codex".into();
+        s.upsert_event(&a).unwrap();
+        s.upsert_event(&b).unwrap();
+        let only = |name: &str| vec![name.to_string()];
+        // None = all; Some(subset) scopes; Some(empty) = nothing.
+        assert_eq!(s.event_count(None).unwrap(), 2);
+        assert_eq!(s.event_count(Some(only("claude").as_slice())).unwrap(), 1);
+        assert_eq!(s.event_count(Some(&[])).unwrap(), 0);
+        let t = s.totals(None, None, Some(only("codex").as_slice())).unwrap();
+        assert_eq!(t.events, 1);
+        assert_eq!(
+            s.by_app(None, None, Some(only("claude").as_slice()))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            s.app_names().unwrap(),
+            vec!["claude".to_string(), "codex".to_string()]
+        );
+        let rows = s.events_page(10, 0, Some(only("codex").as_slice())).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].app, "codex");
     }
 }

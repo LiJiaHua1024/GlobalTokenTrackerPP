@@ -215,3 +215,12 @@
 - **实现**：`DETAIL_COLS`（8 列固定 px + 模型 Star 吃余量）逐行 Grid，同定义保证跨行对齐；表头行（subtle+semi-bold+底分隔线）；斑马纹 `argb(10,128,128,128)` 淡灰（亮暗主题都成立）；行发丝底线走 `line_separators` 主题开关；整表收进一张 card。
 - **可读性细节**：数字列右对齐（输入/输出/缓存/成本/时长）；模型列淡化处理；成本后缀 `≈`估算/`↺`厂商回报保留，`unpriced` 警示徽章仍在成本列；行 tooltip 仍是 `raw_ref` 溯源。
 - **验证**：截图核对——200 行/页真实数据 8 列严格对齐；内存 149MB（明细页大数据集，基线 119MB）；18/18 测试、clippy 0。
+
+## S15 按工具勾选过滤统计范围 ✅
+
+- **需求**：统计不能只看总和，要能勾选只看某个/某些工具。
+- **core**：`scope_where(from,to,apps)` 统一 `WHERE` 拼装——`Option<&[String]>`：`None`=不过滤、`Some(list)`=`app IN (?,…)` 绑定参数（不拼字符串）、`Some(&[])`（全不勾）=`WHERE 0` 诚实空集。`totals/by_app/daily/hourly/events_page/event_count` 全挂过滤参数，新增 `app_names()`（checkbox 列表源，`by_app` 被过滤会吃掉候选名故单列）；`overview(range,apps)`/`detail(page,size,apps)` 透传，OverviewVm 新增 `apps` 全量工具名。
+- **UI**：总览页头部下 + 明细页各一行 `CheckBox`（reactor 0.100 原生控件），勾选状态存 `ui.json` 的 `apps` 字段（None=全选不落盘）；`Msg::ToggleApp` 重算过滤集合并走正常扫描链路刷新；卡片/趋势/按工具表/明细行全部收窄。
+- **语义**：全勾或缺省=全部；只勾 claude 后实测卡片 11,323 事件/4,996,899,992 tok/$2764 与按工具行精确一致；全不勾=空视图（不偷换为"全部"）。
+- **验证**：截图核对全选/单选两态；测试 +1（None/subset/empty 三态 + app_names + 分页过滤）19/19 绿；clippy 0。
+- **顺修**：panic 日志文件名 `cl_panic.log`→`gtt_panic.log`（改名遗漏）。
