@@ -76,10 +76,33 @@
 - 诊断：`CL_DEBUG=1` 才开 stderr 日志；`CL_NOTRAY` 跳过托盘安装。
 - ui.json 持久化已实测：覆写 accent=#a371f7 + 部件重排/隐藏，重启后精确生效（截图核对）。
 
+## P1 适配器扩展 ✅（Grok + WorkBuddy；Qoder 有意延后）
+
+- **Grok**（`adapters/grok.rs`）：`~/.grok/sessions/<urlenc-cwd>/<uuid>/updates.jsonl`，收 `method=session/update` + `sessionUpdate=turn_completed` 行；驼峰 usage 字段 + `costUsdTicks` → `CostSource::ProviderReported`（保留官方报账不双算）+ `apiDurationMs` → `duration_ms`；`timestamp` 为 epoch **秒**。项目名取目录段 `pct_decode`。
+  - 实测：7 文件 / 33 events / $11.2250 provider-reported；python 独立重算逐字节一致。
+  - 抓过一个 bug：needle `b"session/update"` 15B 却写死 `windows(16)` → 全跳过；改 `windows(needle.len())`。首次空扫已钉 EOF 游标 → 清游标重扫恢复。
+- **WorkBuddy**（`adapters/workbuddy.rs`）：`~/.workbuddy/projects/**/*.jsonl`（含嵌套子代理目录）+ `workbuddy.db`。
+  - JSONL 收 `providerData.rawUsage`：`prompt/completion/reasoning/cached_tokens` + `prompt_cache_hit_tokens`/`cache_read_input_tokens`/`cache_creation_input_tokens`/`prompt_cache_write_tokens` + `credit`（订阅额度，独立于 USD）。
+  - 去重键 `workbuddy:{messageId}`——本机验证 4819 个 messageId 全局唯一、0 重复。
+  - `session_usage` 表（session_id/used/size/credit_json）→ `QuotaSnapshot`（window_kind=`session_ctx`，account=None 取最新即"最近活跃会话水位"）。
+  - 实测：53 文件 / 4,819 events / 39 quota rows / credits Σ15000.46；python 抽验行数一致。
+  - 抓过一个 bug：`&[u8].contains(...)` 是元素查找不是子串匹配 → `windows(needle.len()).any(...)`。
+- **Qoder 延后**：`~/.qoder/logs/sessions/**/segments/*.jsonl` 86 文件全是生命周期记录（session.config/route/phase/hook），**本机无 token/credit 用量字段**；其 credit API 需 cookie 鉴权（本机无凭据）。为保 provenance 真实性不造假数据 → 挂到 M3 API/cookie 集成。
+
+## M4 聚合/导出/清理 ✅
+
+- **`rebuild_rollups(offset)`**：`daily_rollups` 全量重建，事务内 `DELETE+INSERT`（派生数据，幂等且时区变更自愈）；本地日期边界用与 `daily()` 相同的 `strftime('%Y-%m-%d', ts/1000,'unixepoch','{offset}')` 口径——offset 校验后内联（防注入）。
+- **自动联动**：`Engine::scan_once`/`scan_source` 末尾 `events_ingested>0` 才重建；rollup 失败仅 warn 不阻断扫描（派生数据可重建）。
+- **CLI 三命令**：`rollup`（重建+报告行数）、`export [span] --out`（16 列 CSV：本地 ISO 时间戳/模型/项目/五类 token/credits/cost_usd/cost_source/duration/raw_ref，字段级引号转义）、`prune --keep-days N [--vacuum]`（**先重建 rollup 再删明细**，聚合长期趋势不受明细清理影响；`--vacuum` 跑 wal_checkpoint+VACUUM）。
+- **测试**：+3（日期边界：23:30Z 事件在 +08:00 下滚入次日且旧日行被清、幂等两次重建行数一致、prune 保留 rollup）。
+- **真机验证**：rollup 180 行，与 `usage_events` 原始总量逐字段相等（52,797 ev / 1.67B in / 35.36M out / $7,311.96）；export 160 行 16 列 CSV python 解析无误；`prune --keep-days 36500` 链路跑通删 0 行（破坏性路径未对真库执行）。
+
 ## 待办（S9+）
 - [ ] 托盘"最小化到托盘"依赖 reactor 暴露 window hide 或 HWND（上游）
 - [ ] 趋势图升级 windows-canvas Direct2D
-- [ ] Grok/WorkBuddy/CodeBuddy/Gemini 适配器（P1-P2）
-- [ ] OTel 接收器 + wham/Qoder/Cursor 配额通道（M2/M3）
-- [ ] daily_rollups 生成任务、CSV 导出、prune（M4）
+- [ ] CodeBuddy/Gemini 适配器（本机无数据，待真实文件出现）
+- [ ] Qoder：cookie/API 通道（M3）
+- [ ] OTel 接收器 + wham/Cursor 配额通道（M2/M3）
+- [x] ~~Grok/WorkBuddy 适配器~~ → 过，真机数据逐字段复核
+- [x] ~~daily_rollups/CSV 导出/prune~~ → M4 完成
 - [x] ~~Codex 验收门~~ → 过，Δ=0.01%（tokens_used=会话水位终值语义锁定）

@@ -15,7 +15,9 @@ use std::path::PathBuf;
 
 pub mod claude;
 pub mod codex;
+pub mod grok;
 pub mod opencode;
+pub mod workbuddy;
 pub mod zcode;
 
 /// Coverage tier shown as a badge in the UI sources page (spec §9.4).
@@ -100,6 +102,8 @@ pub fn registry() -> Vec<Box<dyn SourceAdapter>> {
         Box::new(codex::Codex),
         Box::new(opencode::OpenCode),
         Box::new(zcode::ZCode),
+        Box::new(grok::Grok),
+        Box::new(workbuddy::WorkBuddy),
     ]
 }
 

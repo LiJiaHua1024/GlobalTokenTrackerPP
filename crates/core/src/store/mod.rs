@@ -219,4 +219,82 @@ mod tests {
         assert_eq!(ev("x", 0, None).completeness(), 1); // input only
         assert_eq!(ev("x", 1, Some(0.1)).completeness(), 3);
     }
+
+    // 2025-01-15T23:30:00Z — UTC date 15th, but +08:00 rolls to the 16th.
+    const BOUNDARY_MS: i64 = 1_736_983_800_000;
+
+    fn ev_ts(key: &str, ts_ms: i64) -> UsageEvent {
+        UsageEvent {
+            dedup_key: key.into(),
+            app: apps::CLAUDE.into(),
+            ts_start: Some(ts_ms),
+            input_tokens: 10,
+            output_tokens: 5,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rollups_respect_local_date_boundary() {
+        let s = Store::open_memory().unwrap();
+        s.upsert_event(&ev_ts("b1", BOUNDARY_MS)).unwrap();
+        s.upsert_event(&ev_ts("b2", BOUNDARY_MS + 3_600_000)).unwrap(); // 00:30Z
+        s.rebuild_rollups("+00:00").unwrap();
+        let (d15, d16): (i64, i64) = s
+            .conn()
+            .query_row(
+                "SELECT (SELECT events FROM daily_rollups WHERE date='2025-01-15'),
+                        (SELECT events FROM daily_rollups WHERE date='2025-01-16')",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((d15, d16), (1, 1)); // 23:30Z stays on 15th; 00:30Z lands 16th
+        // +08:00 pushes both events into the 16th — old-dated rows must go.
+        s.rebuild_rollups("+08:00").unwrap();
+        let (d16, leftover): (i64, i64) = s
+            .conn()
+            .query_row(
+                "SELECT (SELECT events FROM daily_rollups WHERE date='2025-01-16'),
+                        (SELECT COUNT(*) FROM daily_rollups WHERE date='2025-01-15')",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((d16, leftover), (2, 0));
+    }
+
+    #[test]
+    fn rollups_idempotent() {
+        let s = Store::open_memory().unwrap();
+        s.upsert_event(&ev_ts("r1", BOUNDARY_MS)).unwrap();
+        let n1 = s.rebuild_rollups("+00:00").unwrap();
+        let n2 = s.rebuild_rollups("+00:00").unwrap();
+        assert_eq!((n1, n2), (1, 1));
+        let total: i64 = s
+            .conn()
+            .query_row("SELECT SUM(events) FROM daily_rollups", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 1);
+    }
+
+    #[test]
+    fn prune_preserves_rollups() {
+        let s = Store::open_memory().unwrap();
+        s.upsert_event(&ev_ts("old", BOUNDARY_MS)).unwrap();
+        s.upsert_event(&ev_ts("new", BOUNDARY_MS + 86_400_000 * 200))
+            .unwrap();
+        s.rebuild_rollups("+00:00").unwrap();
+        let pruned = s
+            .prune_events(BOUNDARY_MS + 86_400_000 * 90)
+            .unwrap();
+        assert_eq!(pruned, 1);
+        assert_eq!(s.event_count().unwrap(), 1);
+        // Both rollup rows survive — the pruned day's aggregate included.
+        let kept: i64 = s
+            .conn()
+            .query_row("SELECT COUNT(*) FROM daily_rollups", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 2);
+    }
 }

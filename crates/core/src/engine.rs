@@ -5,6 +5,7 @@
 use crate::adapters::{self, ScanOutcome, SourceAdapter, SourceItem, SourceKind};
 use crate::pricing::PriceBook;
 use crate::store::{CursorAction, Store};
+use crate::viewmodel::local_utc_offset;
 use anyhow::Result;
 use rayon::prelude::*;
 use std::io::{Read, Seek, SeekFrom};
@@ -47,6 +48,7 @@ impl Engine {
             let r = self.scan_adapter(adapter.as_ref());
             merge(&mut report, r?);
         }
+        self.refresh_rollups(&report);
         Ok(report)
     }
 
@@ -57,7 +59,18 @@ impl Engine {
                 merge(&mut report, self.scan_adapter(adapter.as_ref())?);
             }
         }
+        self.refresh_rollups(&report);
         Ok(report)
+    }
+
+    /// Keep daily_rollups in sync — only when this pass ingested something.
+    /// Rollup failure must not fail the scan (derived data can be rebuilt).
+    fn refresh_rollups(&self, report: &ScanReport) {
+        if report.events_ingested > 0
+            && let Err(e) = self.store.rebuild_rollups(&local_utc_offset())
+        {
+            tracing::warn!("rollup rebuild failed: {e}");
+        }
     }
 
     fn scan_adapter(&self, adapter: &dyn SourceAdapter) -> Result<ScanReport> {

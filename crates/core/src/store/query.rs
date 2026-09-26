@@ -391,6 +391,91 @@ impl super::Store {
     }
 }
 
+impl super::Store {
+    /// Rebuild `daily_rollups` from raw events — idempotent full rebuild in
+    /// one transaction (derived data, so delete+insert also self-heals an
+    /// offset change), local-date aligned via `utc_offset`.
+    /// Returns rows written.
+    pub fn rebuild_rollups(&self, utc_offset: &str) -> Result<u64> {
+        let b = utc_offset.as_bytes();
+        anyhow::ensure!(
+            b.len() == 6
+                && matches!(b[0], b'+' | b'-')
+                && b[3] == b':'
+                && [1, 2, 4, 5].iter().all(|&i| b[i].is_ascii_digit()),
+            "invalid utc_offset: {utc_offset}"
+        );
+        let tx = self.conn().unchecked_transaction()?;
+        tx.execute("DELETE FROM daily_rollups", [])?;
+        let n = tx.execute(&format!(
+            "INSERT INTO daily_rollups
+             (date, app, provider, request_model, pricing_model, events,
+              input_tokens, output_tokens, reasoning_tokens, cache_read_tokens,
+              cache_write_5m, cache_write_1h, credits, cost_usd, active_ms)
+             SELECT strftime('%Y-%m-%d', ts_start/1000, 'unixepoch', '{utc_offset}'),
+                    app, COALESCE(provider_id,''), COALESCE(request_model,''),
+                    COALESCE(pricing_model,''), COUNT(*),
+                    COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+                    COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cache_read_tokens),0),
+                    COALESCE(SUM(cache_write_5m_tokens),0),
+                    COALESCE(SUM(cache_write_1h_tokens),0),
+                    SUM(credits), SUM(cost_usd), COALESCE(SUM(active_ms),0)
+             FROM usage_events
+             GROUP BY 1,2,3,4,5"
+        ), [])?;
+        tx.commit()?;
+        Ok(n as u64)
+    }
+
+    /// All detail rows in [from,to) oldest-first — the CSV export path.
+    pub fn export_rows(&self, from_ms: Option<i64>, to_ms: Option<i64>) -> Result<Vec<EventRow>> {
+        let (w, p) = time_where(from_ms, to_ms);
+        let mut st = self.conn().prepare(&format!(
+            "SELECT app, model, pricing_model, project, session_id, ts_start,
+                    input_tokens, output_tokens, reasoning_tokens,
+                    cache_read_tokens, cache_write_5m_tokens+cache_write_1h_tokens,
+                    credits, cost_usd, cost_source, duration_ms, raw_ref
+             FROM usage_events {w} ORDER BY ts_start"
+        ))?;
+        let rows = st.query_map(rusqlite::params_from_iter(p.iter()), |r| {
+            Ok(EventRow {
+                app: r.get(0)?,
+                model: r.get(1)?,
+                pricing_model: r.get(2)?,
+                project: r.get(3)?,
+                session_id: r.get(4)?,
+                ts_start: r.get(5)?,
+                input_tokens: r.get::<_, i64>(6)? as u64,
+                output_tokens: r.get::<_, i64>(7)? as u64,
+                reasoning_tokens: r.get::<_, i64>(8)? as u64,
+                cache_read_tokens: r.get::<_, i64>(9)? as u64,
+                cache_write_tokens: r.get::<_, i64>(10)? as u64,
+                credits: r.get(11)?,
+                cost_usd: r.get(12)?,
+                cost_source: r.get(13)?,
+                duration_ms: r.get(14)?,
+                raw_ref: r.get(15)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Drop raw events older than `before_ms`. Caller is expected to have run
+    /// `rebuild_rollups` first so long-term aggregates survive the prune.
+    pub fn prune_events(&self, before_ms: i64) -> Result<u64> {
+        let n = self
+            .conn()
+            .execute("DELETE FROM usage_events WHERE ts_start < ?1", params![before_ms])?;
+        Ok(n as u64)
+    }
+
+    /// Reclaim pages after a prune (blocks; run from CLI, not the UI scan path).
+    pub fn vacuum(&self) -> Result<()> {
+        self.conn().execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM")?;
+        Ok(())
+    }
+}
+
 /// Positional `?1/?2` params bound in order — never mix with other
 /// parameter styles in one statement.
 fn time_where(from_ms: Option<i64>, to_ms: Option<i64>) -> (String, Vec<rusqlite::types::Value>) {

@@ -33,6 +33,25 @@ enum Cmd {
     },
     /// List discovered source files per adapter.
     Sources,
+    /// Rebuild daily_rollups aggregates from raw events (idempotent).
+    Rollup,
+    /// Export detail rows to CSV (`all|today|week|month`).
+    Export {
+        #[arg(default_value = "all")]
+        span: String,
+        /// Output file; stdout when omitted.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+    },
+    /// Rebuild rollups, then drop raw events older than --keep-days.
+    Prune {
+        /// Detail retention in days.
+        #[arg(long, default_value_t = 90)]
+        keep_days: i64,
+        /// Reclaim file space afterwards.
+        #[arg(long)]
+        vacuum: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -75,6 +94,84 @@ fn main() -> Result<()> {
             println!("adapters: {}", engine.adapter_ids().join(", "));
             println!("events in ledger: {}", engine.store.event_count()?);
         }
+        Cmd::Rollup => {
+            let off = local_offset();
+            let n = engine.store.rebuild_rollups(&off)?;
+            println!("daily_rollups: {n} rows rebuilt (local offset {off})");
+        }
+        Cmd::Export { span, out } => export(&engine, &span, out.as_deref())?,
+        Cmd::Prune { keep_days, vacuum } => {
+            let n = engine.store.rebuild_rollups(&local_offset())?;
+            println!("daily_rollups: {n} rows rebuilt before prune");
+            let cutoff = jiff::Zoned::now()
+                .checked_sub(jiff::SignedDuration::from_hours(keep_days * 24))
+                .unwrap()
+                .timestamp()
+                .as_millisecond();
+            let d = engine.store.prune_events(cutoff)?;
+            println!("pruned {d} raw events older than {keep_days}d (rollups preserved)");
+            if vacuum {
+                engine.store.vacuum()?;
+                println!("vacuumed");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn csv_cell(out: &mut String, s: &str) {
+    if s.contains([',', '"', '\n']) {
+        out.push('"');
+        out.push_str(&s.replace('"', "\"\""));
+        out.push('"');
+    } else {
+        out.push_str(s);
+    }
+}
+
+fn export(engine: &Engine, span: &str, out: Option<&std::path::Path>) -> Result<()> {
+    let (f, t) = span_ms(span);
+    let rows = engine.store.export_rows(f, t)?;
+    let mut buf = String::from(
+        "ts,app,model,pricing_model,project,session,input,output,reasoning,cache_read,cache_write,credits,cost_usd,cost_source,duration_ms,raw_ref\n",
+    );
+    for r in &rows {
+        let ts = jiff::Timestamp::from_millisecond(r.ts_start.unwrap_or(0))?
+            .to_zoned(jiff::tz::TimeZone::system())
+            .strftime("%Y-%m-%dT%H:%M:%S%:z")
+            .to_string();
+        buf.push_str(&ts);
+        for cell in [
+            &r.app,
+            r.model.as_deref().unwrap_or(""),
+            r.pricing_model.as_deref().unwrap_or(""),
+            r.project.as_deref().unwrap_or(""),
+            r.session_id.as_deref().unwrap_or(""),
+        ] {
+            buf.push(',');
+            csv_cell(&mut buf, cell);
+        }
+        buf.push_str(&format!(
+            ",{},{},{},{},{},{},{},{},{},",
+            r.input_tokens,
+            r.output_tokens,
+            r.reasoning_tokens,
+            r.cache_read_tokens,
+            r.cache_write_tokens,
+            r.credits.map(|v| format!("{v:.4}")).unwrap_or_default(),
+            r.cost_usd.map(|v| format!("{v:.6}")).unwrap_or_default(),
+            r.cost_source.as_deref().unwrap_or(""),
+            r.duration_ms.map(|v| v.to_string()).unwrap_or_default()
+        ));
+        csv_cell(&mut buf, r.raw_ref.as_deref().unwrap_or(""));
+        buf.push('\n');
+    }
+    match out {
+        Some(p) => {
+            std::fs::write(p, &buf)?;
+            println!("exported {} rows -> {}", rows.len(), p.display());
+        }
+        None => print!("{buf}"),
     }
     Ok(())
 }
@@ -111,13 +208,8 @@ fn span_ms(span: &str) -> (Option<i64>, Option<i64>) {
     }
 }
 
-#[allow(dead_code)]
 fn local_offset() -> String {
-    let off = jiff::Zoned::now().offset();
-    let secs = off.seconds();
-    let sign = if secs < 0 { '-' } else { '+' };
-    let a = secs.abs();
-    format!("{sign}{:02}:{:02}", a / 3600, (a % 3600) / 60)
+    codeledger_core::viewmodel::local_utc_offset()
 }
 
 fn fmt_tok(n: u64) -> String {
