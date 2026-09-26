@@ -234,3 +234,9 @@
 - **关键坑（记录）**：注入输入（SendInput/SetCursorPos）对 WinUI3 `DesktopChildSiteBridge` 不产生 PointerMoved——无法用脚本做悬停端到端。另发现 `Background=null` 的 Border 不做命中测试，补 `Transparent` 背景（这是真实 bug 修复）。渲染链路用 `GTT_TIPTEST=<idx>` 环境变量强制弹窗截图验证（09-08 桶：197.3M tok/$238/586 事件/Top3 正确）。
 - **残留风险**：真实鼠标的 PointerMoved 走同一订阅/分发链（Button Click、SelectorBar 已实证该泵工作），置信度高但未能注入验证——发布前建议真机手动悬停一次确认。
 - **验证**：19/19 测试、clippy 0。
+
+## S15b 复查增补
+
+- **复查发现**：持久化过滤集可能残留已从账本消失的工具名（数据被清理后死名阻止 `Some`→`None` 塌缩）——`Msg::Loaded` 里加活数据交集清理，覆盖全部活工具时自动归零。
+- **逐项核过**：`scope_where` 占位符编号在 time/app/limit/offset 三段连续无错位；`app` 过滤命中既有 `idx_events_app(app, ts_start)` 索引；`load_all` 明细固定取第 0 页——过滤变化无越界页风险；`app_names` 保持无过滤（勾选框始终可见）；明细页也挂了同一行勾选器。
+- **验证**：19/19 测试、clippy 0、工作区无临时文件混入。

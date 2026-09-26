@@ -253,6 +253,19 @@ impl Component for Shell {
         match message {
             Msg::Loaded(s) => {
                 diag!("[scan] loaded, pending_rescan={}", self.pending_rescan);
+                // Tool names can vanish from the ledger (pruned data); keep the
+                // persisted filter honest — drop dead names and collapse back
+                // to None once it covers every live tool.
+                if let Some(f) = &mut self.app_filter {
+                    f.retain(|a| s.vm.apps.contains(a));
+                    if s.vm.apps.iter().all(|a| f.contains(a)) {
+                        self.app_filter = None;
+                    }
+                    if self.app_filter != self.config.apps {
+                        self.config.apps = self.app_filter.clone();
+                        self.config.save();
+                    }
+                }
                 self.snap = Some(*s);
                 self.last_error = None;
                 if let Some(tray) = &self.tray {
