@@ -175,3 +175,16 @@
 - **产出**：`installer/package.ps1` 一条命令：release 构建 → Compress-Archive 打 payload → 嵌包构建 → `dist\CodeLedger-Setup-<ver>-win-x64.exe`（**8.78MB**）+ SHA256。
 - **实测**：默认路径 install/uninstall 全链路、带空格 `--dir` 路径 install/uninstall（注册表串直接复用验证）、快捷方式/PATH/注册表落点逐项核对、CLI 安装后报表出真数据。
 - **边界**：WinAppRuntime 安装步骤本身可能弹 UAC（微软安装器行为，非我们可控）；`--quiet` 自动接受运行时安装；dev 桩 exe 拒绝安装并提示走 package.ps1。
+
+## 审计增量（S10+S11 后，2026-09-27 复测）
+
+| 指标 | 实测 | 判定 |
+|---|---|---|
+| 安装器体积 | `CodeLedger-Setup-0.1.0-win-x64.exe` 8.78MB（双 exe deflate 压缩） | ✅ |
+| 联网价目刷新 | 2.4s（dev 7750 行 + litellm 3635 行 + 落库 + reprice 扫描），仅 UI 启动时 24h 陈旧时后台跑 | ✅ 不阻塞首帧 |
+| UI 启动/内存 | release 正常起窗，121.7MB RSS 与上轮一致（刷新在 load_all 内非阻塞） | ✅ 无回归 |
+| 新增出站端点 | models.dev + raw.githubusercontent.com（固定 HTTPS，ureq/rustls） | ✅ |
+| 卸载完整性 | 自删目录含运行中 exe（raw_arg/cmd 延迟 rmdir）、注册表/PATH/快捷方式全清、带空格路径验证过 | ✅ |
+| 供应链 | zip 8.6.0（2026-04-25）/ winreg 0.55 / ureq 3.4.2，均远超 7 天沉淀 | ✅ |
+| 测试 | 15/15 绿，clippy 全工作区 0 警告 | ✅ |
+
