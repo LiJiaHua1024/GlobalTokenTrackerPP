@@ -1,0 +1,14 @@
+[package]
+name = "codeledger-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+codeledger-core = { version = "0.1.0", path = "../core" }
+jiff = "0.2.37"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+tabled = "0.22.0"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

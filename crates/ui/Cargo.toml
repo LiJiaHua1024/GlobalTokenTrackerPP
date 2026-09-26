@@ -1,0 +1,10 @@
+[package]
+name = "codeledger-ui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+codeledger-core = { version = "0.1.0", path = "../core" }
+tray-icon = "0.25.1"
+windows-canvas = "0.100.0"
+windows-reactor = "=0.100.0"
