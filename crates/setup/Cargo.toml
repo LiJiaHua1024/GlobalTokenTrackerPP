@@ -1,0 +1,18 @@
+[package]
+name = "codeledger-setup"
+version.workspace = true
+edition.workspace = true
+description = "CodeLedger self-extracting installer (per-user, no admin)"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "codeledger-setup"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+ureq = "3.4.2"
+winreg = "0.55"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
