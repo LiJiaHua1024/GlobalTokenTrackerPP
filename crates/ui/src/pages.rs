@@ -726,7 +726,17 @@ pub fn prices_page(snap: Option<&Snapshot>, theme: &Theme) -> View {
             vec![
                 header(theme, "价目表（$/1M tokens）", vec![]),
                 TextBlock::new()
-                    .text(format!("{} 个模型 · 前 400 条", s.prices.len()))
+                    .text(format!(
+                        "{} 个模型 · 前 400 条 · {}",
+                        s.prices.len(),
+                        match s.prices_synced_at {
+                            Some(t) => format!(
+                                "联网同步于 {} 小时前",
+                                (codeledger_core::store::now_ms() - t) / 3_600_000
+                            ),
+                            None => "仅本地种子，尚未联网同步".to_string(),
+                        }
+                    ))
                     .font_size(theme.body_size)
                     .foreground(theme.subtle)
                     .into(),

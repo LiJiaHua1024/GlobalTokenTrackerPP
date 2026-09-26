@@ -236,7 +236,7 @@ mod tests {
         // Same point pushed twice with a higher value → one row, latest wins.
         let _ = ingest_metrics(PAYLOAD.as_bytes(), &db).unwrap();
         let _ = ingest_metrics(
-            &PAYLOAD.replace("1.5", "2.75").as_bytes().to_vec(),
+            PAYLOAD.replace("1.5", "2.75").as_bytes(),
             &db,
         )
         .unwrap();

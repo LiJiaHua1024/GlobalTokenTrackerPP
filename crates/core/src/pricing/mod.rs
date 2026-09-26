@@ -7,9 +7,11 @@
 mod seed;
 
 use crate::model::{CostSource, UsageEvent};
-use crate::store::Store;
-use anyhow::Result;
+use crate::store::{Store, now_ms};
+use anyhow::{Context, Result};
+use serde_json::Value;
 use std::collections::HashMap;
+use std::time::Duration;
 
 /// USD per **1M** tokens (models.dev convention; LiteLLM rows are converted
 /// from $/token at import).
@@ -52,10 +54,13 @@ impl PriceBook {
         seed::ensure_seeded(store)?;
         let mut map = HashMap::new();
         // Seed rows load first; live-synced sources overwrite on key collision.
+        // Precedence on key collision: seed < litellm < models.dev (live).
         let mut st = store.conn().prepare(
             "SELECT model_id, input, output, cache_read, cache_write,
                     tier_above_200k_input, tier_1h_cache_write, tier_batch
-             FROM prices ORDER BY CASE source WHEN 'seed' THEN 0 ELSE 1 END",
+             FROM prices
+             ORDER BY CASE source
+                 WHEN 'seed' THEN 0 WHEN 'litellm' THEN 1 ELSE 2 END",
         )?;
         for r in st.query_map([], |r| {
             Ok((
@@ -175,6 +180,212 @@ impl PriceBook {
     fn lookup(&self, cand: &str, _provider: Option<&str>) -> Option<Price> {
         self.map.get(cand).copied()
     }
+}
+
+// ── Live price refresh (network) ──────────────────────────────────────────
+
+const MODELS_DEV_URL: &str = "https://models.dev/api.json";
+const LITELLM_URL: &str =
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
+/// Auto-refresh cadence for the UI path.
+pub const PRICE_TTL_SECS: i64 = 24 * 3600;
+
+pub struct RefreshReport {
+    pub models_dev: usize,
+    pub litellm: usize,
+    /// Formerly-unpriced events that gained a price after the refresh.
+    pub repriced: u64,
+}
+
+/// Newest `fetched_at` among live (non-seed) sources; `None` = never synced.
+pub fn last_live_sync(store: &Store) -> Result<Option<i64>> {
+    let t: Option<i64> = store.conn().query_row(
+        "SELECT MAX(fetched_at) FROM prices WHERE source != 'seed'",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(t)
+}
+
+pub fn prices_stale(store: &Store) -> Result<bool> {
+    Ok(last_live_sync(store)?.is_none_or(|t| {
+        (now_ms() - t) / 1000 > PRICE_TTL_SECS
+    }))
+}
+
+fn http_get(url: &str) -> Result<String> {
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(60)))
+        .build()
+        .new_agent();
+    let mut resp = agent
+        .get(url)
+        .header("User-Agent", "CodeLedger")
+        .call()
+        .with_context(|| format!("GET {url}"))?;
+    Ok(resp.body_mut().read_to_string()?)
+}
+
+/// Fetch models.dev + LiteLLM price maps, upsert into `prices`, then reprice
+/// any event still marked `unpriced` so newly-covered models gain estimates.
+/// Offline/failed fetch leaves the existing book untouched (seed fallback).
+pub fn refresh(store: &Store) -> Result<RefreshReport> {
+    let now = now_ms();
+    let mut report = RefreshReport {
+        models_dev: 0,
+        litellm: 0,
+        repriced: 0,
+    };
+    // Each source is independent: a single outage must not block the other.
+    // Both failing → Err, book untouched.
+    let mut errs = Vec::new();
+    let md = match http_get(MODELS_DEV_URL) {
+        Ok(b) => match serde_json::from_str::<Value>(&b) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                errs.push(format!("models.dev parse: {e}"));
+                None
+            }
+        },
+        Err(e) => {
+            errs.push(format!("models.dev fetch: {e}"));
+            None
+        }
+    };
+    let ll_body = match http_get(LITELLM_URL) {
+        Ok(b) => Some(b),
+        Err(e) => {
+            errs.push(format!("litellm fetch: {e}"));
+            None
+        }
+    };
+    if md.is_none() && ll_body.is_none() {
+        anyhow::bail!("all price sources failed: {}", errs.join("; "));
+    }
+    let tx = store.conn().unchecked_transaction()?;
+
+    // models.dev: {provider: {models: {id: {cost: {input,output,cache_read,cache_write}}}}}
+    if let Some(md) = md {
+        let mut st = tx.prepare(
+            "INSERT OR REPLACE INTO prices(provider, model_id, input, output, cache_read, cache_write, source, fetched_at)
+             VALUES ('models.dev', ?1, ?2, ?3, ?4, ?5, 'models.dev', ?6)",
+        )?;
+        for prov in md.as_object().into_iter().flatten() {
+            for (id, m) in prov.1["models"].as_object().into_iter().flatten() {
+                let c = &m["cost"];
+                if !c.is_object() {
+                    continue;
+                }
+                let f = |k: &str| c[k].as_f64().unwrap_or(0.0);
+                st.execute(rusqlite::params![
+                    normalize_key(id),
+                    f("input"),
+                    f("output"),
+                    f("cache_read"),
+                    f("cache_write"),
+                    now
+                ])?;
+                report.models_dev += 1;
+            }
+        }
+    }
+
+    // LiteLLM: {model: {input_cost_per_token, output_cost_per_token,
+    //   cache_read_input_token_cost, cache_creation_input_token_cost,
+    //   input_cost_per_token_above_200k_tokens,
+    //   cache_creation_input_token_cost_above_1hr,
+    //   input_cost_per_token_batches}} — all $/token → ×1e6 to $/1M.
+    if let Some(body) = ll_body
+        && let Ok(ll) = serde_json::from_str::<Value>(&body)
+    {
+        let mut st = tx.prepare(
+            "INSERT OR REPLACE INTO prices(provider, model_id, input, output, cache_read, cache_write,
+                    tier_above_200k_input, tier_1h_cache_write, tier_batch, source, fetched_at)
+             VALUES ('litellm', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'litellm', ?9)",
+        )?;
+        let m = |v: &Value, k: &str| v[k].as_f64().map(|x| x * 1e6);
+        for (id, v) in ll.as_object().into_iter().flatten() {
+            if !v["input_cost_per_token"].is_number() {
+                continue; // skip spec entries ("sample_spec", defaults)
+            }
+            st.execute(rusqlite::params![
+                normalize_key(id),
+                m(v, "input_cost_per_token").unwrap_or(0.0),
+                m(v, "output_cost_per_token").unwrap_or(0.0),
+                m(v, "cache_read_input_token_cost").unwrap_or(0.0),
+                m(v, "cache_creation_input_token_cost").unwrap_or(0.0),
+                m(v, "input_cost_per_token_above_200k_tokens"),
+                m(v, "cache_creation_input_token_cost_above_1hr"),
+                m(v, "input_cost_per_token_batches"),
+                now
+            ])?;
+            report.litellm += 1;
+        }
+    }
+    tx.commit()?;
+
+    // Re-price events that were unpriced at ingest — a grown price book may
+    // now cover them.
+    let book = PriceBook::load(store)?;
+    report.repriced = reprice_unpriced(store, &book)?;
+    Ok(report)
+}
+
+/// Re-resolve `unpriced` events against the current book. Bounded by the
+/// unpriced count; one transaction.
+pub fn reprice_unpriced(store: &Store, book: &PriceBook) -> Result<u64> {
+    let mut st = store.conn().prepare(
+        "SELECT rowid, model, request_model, provider_id,
+                input_tokens, output_tokens, reasoning_tokens,
+                cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens
+         FROM usage_events WHERE cost_source='unpriced'",
+    )?;
+    let rows: Vec<(i64, UsageEvent)> = st
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                UsageEvent {
+                    model: r.get(1)?,
+                    request_model: r.get(2)?,
+                    provider_id: r.get(3)?,
+                    input_tokens: r.get::<_, i64>(4)? as u64,
+                    output_tokens: r.get::<_, i64>(5)? as u64,
+                    reasoning_tokens: r.get::<_, i64>(6)? as u64,
+                    cache_read_tokens: r.get::<_, i64>(7)? as u64,
+                    cache_write_5m_tokens: r.get::<_, i64>(8)? as u64,
+                    cache_write_1h_tokens: r.get::<_, i64>(9)? as u64,
+                    ..Default::default()
+                },
+            ))
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+    drop(st);
+    let tx = store.conn().unchecked_transaction()?;
+    let mut n = 0u64;
+    {
+        let mut up = tx.prepare(
+            "UPDATE usage_events SET cost_usd=?1, cost_source=?2, pricing_model=?3 WHERE rowid=?4",
+        )?;
+        for (rowid, ev) in &rows {
+            if let Resolution::Priced(key, via, p) =
+                book.resolve(ev.model.as_deref().unwrap_or(""), ev.request_model.as_deref(), ev.provider_id.as_deref())
+            {
+                up.execute(rusqlite::params![
+                    compute(ev, &p),
+                    if via == "prefix" || ev.model.as_deref() == Some("auto") {
+                        "estimated"
+                    } else {
+                        "computed"
+                    },
+                    key,
+                    rowid
+                ])?;
+                n += 1;
+            }
+        }
+    }
+    tx.commit()?;
+    Ok(n)
 }
 
 /// Stage 1 normalization (spec §7.2.1): last `/` segment, drop `:` suffix,
@@ -322,5 +533,100 @@ mod tests {
             ..Default::default()
         };
         assert!((compute(&ev, &p) - 18.0).abs() < 1e-6);
+    }
+
+    fn unpriced_ev(key: &str, model: &str) -> UsageEvent {
+        UsageEvent {
+            dedup_key: key.into(),
+            app: crate::model::apps::CLAUDE.into(),
+            model: Some(model.into()),
+            input_tokens: 1000,
+            output_tokens: 500,
+            cost_usd: Some(0.0),
+            cost_source: Some(CostSource::Unpriced),
+            ..Default::default()
+        }
+    }
+
+    fn put_price(s: &Store, source: &str, model: &str, input: f64, output: f64) {
+        s.conn()
+            .execute(
+                "INSERT OR REPLACE INTO prices(provider, model_id, input, output, source, fetched_at)
+                 VALUES (?1, ?2, ?3, ?4, ?1, ?5)",
+                rusqlite::params![source, model, input, output, now_ms()],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn reprice_backfills_unpriced_events() {
+        let s = Store::open_memory().unwrap();
+        s.upsert_event(&unpriced_ev("u1", "brand-new-model")).unwrap();
+        s.upsert_event(&unpriced_ev("u2", "still-unknown")).unwrap();
+        // A new live price arrives for u1 only.
+        put_price(&s, "models.dev", "brand-new-model", 2.0, 10.0);
+        let book = PriceBook::load(&s).unwrap();
+        assert_eq!(reprice_unpriced(&s, &book).unwrap(), 1);
+        let (cost, src, pm): (f64, String, String) = s
+            .conn()
+            .query_row(
+                "SELECT cost_usd, cost_source, pricing_model FROM usage_events WHERE dedup_key='u1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert!((cost - 0.007).abs() < 1e-9, "{cost}"); // 1000*2 + 500*10 (per 1M)
+        assert_eq!(src, "computed");
+        assert_eq!(pm, "brand-new-model");
+        // u2 stays unpriced — never guess.
+        let src2: String = s
+            .conn()
+            .query_row(
+                "SELECT cost_source FROM usage_events WHERE dedup_key='u2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(src2, "unpriced");
+    }
+
+    #[test]
+    fn override_beats_live_and_live_beats_seed() {
+        let s = Store::open_memory().unwrap();
+        put_price(&s, "seed", "m-x", 1.0, 1.0);
+        put_price(&s, "litellm", "m-x", 3.0, 3.0);
+        put_price(&s, "models.dev", "m-x", 5.0, 5.0);
+        s.conn()
+            .execute(
+                "INSERT INTO price_overrides(model_key, input, output, cache_read, cache_write, updated_at)
+                 VALUES ('m-y', 9.0, 9.0, 0, 0, 0)",
+                [],
+            )
+            .unwrap();
+        put_price(&s, "models.dev", "m-y", 1.0, 1.0);
+        let book = PriceBook::load(&s).unwrap();
+        match book.resolve("m-x", None, None) {
+            Resolution::Priced(_, _, p) => assert_eq!(p.input, 5.0), // dev over seed+litellm
+            _ => panic!("m-x should be priced"),
+        }
+        match book.resolve("m-y", None, None) {
+            Resolution::Priced(_, via, p) => {
+                assert_eq!(via, "override");
+                assert_eq!(p.input, 9.0);
+            }
+            _ => panic!("m-y should hit override"),
+        }
+    }
+
+    #[test]
+    fn staleness_flags_seed_only_book() {
+        let s = Store::open_memory().unwrap();
+        assert!(prices_stale(&s).unwrap()); // no live rows
+        put_price(&s, "models.dev", "m-z", 1.0, 1.0);
+        assert!(!prices_stale(&s).unwrap());
+        // Repricing is idempotent: second run finds nothing new.
+        s.upsert_event(&unpriced_ev("i1", "nope-model")).unwrap();
+        let book = PriceBook::load(&s).unwrap();
+        assert_eq!(reprice_unpriced(&s, &book).unwrap(), 0);
     }
 }

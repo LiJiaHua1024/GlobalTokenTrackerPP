@@ -25,6 +25,8 @@ pub struct Snapshot {
     pub detail: DetailBundle,
     pub sources: Vec<SourceHealth>,
     pub prices: Vec<PriceRow>,
+    /// `prices` live-source sync timestamp (ms); `None` = seed only.
+    pub prices_synced_at: Option<i64>,
     pub scan_ms: u128,
 }
 
@@ -110,6 +112,17 @@ fn load_all() -> Result<Snapshot, String> {
     let t = std::time::Instant::now();
     let _ = engine.scan_once().map_err(|e| e.to_string());
     let scan_ms = t.elapsed().as_millis();
+    // Price book self-heals: stale >24h → pull models.dev+LiteLLM, reprice
+    // unpriced events. Network failure keeps the current book untouched.
+    if codeledger_core::pricing::prices_stale(&engine.store).unwrap_or(false) {
+        match codeledger_core::pricing::refresh(&engine.store) {
+            Ok(r) => diag!(
+                "[prices] synced: dev={} litellm={} repriced={}",
+                r.models_dev, r.litellm, r.repriced
+            ),
+            Err(e) => diag!("[prices] refresh failed: {e}"),
+        }
+    }
     let vm = engine.store.overview().map_err(|e| e.to_string())?;
     let d = engine
         .store
@@ -117,6 +130,8 @@ fn load_all() -> Result<Snapshot, String> {
         .map_err(|e| e.to_string())?;
     let sources = engine.store.source_health().map_err(|e| e.to_string())?;
     let prices = engine.store.price_rows(5000).map_err(|e| e.to_string())?;
+    let prices_synced_at =
+        codeledger_core::pricing::last_live_sync(&engine.store).unwrap_or(None);
     Ok(Snapshot {
         vm,
         detail: DetailBundle {
@@ -126,6 +141,7 @@ fn load_all() -> Result<Snapshot, String> {
         },
         sources,
         prices,
+        prices_synced_at,
         scan_ms,
     })
 }

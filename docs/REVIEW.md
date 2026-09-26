@@ -148,3 +148,17 @@
 - [x] ~~Grok/WorkBuddy 适配器~~ → 过，真机数据逐字段复核
 - [x] ~~daily_rollups/CSV 导出/prune~~ → M4 完成
 - [x] ~~Codex 验收门~~ → 过，Δ=0.01%（tokens_used=会话水位终值语义锁定）
+
+## S10 联网价目同步 ✅
+
+- **需求**：价目表此前只有内置种子，不能联网更新——改为双源拉取 + 自愈回填。
+- **实现**（`pricing/mod.rs`）：
+  - `refresh()`：models.dev `api.json` + LiteLLM `model_prices_and_context_window.json` 两源**独立容错**——单源挂不影响另一源，双挂才报 Err 且库表不动；单事务落库。
+  - `prices(provider,model_id)` PK 按 source 分槽（dev/litellm 行互不覆盖）；`load()` 读取侧 `ORDER BY CASE source seed<litellm<dev` 保证 dev 官方价压过 litellm 变体价与种子。
+  - LiteLLM 的 `$ /token` 统一 ×1e6 转 $/1M；tier 三列（>200k 输入/1h 缓存写/批折扣）落库，与 `compute()` 的长上下文/缓存写路径衔接。
+  - `fetched_at` 记同步时刻；`prices_stale()` 24h TTL。
+  - `reprice_unpriced()`：刷新后回填 cost_source='unpriced' 的历史事件——新模型入库自动获得估算价；`auto` 模型与 prefix 命中保持 `estimated` 语义；无价模型（gpt-reserve/codex-auto-review/自定义名）正确保持 unpriced，绝不猜价。
+- **接线**：UI `load_all` 扫描后检查 24h 陈旧自动刷新（不阻塞首帧，失败仅 diag）；CLI `prices [--update]` 查新鲜度/手动同步；价格页头部显示"联网同步于 X 小时前 / 仅本地种子"。
+- **实测**：真联网 models.dev 7750 行（PK 归并后 2089）+ litellm 3623 行（1952），reprice 0（本机 5389 unpriced 全是内部/自定义模型，符合预期）；UI 截图确认新鲜度行与 source 列混合展示。
+- **测试**：+3（reprice 回填、override>dev>litellm>seed 优先级、陈旧判断+幂等）；15/15 绿，clippy 0。
+- **已知分歧**：gpt-5.5 dev $5/$30 vs litellm $2.5/$15（litellm 含 azure/codex 变体价）——dev 优先策略已锁定。

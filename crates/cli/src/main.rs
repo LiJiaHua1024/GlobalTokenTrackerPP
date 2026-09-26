@@ -49,6 +49,12 @@ enum Cmd {
     OtelSetup,
     /// Poll vendor quota channels (codex wham / cursor RPC) once.
     Quota,
+    /// Price book: show freshness; --update pulls models.dev + LiteLLM and
+    /// reprices events still marked unpriced.
+    Prices {
+        #[arg(long)]
+        update: bool,
+    },
     /// Rebuild rollups, then drop raw events older than --keep-days.
     Prune {
         /// Detail retention in days.
@@ -110,6 +116,24 @@ fn main() -> Result<()> {
         Cmd::OtelSetup => {
             let p = codeledger_core::otel::install_claude_env()?;
             println!("OTEL env merged into {}", p.display());
+        }
+        Cmd::Prices { update } => {
+            use codeledger_core::pricing;
+            let last = pricing::last_live_sync(&engine.store)?;
+            match last {
+                Some(t) => {
+                    let age_h = (codeledger_core::store::now_ms() - t) / 3_600_000;
+                    println!("live price book: synced {age_h}h ago (stale>{})", pricing::PRICE_TTL_SECS / 3600);
+                }
+                None => println!("live price book: never synced (seed fallback active)"),
+            }
+            if update {
+                let r = pricing::refresh(&engine.store)?;
+                println!(
+                    "synced: models.dev {} rows, litellm {} rows; repriced {} unpriced events",
+                    r.models_dev, r.litellm, r.repriced
+                );
+            }
         }
         Cmd::Quota => {
             for o in codeledger_core::quota::poll_all() {
