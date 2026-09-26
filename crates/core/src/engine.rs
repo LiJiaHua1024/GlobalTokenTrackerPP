@@ -8,7 +8,7 @@ use crate::store::{CursorAction, Store};
 use anyhow::Result;
 use rayon::prelude::*;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, warn};
 
@@ -212,6 +212,20 @@ impl Engine {
                 Err(e) => report.errors.push(format!("{adapter_id} quota: {e:#}")),
             }
         }
+    }
+
+    /// Directories a live watcher should subscribe to — union of adapter roots,
+    /// deduped, limited to dirs that currently exist.
+    pub fn watch_roots(&self) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = Vec::new();
+        for a in &self.adapters {
+            for r in a.watch_roots() {
+                if r.is_dir() && !out.contains(&r) {
+                    out.push(r);
+                }
+            }
+        }
+        out
     }
 
     pub fn adapter_ids(&self) -> Vec<&'static str> {

@@ -8,6 +8,7 @@ use crate::model::{CostSource, Provenance, UsageEvent, apps};
 use crate::store::Store;
 use anyhow::Result;
 use rusqlite::{Connection, OpenFlags};
+use std::path::PathBuf;
 
 pub struct OpenCode;
 
@@ -20,6 +21,10 @@ impl SourceAdapter for OpenCode {
     }
     fn capability(&self) -> Capability {
         Capability::Precise
+    }
+
+    fn watch_roots(&self) -> Vec<PathBuf> {
+        vec![crate::sync::home(".local/share/opencode")]
     }
 
     fn discover(&self) -> Result<Vec<SourceItem>> {

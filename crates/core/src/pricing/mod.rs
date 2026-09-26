@@ -316,9 +316,11 @@ mod tests {
             cache_write: 3.75,
             ..Default::default()
         };
-        let mut ev = UsageEvent::default();
-        ev.input_tokens = 1_000_000;
-        ev.output_tokens = 1_000_000;
+        let ev = UsageEvent {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            ..Default::default()
+        };
         assert!((compute(&ev, &p) - 18.0).abs() < 1e-6);
     }
 }

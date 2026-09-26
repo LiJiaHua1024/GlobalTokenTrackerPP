@@ -8,6 +8,7 @@ use super::{Capability, ScanOutcome, SourceAdapter, SourceItem, SourceKind};
 use crate::model::{Provenance, UsageEvent, apps};
 use crate::store::Store;
 use anyhow::Result;
+use std::path::PathBuf;
 
 /// Providers whose usage is already ingested by their own adapters (§6.4).
 const CROSS_PROVIDERS: &[&str] = &["anthropic", "openai", "google"];
@@ -23,6 +24,10 @@ impl SourceAdapter for ZCode {
     }
     fn capability(&self) -> Capability {
         Capability::Precise
+    }
+
+    fn watch_roots(&self) -> Vec<PathBuf> {
+        vec![crate::sync::home(".zcode/cli/db")]
     }
 
     fn discover(&self) -> Result<Vec<SourceItem>> {

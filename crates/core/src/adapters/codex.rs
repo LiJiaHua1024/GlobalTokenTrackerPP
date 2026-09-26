@@ -10,6 +10,7 @@ use crate::normalize::{fnum, input_excludes_cache, num, text, ts_ms};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::PathBuf;
 
 /// One line's usage snapshot (both the per-call increment and cumulative).
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -54,6 +55,13 @@ impl SourceAdapter for Codex {
     }
     fn capability(&self) -> Capability {
         Capability::Precise
+    }
+
+    fn watch_roots(&self) -> Vec<PathBuf> {
+        [".codex/sessions", ".codex/archived_sessions"]
+            .iter()
+            .map(|s| crate::sync::home(s))
+            .collect()
     }
 
     fn discover(&self) -> Result<Vec<SourceItem>> {

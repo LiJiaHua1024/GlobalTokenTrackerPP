@@ -5,9 +5,13 @@
 mod config;
 mod pages;
 mod theme;
+mod tray;
+mod watch;
 mod widgets;
 
+use codeledger_core::adapters;
 use codeledger_core::store::{default_db_path, EventRow, PriceRow, SourceHealth};
+use codeledger_core::viewmodel::fmt;
 use codeledger_core::{Engine, OverviewVm, Store};
 use config::UiConfig;
 use pages::*;
@@ -43,10 +47,14 @@ pub struct Shell {
     snap: Option<Snapshot>,
     page: Page,
     scanning: bool,
+    /// A filesystem event arrived while a scan was running — rescan when it ends.
+    pending_rescan: bool,
     last_error: Option<String>,
     config: UiConfig,
     theme: Theme,
     editing: bool,
+    /// Kept alive for the process lifetime; `!Send`, stays on the UI thread.
+    tray: Option<tray_icon::TrayIcon>,
 }
 
 pub enum Msg {
@@ -54,6 +62,8 @@ pub enum Msg {
     Failed(String),
     Tick,
     Rescan,
+    WatchFired,
+    Tray(tray::TrayAction),
     Nav(Option<String>),
     DetailPage(i64),
     DetailLoaded(Vec<EventRow>, u64, i64),
@@ -64,6 +74,20 @@ pub enum Msg {
 
 const DETAIL_PAGE_SIZE: i64 = 200;
 const REFRESH_SECS: u64 = 30;
+
+/// `CL_DEBUG=1` → diagnostic stderr (invisible for normal GUI launches).
+pub(crate) fn diag_enabled() -> bool {
+    std::env::var_os("CL_DEBUG").is_some()
+}
+
+macro_rules! diag {
+    ($($t:tt)*) => {
+        if crate::diag_enabled() {
+            eprintln!($($t)*);
+        }
+    };
+}
+pub(crate) use diag;
 
 fn db_path() -> PathBuf {
     default_db_path()
@@ -102,6 +126,43 @@ fn arm_refresh(context: &ComponentContext<Shell>) {
     });
 }
 
+/// Union of adapter watch roots that exist right now (tool absent → dir absent).
+fn source_roots() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for a in adapters::registry() {
+        for r in a.watch_roots() {
+            if r.is_dir() && !out.contains(&r) {
+                out.push(r);
+            }
+        }
+    }
+    out
+}
+
+/// Live refresh: block on notify events, debounce, then report once.
+fn arm_watcher(context: &ComponentContext<Shell>) {
+    let roots = source_roots();
+    if roots.is_empty() {
+        return;
+    }
+    context.spawn_background(move |token| {
+        diag!("[watch] armed on {} roots: {:?}", roots.len(), roots);
+        if watch::wait_for_change(&roots, &token) {
+            Msg::WatchFired
+        } else {
+            // Watch failed/cancelled — fall back to a slow poll so changes are
+            // still picked up eventually.
+            std::thread::sleep(std::time::Duration::from_secs(120));
+            Msg::Tick
+        }
+    });
+}
+
+/// One blocking tray-event poll per arm; re-armed on every message.
+fn arm_tray(context: &ComponentContext<Shell>) {
+    context.spawn_background(|_| Msg::Tray(tray::next_action()));
+}
+
 impl Component for Shell {
     type Input = ();
     type Message = Msg;
@@ -111,6 +172,11 @@ impl Component for Shell {
             Ok(s) => Msg::Loaded(Box::new(s)),
             Err(e) => Msg::Failed(e),
         });
+        arm_watcher(context);
+        let tray = tray::install();
+        if tray.is_some() {
+            arm_tray(context);
+        }
         let config = UiConfig::load();
         let theme = Theme::resolve(&config.theme);
         let page = match std::env::var("CL_PAGE").as_deref() {
@@ -124,33 +190,74 @@ impl Component for Shell {
             snap: None,
             page,
             scanning: true,
+            pending_rescan: false,
             last_error: None,
             config,
             theme,
             editing: std::env::var("CL_EDIT").is_ok(),
+            tray,
         }
     }
 
     fn update(&mut self, message: Msg, context: &ComponentContext<Self>) {
         match message {
             Msg::Loaded(s) => {
+                diag!("[scan] loaded, pending_rescan={}", self.pending_rescan);
                 self.snap = Some(*s);
-                self.scanning = false;
                 self.last_error = None;
-                arm_refresh(context);
+                if let Some(tray) = &self.tray {
+                    let total = self
+                        .snap
+                        .as_ref()
+                        .map(|s| fmt::tokens_total(&s.vm.today))
+                        .unwrap_or(0);
+                    let _ = tray.set_tooltip(Some(format!(
+                        "CodeLedger — 今日 {}",
+                        fmt::tokens(total)
+                    )));
+                }
+                self.scanning = false;
+                if self.pending_rescan {
+                    self.pending_rescan = false;
+                    self.start_scan(context);
+                } else {
+                    arm_refresh(context);
+                }
             }
             Msg::Failed(e) => {
-                self.scanning = false;
                 self.last_error = Some(e);
-                arm_refresh(context);
+                self.scanning = false;
+                if self.pending_rescan {
+                    self.pending_rescan = false;
+                    self.start_scan(context);
+                } else {
+                    arm_refresh(context);
+                }
             }
             Msg::Tick | Msg::Rescan => {
-                if !self.scanning {
-                    self.scanning = true;
-                    context.spawn_background(|_| match load_all() {
-                        Ok(s) => Msg::Loaded(Box::new(s)),
-                        Err(e) => Msg::Failed(e),
-                    });
+                self.start_scan(context);
+            }
+            Msg::WatchFired => {
+                diag!("[watch] fired, scanning={}", self.scanning);
+                arm_watcher(context);
+                if self.scanning {
+                    self.pending_rescan = true;
+                } else {
+                    self.start_scan(context);
+                }
+            }
+            Msg::Tray(action) => {
+                match action {
+                    tray::TrayAction::Focus => {
+                        tray::focus_main_window();
+                    }
+                    tray::TrayAction::Quit => {
+                        let _ = context.window().request_close();
+                    }
+                    tray::TrayAction::None => {}
+                }
+                if self.tray.is_some() {
+                    arm_tray(context);
                 }
             }
             Msg::Nav(tag) => {
@@ -253,6 +360,19 @@ impl Component for Shell {
                     ),
                 content,
             ))
+    }
+}
+
+impl Shell {
+    fn start_scan(&mut self, context: &ComponentContext<Self>) {
+        if !self.scanning {
+            diag!("[scan] start");
+            self.scanning = true;
+            context.spawn_background(|_| match load_all() {
+                Ok(s) => Msg::Loaded(Box::new(s)),
+                Err(e) => Msg::Failed(e),
+            });
+        }
     }
 }
 

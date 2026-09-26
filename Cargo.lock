@@ -273,11 +273,14 @@ name = "codeledger-ui"
 version = "0.1.0"
 dependencies = [
  "codeledger-core",
+ "crossbeam-channel",
+ "notify",
  "serde",
  "serde_json",
  "tray-icon",
  "windows-canvas",
  "windows-reactor",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

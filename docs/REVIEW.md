@@ -62,11 +62,22 @@
 - **克制强调**：`badge()` 描边药丸（Accent/Warn/Danger/Muted 四档）仅用于状态信号——成本卡"估算"徽章+accent 值色（唯一排版强调点）、配额 ≥50% 出徽章（≥80 红/≥50 黄）、数据源异常红徽章、明细 unpriced 黄徽章。正常态一律素文本。
 - **残留限制**：reactor 无 font-family setter（换字体待上游）；SymbolIcon 无 foreground 着色；拖拽排序未做（先按钮排序，drag-drop 样例存在但复杂度高留 M2+）。
 
-## 待办（S8+）
-- [ ] 托盘（tray-icon 事件循环接到 reactor pump）
+## S8 常驻能力 ✅（live watch + 托盘）
+
+- **`SourceAdapter::watch_roots()`**：各适配器上报顶层监听根（claude `~/.claude/projects`、codex `sessions`+`archived_sessions`、opencode `~/.local/share/opencode`、zcode `~/.zcode/cli/db`），`Engine::watch_roots` 聚合去重 + `is_dir` 过滤。
+- **`watch.rs`**：`notify` 递归监听 → 防抖（首个事件后 drain 1.2s，总防抖上限 8s 防持续写入饿死刷新）→ `Msg::WatchFired` → 增量扫描 → 重新武装。30s 定时器保留作兜底。
+- **修了两个真 bug**：
+  1. `pending_rescan` 分支里 `scanning` 未复位 → `start_scan` 守卫拒扫 → 刷新链整体停摆（30s 定时器也死）。
+  2. **watch 自激循环**：只读打开 SQLite 也会更新 `*-shm`（WAL 共享内存锁文件）→ 每次扫描触发新事件 → 无限重扫。过滤 `*-shm`/`*-journal`/`*.tmp` 解决；`-wal` 保留（真实写入先落 wal，不漏信号）。端到端验证：新文件写入 → 1 次 WatchFired → 1 次增量扫 → 游标落库。
+- **`tray.rs`**：系统托盘（程序化 32px 圆角图标+柱状字形，零资源文件），左键/双击/「显示」→ `FindWindowW+SetForegroundWindow` 聚焦（`AllowSetForegroundWindow` 解锁后台激活），「退出」→ `WindowRef::request_close`；tooltip 随每次 Loaded 刷新"今日 X tok"。
+- **限制记录**：reactor 0.100.0 `WindowRef` 无 hide/minimize → 托盘是启动器+状态牌，不能"最小化到托盘"（待上游 API 或自管 HWND）。
+- 诊断：`CL_DEBUG=1` 才开 stderr 日志；`CL_NOTRAY` 跳过托盘安装。
+- ui.json 持久化已实测：覆写 accent=#a371f7 + 部件重排/隐藏，重启后精确生效（截图核对）。
+
+## 待办（S9+）
+- [ ] 托盘"最小化到托盘"依赖 reactor 暴露 window hide 或 HWND（上游）
 - [ ] 趋势图升级 windows-canvas Direct2D
 - [ ] Grok/WorkBuddy/CodeBuddy/Gemini 适配器（P1-P2）
 - [ ] OTel 接收器 + wham/Qoder/Cursor 配额通道（M2/M3）
 - [ ] daily_rollups 生成任务、CSV 导出、prune（M4）
-- [ ] notify 监听 + 60s 轮询常驻（UI 壳内）
 - [ ] Codex 口径差异 2.18% 继续收敛（spec 基线语义修正后重定验收门）

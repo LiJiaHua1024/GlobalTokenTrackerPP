@@ -10,6 +10,7 @@ use crate::normalize::{num, text, ts_ms};
 use anyhow::Result;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 pub struct Claude;
 
@@ -22,6 +23,10 @@ impl SourceAdapter for Claude {
     }
     fn capability(&self) -> Capability {
         Capability::Precise
+    }
+
+    fn watch_roots(&self) -> Vec<PathBuf> {
+        vec![crate::sync::home(".claude/projects")]
     }
 
     fn discover(&self) -> Result<Vec<SourceItem>> {

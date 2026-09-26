@@ -157,11 +157,6 @@ impl Store {
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
     }
-
-    #[cfg(test)]
-    pub(crate) fn conn_mut(&mut self) -> &mut Connection {
-        &mut self.conn
-    }
 }
 
 pub fn now_ms() -> i64 {

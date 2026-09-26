@@ -67,6 +67,14 @@ pub trait SourceAdapter: Send + Sync {
     /// Files/databases this adapter ingests; empty when the tool is absent.
     fn discover(&self) -> Result<Vec<SourceItem>>;
 
+    /// Top-level directories a live watcher should subscribe to (recursive).
+    /// Wider than `discover` parents on purpose: brand-new session files/dirs
+    /// must fire events too. May include dirs that don't exist yet — the
+    /// watcher filters on `is_dir`.
+    fn watch_roots(&self) -> Vec<PathBuf> {
+        vec![]
+    }
+
     /// Parse the JSONL segment `data` starting at absolute `from` offset.
     /// `prior_state` is the adapter's resume blob saved on the previous scan.
     fn parse_jsonl(
