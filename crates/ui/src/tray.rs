@@ -1,18 +1,19 @@
-//! System tray: left click or "显示" focuses the window, "退出" closes it.
-//! reactor 0.100.0's `WindowRef` exposes focus/close but no hide — so this is
-//! a launcher + status surface (tooltip carries today's totals), not a
-//! minimize target. Created on the UI thread; `TrayIcon` is `!Send` and lives
-//! inside `Shell`.
+//! System tray: left click or "显示" focuses the window, "隐藏到托盘" hides
+//! it (Win32 SW_HIDE — reactor 0.100.0 `WindowRef` has no hide verb), "退出"
+//! closes. Tooltip carries today's totals. `TrayIcon` is `!Send` and lives
+//! inside `Shell` on the UI thread.
 
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 const MENU_SHOW: &str = "show";
+const MENU_HIDE: &str = "hide";
 const MENU_QUIT: &str = "quit";
 
 pub enum TrayAction {
     None,
     Focus,
+    Hide,
     Quit,
 }
 
@@ -24,6 +25,7 @@ pub fn install() -> Option<TrayIcon> {
     let icon = glyph_icon().ok()?;
     let menu = Menu::new();
     let _ = menu.append(&MenuItem::with_id(MENU_SHOW, "显示 CodeLedger", true, None));
+    let _ = menu.append(&MenuItem::with_id(MENU_HIDE, "隐藏到托盘", true, None));
     let _ = menu.append(&MenuItem::with_id(MENU_QUIT, "退出", true, None));
     TrayIconBuilder::new()
         .with_menu(Box::new(menu))
@@ -58,6 +60,24 @@ pub fn focus_main_window() {
 #[cfg(not(windows))]
 pub fn focus_main_window() {}
 
+/// Hide the main window — Win32 `SW_HIDE` works where `WindowRef` (0.100.0)
+/// exposes nothing. Tray icon keeps the process reachable; left click or
+/// "显示" restores via `focus_main_window` (SW_RESTORE unhides).
+#[cfg(windows)]
+pub fn hide_main_window() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SW_HIDE};
+    let title: Vec<u16> = "CodeLedger\0".encode_utf16().collect();
+    unsafe {
+        let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
+        if !hwnd.is_null() {
+            ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn hide_main_window() {}
+
 /// Blocking poll over the tray icon + menu event channels. Re-armed by the
 /// shell after every call.
 pub fn next_action() -> TrayAction {
@@ -76,6 +96,7 @@ pub fn next_action() -> TrayAction {
         recv(MenuEvent::receiver()) -> ev => match ev {
             Ok(e) if e.id.0 == MENU_QUIT => TrayAction::Quit,
             Ok(e) if e.id.0 == MENU_SHOW => TrayAction::Focus,
+            Ok(e) if e.id.0 == MENU_HIDE => TrayAction::Hide,
             _ => TrayAction::None,
         },
     }

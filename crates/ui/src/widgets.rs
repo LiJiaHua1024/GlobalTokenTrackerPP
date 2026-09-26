@@ -3,7 +3,11 @@
 //! Adding a widget = one registry entry + one match arm.
 
 use crate::theme::Theme;
+use crate::{Msg, Shell};
 use codeledger_core::viewmodel::fmt;
+use std::cell::Cell;
+use std::rc::Rc;
+use windows_canvas::Invalidator;
 use windows_reactor::*;
 
 /// (id, title, icon) — stable ids persisted in ui.json.
@@ -149,11 +153,43 @@ pub fn stat_card(
     )
 }
 
+/// Shared trend-hover state: pointer callbacks write `hover` via a Msg round
+/// trip; the D2D draw closure reads it every invalidated frame. `width`/`count`
+/// are written by the draw pass so hover math uses the real surface size.
+#[derive(Default)]
+pub struct TrendShared {
+    pub hover: Cell<Option<usize>>,
+    pub width: Cell<f32>,
+    pub count: Cell<usize>,
+}
+
+/// Owned by `Shell`; cloned handles flow into the widget each render.
+#[derive(Clone)]
+pub struct TrendHandle {
+    pub shared: Rc<TrendShared>,
+    pub inv: Invalidator,
+}
+
+impl Default for TrendHandle {
+    fn default() -> Self {
+        Self {
+            shared: Rc::new(TrendShared::default()),
+            inv: Invalidator::new(),
+        }
+    }
+}
+
 /// 30-day token trend — Direct2D demand canvas: rounded bars (today at full
 /// alpha, history softened), faint mid gridline + hairline baseline, sparse
 /// date ticks and a max label drawn by DirectWrite — `theme.font_family` is
 /// honored here (the one place family config takes effect on 0.100.0).
-pub fn trend_strip(theme: &Theme, daily: &[(String, u64, f64)]) -> View {
+/// Pointer hover lifts the bar to full alpha and prints its date·tokens.
+pub fn trend_strip(
+    theme: &Theme,
+    daily: &[(String, u64, f64)],
+    trend: &TrendHandle,
+    ctx: &mut ViewContext<Shell>,
+) -> View {
     let days: Vec<(String, u64)> = daily
         .iter()
         .rev()
@@ -166,8 +202,14 @@ pub fn trend_strip(theme: &Theme, daily: &[(String, u64, f64)]) -> View {
     let divider = theme.divider_cf;
     let family = theme.font_family.clone();
     let label_pt = theme.label_size as f32;
-    Border::new().height(160.0).content(windows_canvas::canvas(
-        move |ctx| {
+    let shared = trend.shared.clone();
+    Border::new()
+        .height(160.0)
+        .on_pointer_moved(ctx.callback(|e: PointerEventInfo| Msg::TrendHover(e.x)))
+        .on_pointer_exited(ctx.callback(|_| Msg::TrendLeave))
+        .content(windows_canvas::canvas_invalidated(
+            &trend.inv,
+            move |ctx| {
             let (w, h) = (ctx.width, ctx.height);
             if w < 16.0 || h < 24.0 || days.is_empty() {
                 return Ok(());
@@ -206,21 +248,35 @@ pub fn trend_strip(theme: &Theme, daily: &[(String, u64, f64)]) -> View {
             let slot = w / n;
             let bar_w = (slot * 0.62).clamp(3.0, 20.0);
             let last = days.len() - 1;
-            for (i, (_, v)) in days.iter().enumerate() {
+            let hover = shared.hover.get().filter(|&i| i <= last);
+            shared.width.set(w);
+            shared.count.set(days.len());
+            for (i, (d, v)) in days.iter().enumerate() {
                 let bh = ((*v as f32) / max * plot_h).max(if *v > 0 { 3.0 } else { 1.5 });
                 let x = slot * i as f32 + (slot - bar_w) * 0.5;
-                let a = if i == last { 1.0 } else { 0.45 };
+                let lit = i == last || hover == Some(i);
                 let brush = ctx.create_solid_brush(ColorF::new(
-                    accent.r, accent.g, accent.b, accent.a * a,
+                    accent.r,
+                    accent.g,
+                    accent.b,
+                    accent.a * if lit { 1.0 } else { 0.45 },
                 ))?;
-                ctx.fill_rounded_rect(
-                    &windows_canvas::RoundedRect::new(
-                        Rect::new(x, bottom - bh, x + bar_w, bottom),
-                        2.5,
-                        2.5,
-                    ),
-                    &brush,
+                let bar = windows_canvas::RoundedRect::new(
+                    Rect::new(x, bottom - bh, x + bar_w, bottom),
+                    2.5,
+                    2.5,
                 );
+                ctx.fill_rounded_rect(&bar, &brush);
+                if hover == Some(i) {
+                    ctx.draw_rounded_rect(&bar, &ink, 1.0);
+                    // Hover detail top-right: "MM-DD · 12.3M tok".
+                    ctx.draw_text(
+                        &format!("{} · {} tok", d.get(5..10).unwrap_or(d), fmt::tokens(*v)),
+                        &tf_r,
+                        &Rect::new(w - 220.0, 0.0, w, top),
+                        &ink,
+                    );
+                }
             }
 
             // Sparse date ticks: first / last day (MM-DD tail of ISO date).

@@ -8,6 +8,8 @@ pub mod adapters;
 pub mod engine;
 pub mod model;
 pub mod normalize;
+pub mod otel;
+pub mod quota;
 pub mod pricing;
 pub mod store;
 pub mod sync;

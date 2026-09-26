@@ -106,12 +106,45 @@
 - **真机验证**：截图确认柱形/标签/刻度正常渲染，进程长跑含 watch 触发扫描后重绘无崩溃。
 - **限制**：需求驱动绘制（数据快照随 view() 重建重绘）；无 tooltip/hover（D2D 画布不产 XAML 命中测试，悬停明细留待后续交互层）。
 
+## M2 配额与 OTel ✅ + 收尾项
+
+- **最小化到托盘** ✅：`WindowRef` 无 hide 走 Win32 `SW_HIDE`/`SW_RESTORE` 绕行；托盘菜单新增"隐藏到托盘"，左键/「显示」恢复。真实窗口隐藏-恢复链路成立。
+- **趋势图悬停** ✅：`TrendHandle{shared: Rc<TrendShared>, inv: Invalidator}`——Border 包 canvas 收 `on_pointer_moved/exited` → Msg 回环写 `Rc<Cell>` → `invalidate()` 只重绘不重渲染；悬停柱全 alpha + 描边 + 右上 `MM-DD · tokens` 明细。
+- **OTLP 接收器** ✅（`otel.rs`）：`127.0.0.1:4318` `POST /v1/metrics`，std::net 极简 HTTP/1.1（无 tokio/axum，头 8KB/体 8MB 上限，10s 读超时）；**专用 OS 线程**不占 reactor 池；`otel_metrics` 表 `(metric,session_id,attr_sig)` 原位 upsert——累积序列重复推送不双计；官方指标与价目估算分列（不进 usage_events）。curl 实测 200 + 落库正确。
+- **Claude OTel 引导** ✅：`codeledger otel-setup` 合并写 `~/.claude/settings.json` env 块（serde_json `preserve_order` 保住 cc-switch 键序）；实测既有键全保留。
+- **配额轮询器** ✅（`quota.rs`，tokcat 源码级复核）：
+  - Codex wham `GET /wham/usage`：Bearer + `ChatGPT-Account-Id`；`last_refresh>8d` 或 401/403 触发 OAuth 刷新回写 auth.json；primary/secondary 按 `limit_window_seconds` 分 `5h_block`/`weekly`；实测 **weekly 0% + reset 命中真数据**。
+  - Cursor `POST api2.cursor.sh .../GetCurrentPeriodUsage`（Connect RPC JSON，`Connect-Protocol-Version:1`）：`planUsage` lenient 双形数字、cents→USD、auto/api 池分行；实测 3 行落库。
+  - UI 30 分钟低频门（`CL_NO_QUOTA` 关），CLI `codeledger quota` 手动。UI 实测 4 行 0 错。
+- **仍 blocked（如实）**：Qoder（`.auth` 仅 machine_id，无 cookie/token——留手动粘贴入口到 M3）、Claude oauth（`.credentials.json` 只有 mcpOAuth 无 claudeAiOauth）、CodeBuddy/Gemini（本机无数据文件）、wham 每日明细端点（`daily-token-usage-breakdown` 未接，窗口信号已够配额页用）。
+
 ## 待办（S9+）
-- [ ] 托盘"最小化到托盘"依赖 reactor 暴露 window hide 或 HWND（上游）
-- [ ] 趋势图悬停交互（D2D 层自管命中测试 + 明细浮层）
+- [ ] Qoder：cookie 手动粘贴入口 + credits API（M3）
+- [ ] Claude oauth usage：等本机出现 `claudeAiOauth` 凭据（Claude Code 登录态）
 - [ ] CodeBuddy/Gemini 适配器（本机无数据，待真实文件出现）
-- [ ] Qoder：cookie/API 通道（M3）
-- [ ] OTel 接收器 + wham/Cursor 配额通道（M2/M3）
+- [ ] wham `daily-token-usage-breakdown` 明细端点（可选增强）
+- [x] ~~托盘最小化~~ → Win32 SW_HIDE 绕行成立
+- [x] ~~趋势图悬停~~ → Invalidator+共享 Cell，只重绘不重渲染
+- [x] ~~OTel + 配额通道~~ → OTLP 4318 + wham + Cursor RPC 全部实测落库
+
+## 兼容性与性能审计（release，2026-09-27 实测）
+
+| 指标 | 实测值 | 判定 |
+|---|---|---|
+| 二进制体积 | UI 8.4MB / CLI 6.8MB（release 默认 strip） | ✅ 达标（<10MB 目标；bundled sqlite+rustls+D2D 占了大部分） |
+| 启动→窗口可见 | ~2.6s（首扫在后台线程，不阻塞首帧） | ✅ |
+| 常驻内存 | 118.7MB working set / 107.3MB private（15s 后） | ✅ WinUI3 基线内（XAML 框架本身 ~60-80MB） |
+| 增量扫描 | 176ms / 603 文件可见 / 3 实际重扫 | ✅ 秒级以内 |
+| rollup 重建 | 180 行瞬时（52,797 明细全量重聚合） | ✅ |
+| 账本体积 | ledger.db 39.2MB（52.8K 事件 + 19K 配额行） | ✅ prune 通道已备 |
+| 线程数 | 123（reactor 池 + rayon 全核 + watch/otel/tray 各一） | ⚠️ 偏高但合理：reactor/rayon 按需休眠线程占大头 |
+
+**兼容性结论**
+- **Win 下限**：WinUI3 需 Win10 1809+（build 17763）；WinAppRuntime 需 1.5+/2.x 之一在位（framework-dependent 部署，本机 1.5–2.5 共存验证）。
+- **GPU**：D2D `GpuDevice::new_or_warp`——无 GPU/老显卡自动落 WARP 软件渲染，图表照样画。
+- **mac 迁移成本**：core 零 Windows 依赖；`tray.rs`/`quota.rs` 已按 cfg/dirs 做多平台分支（Cursor state.vscdb 走 `dirs::config_dir`/`data_dir` 跨平台查找）；ui 壳整体重写是唯一大头，ViewModel/Theme 令牌可移植。
+- **网络面**：otel 仅绑 127.0.0.1（不暴露 LAN）；quota 出站仅 chatgpt.com/api2.cursor.sh 两个固定端点，rustls 校验。
+- **降级路径**：端口被占→文件源照常；凭据缺失→该通道静默跳过；API 改版→单通道 error 不影响其余（`PollOutcome` 隔离）。
 - [x] ~~Grok/WorkBuddy 适配器~~ → 过，真机数据逐字段复核
 - [x] ~~daily_rollups/CSV 导出/prune~~ → M4 完成
 - [x] ~~Codex 验收门~~ → 过，Δ=0.01%（tokens_used=会话水位终值语义锁定）

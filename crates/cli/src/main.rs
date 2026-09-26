@@ -43,6 +43,12 @@ enum Cmd {
         #[arg(long)]
         out: Option<std::path::PathBuf>,
     },
+    /// Run the OTLP/HTTP+JSON receiver standalone (127.0.0.1:4318).
+    Otel,
+    /// Merge OTEL_* env into ~/.claude/settings.json (enables Claude telemetry).
+    OtelSetup,
+    /// Poll vendor quota channels (codex wham / cursor RPC) once.
+    Quota,
     /// Rebuild rollups, then drop raw events older than --keep-days.
     Prune {
         /// Detail retention in days.
@@ -100,6 +106,27 @@ fn main() -> Result<()> {
             println!("daily_rollups: {n} rows rebuilt (local offset {off})");
         }
         Cmd::Export { span, out } => export(&engine, &span, out.as_deref())?,
+        Cmd::Otel => codeledger_core::otel::serve(&db)?,
+        Cmd::OtelSetup => {
+            let p = codeledger_core::otel::install_claude_env()?;
+            println!("OTEL env merged into {}", p.display());
+        }
+        Cmd::Quota => {
+            for o in codeledger_core::quota::poll_all() {
+                match o.error {
+                    Some(e) => eprintln!("{}: ERR {e}", o.app),
+                    None => {
+                        for q in &o.quotas {
+                            engine.store.insert_quota(q)?;
+                            println!(
+                                "{} {:<16} used={:?} limit={:?} pct={:?} reset={:?}",
+                                o.app, q.window_kind, q.used, q.limit_value, q.used_percent, q.resets_at
+                            );
+                        }
+                    }
+                }
+            }
+        }
         Cmd::Prune { keep_days, vacuum } => {
             let n = engine.store.rebuild_rollups(&local_offset())?;
             println!("daily_rollups: {n} rows rebuilt before prune");

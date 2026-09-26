@@ -144,6 +144,29 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Latest-cumulative upsert for OTLP data points (spec §③): re-exports of
+    /// the same series overwrite in place; an older point never wins.
+    pub fn upsert_otel_metric(
+        &self,
+        metric: &str,
+        session_id: &str,
+        attr_sig: &str,
+        value: f64,
+        ts_ms: i64,
+        attrs_json: &str,
+    ) -> Result<bool> {
+        let n = self.conn.execute(
+            "INSERT INTO otel_metrics(metric,session_id,attr_sig,value,ts_ms,received_at,attrs_json)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)
+             ON CONFLICT(metric,session_id,attr_sig) DO UPDATE SET
+               value=excluded.value, ts_ms=excluded.ts_ms,
+               received_at=excluded.received_at, attrs_json=excluded.attrs_json
+             WHERE excluded.ts_ms >= otel_metrics.ts_ms",
+            params![metric, session_id, attr_sig, value, ts_ms, now_ms(), attrs_json],
+        )?;
+        Ok(n > 0)
+    }
+
     pub fn insert_quota(&self, q: &crate::model::QuotaSnapshot) -> Result<()> {
         self.conn.execute(
             "INSERT INTO quota_snapshots(app,account,captured_at,window_kind,used,limit_value,used_percent,resets_at,raw_json)

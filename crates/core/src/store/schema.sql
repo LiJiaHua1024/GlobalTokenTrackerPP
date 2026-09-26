@@ -110,3 +110,16 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
   version INTEGER PRIMARY KEY,
   applied_at INTEGER NOT NULL
 );
+
+-- OTLP 推送的官方指标时序（spec §③）：每 (metric, session, 属性签名) 一行，
+-- 存最新累积值 —— 官方 cost/active_time 与本地价目估算分列展示，不双计。
+CREATE TABLE IF NOT EXISTS otel_metrics (
+  metric TEXT NOT NULL,
+  session_id TEXT NOT NULL DEFAULT '',
+  attr_sig TEXT NOT NULL DEFAULT '',
+  value REAL NOT NULL,
+  ts_ms INTEGER NOT NULL,
+  received_at INTEGER NOT NULL,
+  attrs_json TEXT NOT NULL DEFAULT '{}',
+  PRIMARY KEY (metric, session_id, attr_sig)
+);

@@ -55,6 +55,10 @@ pub struct Shell {
     editing: bool,
     /// Kept alive for the process lifetime; `!Send`, stays on the UI thread.
     tray: Option<tray_icon::TrayIcon>,
+    /// Trend-chart hover state + repaint handle (shared with the D2D closure).
+    trend: widgets::TrendHandle,
+    /// Vendor quota channels poll at this cadence (network calls stay rare).
+    quota_at: Option<std::time::Instant>,
 }
 
 pub enum Msg {
@@ -70,10 +74,17 @@ pub enum Msg {
     ToggleEdit,
     MoveWidget(String, String, i32),
     HideWidget(String, String, bool),
+    /// Pointer x (canvas-local DIPs) over the trend chart.
+    TrendHover(f64),
+    TrendLeave,
+    /// Background quota poll finished (rows written, channel errors).
+    QuotaDone(usize, Vec<String>),
 }
 
 const DETAIL_PAGE_SIZE: i64 = 200;
 const REFRESH_SECS: u64 = 30;
+/// Spec §6.9: quota polling is low-frequency by design.
+const QUOTA_POLL_SECS: u64 = 30 * 60;
 
 /// `CL_DEBUG=1` → diagnostic stderr (invisible for normal GUI launches).
 pub(crate) fn diag_enabled() -> bool {
@@ -179,6 +190,9 @@ impl Component for Shell {
         }
         let config = UiConfig::load();
         let theme = Theme::resolve(&config.theme);
+        // OTLP receiver: dedicated blocking thread (never the reactor pool).
+        // Port busy or CL_NO_OTEL → file-based sources only.
+        let _otel = codeledger_core::otel::spawn(db_path());
         let page = match std::env::var("CL_PAGE").as_deref() {
             Ok("detail") => Page::Detail,
             Ok("quota") => Page::Quota,
@@ -196,6 +210,8 @@ impl Component for Shell {
             theme,
             editing: std::env::var("CL_EDIT").is_ok(),
             tray,
+            trend: widgets::TrendHandle::default(),
+            quota_at: None,
         }
     }
 
@@ -217,6 +233,7 @@ impl Component for Shell {
                     )));
                 }
                 self.scanning = false;
+                self.poll_quota_if_stale(context);
                 if self.pending_rescan {
                     self.pending_rescan = false;
                     self.start_scan(context);
@@ -250,6 +267,9 @@ impl Component for Shell {
                 match action {
                     tray::TrayAction::Focus => {
                         tray::focus_main_window();
+                    }
+                    tray::TrayAction::Hide => {
+                        tray::hide_main_window();
                     }
                     tray::TrayAction::Quit => {
                         let _ = context.window().request_close();
@@ -292,6 +312,31 @@ impl Component for Shell {
             Msg::HideWidget(page, id, hidden) => {
                 self.config.set_hidden(&page, &id, hidden);
             }
+            Msg::TrendHover(x) => {
+                let sh = &self.trend.shared;
+                let (w, n) = (sh.width.get(), sh.count.get());
+                // Index under the pointer; unchanged → no repaint churn.
+                let idx = if w > 0.0 && n > 0 {
+                    Some(((x as f32 / (w / n as f32)) as usize).min(n - 1))
+                } else {
+                    None
+                };
+                if idx != sh.hover.get() {
+                    sh.hover.set(idx);
+                    self.trend.inv.invalidate();
+                }
+            }
+            Msg::TrendLeave => {
+                if self.trend.shared.hover.take().is_some() {
+                    self.trend.inv.invalidate();
+                }
+            }
+            Msg::QuotaDone(n, errs) => {
+                diag!("[quota] {} rows, {} errors", n, errs.len());
+                for e in errs {
+                    diag!("[quota] {e}");
+                }
+            }
         }
     }
 
@@ -313,6 +358,7 @@ impl Component for Shell {
                 &self.config,
                 self.editing,
                 context,
+                &self.trend,
             ),
             Page::Detail => detail_page(snap, theme, context),
             Page::Quota => quota_page(snap, theme),
@@ -364,6 +410,39 @@ impl Component for Shell {
 }
 
 impl Shell {
+    /// Low-frequency vendor quota poll (spec §6.9) — `CL_NO_QUOTA` disables.
+    /// Errors are logged via diag only; the quota page shows what landed.
+    fn poll_quota_if_stale(&mut self, context: &ComponentContext<Self>) {
+        let stale = self
+            .quota_at
+            .map(|t| t.elapsed().as_secs() > QUOTA_POLL_SECS)
+            .unwrap_or(true);
+        if !stale || std::env::var_os("CL_NO_QUOTA").is_some() {
+            return;
+        }
+        self.quota_at = Some(std::time::Instant::now());
+        context.spawn_background(|_| {
+            let mut n = 0usize;
+            let mut errs = Vec::new();
+            match Store::open(&db_path()) {
+                Ok(store) => {
+                    for o in codeledger_core::quota::poll_all() {
+                        if let Some(e) = o.error {
+                            errs.push(format!("{}: {e}", o.app));
+                        }
+                        for q in o.quotas {
+                            if store.insert_quota(&q).is_ok() {
+                                n += 1;
+                            }
+                        }
+                    }
+                }
+                Err(e) => errs.push(e.to_string()),
+            }
+            Msg::QuotaDone(n, errs)
+        });
+    }
+
     fn start_scan(&mut self, context: &ComponentContext<Self>) {
         if !self.scanning {
             diag!("[scan] start");

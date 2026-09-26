@@ -173,7 +173,13 @@ fn hidden_chip(theme: &Theme, page: &str, id: &'static str, ctx: &mut ViewContex
 }
 
 /// Render one overview widget (without edit chrome).
-fn overview_widget(id: &str, s: &Snapshot, theme: &Theme) -> Option<View> {
+fn overview_widget(
+    id: &str,
+    s: &Snapshot,
+    theme: &Theme,
+    trend: &w::TrendHandle,
+    ctx: &mut ViewContext<Shell>,
+) -> Option<View> {
     let vm = &s.vm;
     match id {
         "stats" => Some(
@@ -243,7 +249,7 @@ fn overview_widget(id: &str, s: &Snapshot, theme: &Theme) -> Option<View> {
                 .spacing(10.0)
                 .children((
                     w::section_header(theme, Symbol::FourBars, "近 30 天趋势"),
-                    w::trend_strip(theme, &vm.daily),
+                    w::trend_strip(theme, &vm.daily, trend, ctx),
                 )),
         )),
         "apps" => {
@@ -356,6 +362,7 @@ pub fn overview_page(
     config: &UiConfig,
     editing: bool,
     ctx: &mut ViewContext<Shell>,
+    trend: &w::TrendHandle,
 ) -> View {
     let Some(s) = snap else {
         return loading(theme, scanning);
@@ -402,7 +409,7 @@ pub fn overview_page(
             }
             continue;
         }
-        if let Some(v) = overview_widget(id_static, s, theme) {
+        if let Some(v) = overview_widget(id_static, s, theme, trend, ctx) {
             if editing {
                 col.push(vstack(
                     4.0,
