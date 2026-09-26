@@ -264,15 +264,7 @@ fn local_offset() -> String {
 }
 
 fn fmt_tok(n: u64) -> String {
-    if n >= 1_000_000_000 {
-        format!("{:.2}B", n as f64 / 1e9)
-    } else if n >= 1_000_000 {
-        format!("{:.2}M", n as f64 / 1e6)
-    } else if n >= 1_000 {
-        format!("{:.1}K", n as f64 / 1e3)
-    } else {
-        n.to_string()
-    }
+    codeledger_core::viewmodel::fmt::tokens_exact(n)
 }
 
 fn report(engine: &Engine, span: &str) -> Result<()> {

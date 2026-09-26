@@ -320,4 +320,20 @@ mod tests {
             .unwrap();
         assert_eq!(kept, 2);
     }
+
+    #[test]
+    fn hourly_buckets_by_local_hour() {
+        let s = Store::open_memory().unwrap();
+        // 2025-01-15 10:30Z + 10:59Z → same "10:00" bucket; 11:05Z → next.
+        s.upsert_event(&ev_ts("h1", 1_736_937_000_000)).unwrap();
+        s.upsert_event(&ev_ts("h2", 1_736_937_000_000 + 1_700_000))
+            .unwrap();
+        s.upsert_event(&ev_ts("h3", 1_736_937_000_000 + 3_000_000))
+            .unwrap();
+        let rows = s.hourly(0, "+00:00").unwrap();
+        let labels: Vec<&str> = rows.iter().map(|r| r.date.as_str()).collect();
+        // h1+h2 fold into one 10:00 bucket; h3 lands in 11:00.
+        assert_eq!(labels, ["10:00", "11:00"]);
+        assert_eq!(rows[0].events, 2);
+    }
 }

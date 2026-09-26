@@ -8,6 +8,7 @@ use crate::widgets as w;
 use crate::{Msg, Shell, Snapshot, DETAIL_PAGE_SIZE};
 use codeledger_core::store::EventRow;
 use codeledger_core::viewmodel::fmt;
+use codeledger_core::viewmodel::Range;
 use windows_reactor::*;
 
 pub fn keyed(views: Vec<View>) -> impl Iterator<Item = KeyedView> {
@@ -181,6 +182,7 @@ fn overview_widget(
     ctx: &mut ViewContext<Shell>,
 ) -> Option<View> {
     let vm = &s.vm;
+    let rl = vm.range.label();
     match id {
         "stats" => Some(
             Grid::new()
@@ -197,9 +199,9 @@ fn overview_widget(
                         w::stat_card(
                             theme,
                             Symbol::Calculator,
-                            "今日 Tokens",
-                            fmt::tokens(fmt::tokens_total(&vm.today)),
-                            format!("事件 {}", vm.today.events),
+                            &format!("{rl} Tokens"),
+                            fmt::tokens_exact(fmt::tokens_total(&vm.span)),
+                            format!("事件 {}", fmt::tokens_exact(vm.span.events)),
                             false,
                             None,
                         ),
@@ -209,9 +211,9 @@ fn overview_widget(
                         w::stat_card(
                             theme,
                             Symbol::Tag,
-                            "今日估算成本",
-                            fmt::usd(vm.today.cost_usd),
-                            "按价目表估算，非账单".into(),
+                            &format!("{rl}估算成本"),
+                            fmt::usd(vm.span.cost_usd),
+                            format!("全部 {}", fmt::usd(vm.all.cost_usd)),
                             true,
                             Some(("估算", w::BadgeTone::Accent)),
                         ),
@@ -221,9 +223,9 @@ fn overview_widget(
                         w::stat_card(
                             theme,
                             Symbol::SyncFolder,
-                            "今日缓存读",
-                            fmt::tokens(vm.today.cache_read_tokens),
-                            format!("输入 {}", fmt::tokens(vm.today.input_tokens)),
+                            &format!("{rl}缓存读"),
+                            fmt::tokens_exact(vm.span.cache_read_tokens),
+                            format!("输入 {}", fmt::tokens_exact(vm.span.input_tokens)),
                             false,
                             None,
                         ),
@@ -233,25 +235,39 @@ fn overview_widget(
                         w::stat_card(
                             theme,
                             Symbol::CalendarWeek,
-                            "本周成本",
-                            fmt::usd(vm.week.cost_usd),
-                            format!("本月 {}", fmt::usd(vm.month.cost_usd)),
+                            &format!("{rl}事件"),
+                            fmt::tokens_exact(vm.span.events),
+                            format!(
+                                "活跃 {}",
+                                if vm.span.active_ms > 0 {
+                                    fmt::duration(Some(vm.span.active_ms as i64))
+                                } else {
+                                    "—".into()
+                                }
+                            ),
                             false,
                             None,
                         ),
                     ),
                 ]),
         ),
-        "trend" => Some(w::card(
-            theme,
-            StackPanel::new()
-                .orientation(Orientation::Vertical)
-                .spacing(10.0)
-                .children((
-                    w::section_header(theme, Symbol::FourBars, "近 30 天趋势"),
-                    w::trend_strip(theme, &vm.daily, trend, ctx),
-                )),
-        )),
+        "trend" => {
+            let trend_title: String = match vm.range {
+                Range::Today => "今日 · 按小时".into(),
+                Range::All => "全部 · 按天（近 60 桶）".into(),
+                _ => format!("{rl}趋势"),
+            };
+            Some(w::card(
+                theme,
+                StackPanel::new()
+                    .orientation(Orientation::Vertical)
+                    .spacing(10.0)
+                    .children((
+                        w::section_header(theme, Symbol::FourBars, &trend_title),
+                        w::trend_strip(theme, &vm.daily, trend, ctx),
+                    )),
+            ))
+        }
         "apps" => {
             let mut rows: Vec<View> = Vec::new();
             for a in vm.by_app.iter().take(8) {
@@ -260,7 +276,7 @@ fn overview_widget(
                     format!("{}  ·  {} 事件", a.app, a.events),
                     format!(
                         "{} tok  ·  {}",
-                        fmt::tokens(
+                        fmt::tokens_exact(
                             a.input_tokens
                                 + a.output_tokens
                                 + a.cache_read_tokens
@@ -285,7 +301,7 @@ fn overview_widget(
                     .orientation(Orientation::Vertical)
                     .spacing(8.0)
                     .children((
-                        w::section_header(theme, Symbol::List, "本周 · 按工具"),
+                        w::section_header(theme, Symbol::List, &format!("{rl} · 按工具")),
                         vstack(2.0, rows),
                     )),
             ))
@@ -372,10 +388,30 @@ pub fn overview_page(
     let order = config.order_for("overview", &registry);
     let hidden = config.hidden("overview");
 
+    let range_item = |label: &'static str, r: Range| {
+        SelectorBarItem::new()
+            .text(label)
+            .is_selected(s.vm.range == r)
+    };
+    let range_sel: View = SelectorBar::new()
+        .on_selected_text_changed(ctx.callback(|t: Option<String>| {
+            Msg::SetRange(t.unwrap_or_default())
+        }))
+        .collection_slot(
+            SelectorBarSlot::Items,
+            [
+                KeyedView::new("today", range_item("今日", Range::Today)),
+                KeyedView::new("week", range_item("近 7 天", Range::Week)),
+                KeyedView::new("month", range_item("近 30 天", Range::Month)),
+                KeyedView::new("all", range_item("全部", Range::All)),
+            ],
+        );
+
     let mut col: Vec<View> = vec![header(
         theme,
         "总览",
         vec![
+            range_sel,
             if scanning {
                 ProgressRing::new()
                     .is_indeterminate(true)
@@ -447,9 +483,9 @@ fn event_row(theme: &Theme, r: &EventRow) -> View {
         fmt::ts_short(r.ts_start),
         r.app,
         truncate(&model, 24),
-        fmt::tokens(r.input_tokens),
-        fmt::tokens(r.output_tokens),
-        fmt::tokens(r.cache_read_tokens + r.cache_write_tokens),
+        fmt::tokens_exact(r.input_tokens),
+        fmt::tokens_exact(r.output_tokens),
+        fmt::tokens_exact(r.cache_read_tokens + r.cache_write_tokens),
         cost,
         badge,
         fmt::duration(r.duration_ms),

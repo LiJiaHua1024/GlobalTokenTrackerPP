@@ -12,6 +12,7 @@ mod widgets;
 use codeledger_core::adapters;
 use codeledger_core::store::{default_db_path, EventRow, PriceRow, SourceHealth};
 use codeledger_core::viewmodel::fmt;
+use codeledger_core::viewmodel::Range;
 use codeledger_core::{Engine, OverviewVm, Store};
 use config::UiConfig;
 use pages::*;
@@ -61,6 +62,8 @@ pub struct Shell {
     trend: widgets::TrendHandle,
     /// Vendor quota channels poll at this cadence (network calls stay rare).
     quota_at: Option<std::time::Instant>,
+    /// Overview statistics window (persisted in ui.json).
+    range: Range,
 }
 
 pub enum Msg {
@@ -79,6 +82,8 @@ pub enum Msg {
     /// Pointer x (canvas-local DIPs) over the trend chart.
     TrendHover(f64),
     TrendLeave,
+    /// Statistics range changed (label text from the selector).
+    SetRange(String),
     /// Background quota poll finished (rows written, channel errors).
     QuotaDone(usize, Vec<String>),
 }
@@ -106,7 +111,7 @@ fn db_path() -> PathBuf {
     default_db_path()
 }
 
-fn load_all() -> Result<Snapshot, String> {
+fn load_all(range: Range) -> Result<Snapshot, String> {
     let store = Store::open(&db_path()).map_err(|e| e.to_string())?;
     let engine = Engine::new(store).map_err(|e| e.to_string())?;
     let t = std::time::Instant::now();
@@ -123,7 +128,7 @@ fn load_all() -> Result<Snapshot, String> {
             Err(e) => diag!("[prices] refresh failed: {e}"),
         }
     }
-    let vm = engine.store.overview().map_err(|e| e.to_string())?;
+    let vm = engine.store.overview(range).map_err(|e| e.to_string())?;
     let d = engine
         .store
         .detail(0, DETAIL_PAGE_SIZE)
@@ -195,7 +200,9 @@ impl Component for Shell {
     type Message = Msg;
 
     fn create(_input: &(), context: &ComponentContext<Self>) -> Self {
-        context.spawn_background(|_| match load_all() {
+        let config = UiConfig::load();
+        let range = Range::from_key(&config.range);
+        context.spawn_background(move |_| match load_all(range) {
             Ok(s) => Msg::Loaded(Box::new(s)),
             Err(e) => Msg::Failed(e),
         });
@@ -204,7 +211,6 @@ impl Component for Shell {
         if tray.is_some() {
             arm_tray(context);
         }
-        let config = UiConfig::load();
         let theme = Theme::resolve(&config.theme);
         // OTLP receiver: dedicated blocking thread (never the reactor pool).
         // Port busy or CL_NO_OTEL → file-based sources only.
@@ -223,6 +229,7 @@ impl Component for Shell {
             pending_rescan: false,
             last_error: None,
             config,
+            range,
             theme,
             editing: std::env::var("CL_EDIT").is_ok(),
             tray,
@@ -245,7 +252,7 @@ impl Component for Shell {
                         .unwrap_or(0);
                     let _ = tray.set_tooltip(Some(format!(
                         "CodeLedger — 今日 {}",
-                        fmt::tokens(total)
+                        fmt::tokens_exact(total)
                     )));
                 }
                 self.scanning = false;
@@ -269,6 +276,18 @@ impl Component for Shell {
             }
             Msg::Tick | Msg::Rescan => {
                 self.start_scan(context);
+            }
+            Msg::SetRange(label) => {
+                let r = Range::from_label(&label);
+                if r != self.range {
+                    self.range = r;
+                    self.config.range = r.key().to_string();
+                    self.config.save();
+                    // New aggregates needed — reload through the normal scan
+                    // path (data hit is small; totals/by_app are indexed).
+                    self.scanning = false;
+                    self.start_scan(context);
+                }
             }
             Msg::WatchFired => {
                 diag!("[watch] fired, scanning={}", self.scanning);
@@ -463,7 +482,8 @@ impl Shell {
         if !self.scanning {
             diag!("[scan] start");
             self.scanning = true;
-            context.spawn_background(|_| match load_all() {
+            let range = self.range;
+            context.spawn_background(move |_| match load_all(range) {
                 Ok(s) => Msg::Loaded(Box::new(s)),
                 Err(e) => Msg::Failed(e),
             });

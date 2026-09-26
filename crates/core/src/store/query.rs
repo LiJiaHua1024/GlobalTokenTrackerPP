@@ -198,6 +198,45 @@ impl super::Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
+    /// Per-hour aggregation within `[from_ms, ∞)` — used for the "today"
+    /// range where daily granularity collapses to a single bar. Reuses
+    /// `DailyRow` with `date` = "HH:00" local label.
+    pub fn hourly(&self, from_ms: i64, utc_offset: &str) -> Result<Vec<DailyRow>> {
+        let b = utc_offset.as_bytes();
+        anyhow::ensure!(
+            b.len() == 6
+                && matches!(b[0], b'+' | b'-')
+                && b[3] == b':'
+                && [1, 2, 4, 5].iter().all(|&i| b[i].is_ascii_digit()),
+            "invalid utc_offset: {utc_offset}"
+        );
+        let (w, p) = time_where(Some(from_ms), None);
+        let mut st = self.conn().prepare(&format!(
+            "SELECT strftime('%H:00', ts_start/1000, 'unixepoch', '{utc_offset}') AS h, app,
+                    COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+                    COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cache_read_tokens),0),
+                    COALESCE(SUM(cache_write_5m_tokens+cache_write_1h_tokens),0),
+                    COALESCE(SUM(cost_usd),0), COALESCE(SUM(credits),0)
+             FROM usage_events {w}
+             GROUP BY h, app ORDER BY h"
+        ))?;
+        let rows = st.query_map(rusqlite::params_from_iter(p.iter()), |r| {
+            Ok(DailyRow {
+                date: r.get(0)?,
+                app: r.get(1)?,
+                events: r.get::<_, i64>(2)? as u64,
+                input_tokens: r.get::<_, i64>(3)? as u64,
+                output_tokens: r.get::<_, i64>(4)? as u64,
+                reasoning_tokens: r.get::<_, i64>(5)? as u64,
+                cache_read_tokens: r.get::<_, i64>(6)? as u64,
+                cache_write_tokens: r.get::<_, i64>(7)? as u64,
+                cost_usd: r.get(8)?,
+                credits: r.get(9)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     /// Reconciliation: per-app cost+token totals, for `reconcile` vs cc-switch.
     pub fn reconcile_summary(&self, app: &str) -> Result<Totals> {
         self.conn()

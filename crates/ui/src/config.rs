@@ -12,6 +12,8 @@ use std::path::PathBuf;
 #[serde(default)]
 pub struct UiConfig {
     pub theme: ThemeConfig,
+    /// Overview statistics range key: today|week|month|all ("" = week).
+    pub range: String,
     /// page name → layout
     pub pages: BTreeMap<String, PageLayout>,
 }

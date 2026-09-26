@@ -4,14 +4,78 @@
 use crate::store::{AppSummary, EventRow, QuotaRow, Store, Totals};
 use anyhow::Result;
 
+/// Statistics window selected on the overview page. Persisted as `key` in
+/// ui.json so the choice survives restarts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Range {
+    Today,
+    #[default]
+    Week,
+    Month,
+    All,
+}
+
+impl Range {
+    pub const LIST: [Range; 4] = [Self::Today, Self::Week, Self::Month, Self::All];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Today => "今日",
+            Self::Week => "近 7 天",
+            Self::Month => "近 30 天",
+            Self::All => "全部",
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Today => "today",
+            Self::Week => "week",
+            Self::Month => "month",
+            Self::All => "all",
+        }
+    }
+
+    pub fn from_key(s: &str) -> Self {
+        match s {
+            "today" => Self::Today,
+            "month" => Self::Month,
+            "all" => Self::All,
+            _ => Self::Week,
+        }
+    }
+
+    pub fn from_label(s: &str) -> Self {
+        Self::LIST
+            .iter()
+            .find(|r| r.label() == s)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Window start (epoch ms); `None` = unbounded ("all").
+    fn start_ms(self) -> Option<i64> {
+        match self {
+            Self::Today => Some(day_start_ms(0)),
+            Self::Week => Some(day_start_ms(6)),
+            Self::Month => Some(day_start_ms(29)),
+            Self::All => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct OverviewVm {
+    /// Always today — the tray tooltip and badges stay day-scoped regardless
+    /// of the selected range.
     pub today: Totals,
-    pub week: Totals,
-    pub month: Totals,
+    /// Aggregates for the selected `range`.
+    pub span: Totals,
     pub all: Totals,
+    pub range: Range,
     pub by_app: Vec<AppSummary>,
-    /// (YYYY-MM-DD, total_tokens, cost_usd) for the last `days` local days.
+    /// Trend series for the selected range: ("YYYY-MM-DD"|"HH:00", tokens, cost).
+    /// Today → hourly buckets; other ranges → per local day.
     pub daily: Vec<(String, u64, f64)>,
     pub quotas: Vec<QuotaRow>,
     pub unpriced: Vec<(String, u64)>,
@@ -41,26 +105,30 @@ fn day_start_ms(days_ago: i64) -> i64 {
 }
 
 impl Store {
-    pub fn overview(&self) -> Result<OverviewVm> {
+    pub fn overview(&self, range: Range) -> Result<OverviewVm> {
         let t0 = day_start_ms(0);
-        let w0 = day_start_ms(6);
-        let m0 = day_start_ms(29);
+        let start = range.start_ms();
         let tz = local_utc_offset();
-        let daily_raw = self.daily(Some(m0), None, &tz)?;
-        // Fold apps into one series per day for the trend strip.
+        // Fold apps into one series per bucket for the trend strip.
+        let raw = if range == Range::Today {
+            self.hourly(t0, &tz)?
+        } else {
+            self.daily(start, None, &tz)?
+        };
         let mut series: std::collections::BTreeMap<String, (u64, f64)> =
             std::collections::BTreeMap::new();
-        for d in daily_raw {
+        for d in raw {
             let e = series.entry(d.date).or_default();
             e.0 += d.output_tokens + d.cache_read_tokens + d.input_tokens;
             e.1 += d.cost_usd;
         }
+        let span = self.totals(start, None)?;
         Ok(OverviewVm {
             today: self.totals(Some(t0), None)?,
-            week: self.totals(Some(w0), None)?,
-            month: self.totals(Some(m0), None)?,
+            span,
             all: self.totals(None, None)?,
-            by_app: self.by_app(Some(w0), None)?,
+            range,
+            by_app: self.by_app(start, None)?,
             daily: series.into_iter().map(|(d, (t, c))| (d, t, c)).collect(),
             quotas: self.latest_quotas()?,
             unpriced: self.unpriced_models()?,
@@ -78,18 +146,18 @@ impl Store {
 
 /// Human formatting helpers shared by CLI and UI.
 pub mod fmt {
-    pub fn tokens(n: u64) -> String {
-        if n >= 1_000_000_000 {
-            format!("{:.2}B", n as f64 / 1e9)
-        } else if n >= 1_000_000 {
-            format!("{:.1}M", n as f64 / 1e6)
-        } else if n >= 10_000 {
-            format!("{:.0}K", n as f64 / 1e3)
-        } else if n >= 1_000 {
-            format!("{:.1}K", n as f64 / 1e3)
-        } else {
-            n.to_string()
+    /// Exact token count with thousands separators — never abbreviated,
+    /// users reconcile these numbers against vendor dashboards.
+    pub fn tokens_exact(n: u64) -> String {
+        let s = n.to_string();
+        let mut out = String::with_capacity(s.len() + s.len() / 3);
+        for (i, c) in s.bytes().enumerate() {
+            if i > 0 && (s.len() - i).is_multiple_of(3) {
+                out.push(',');
+            }
+            out.push(char::from(c));
         }
+        out
     }
 
     pub fn usd(v: f64) -> String {
@@ -156,6 +224,28 @@ pub mod fmt {
             format!("{:.1}s", ms as f64 / 1000.0)
         } else {
             format!("{ms}ms")
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fmt;
+
+    #[test]
+    fn tokens_exact_groups() {
+        assert_eq!(fmt::tokens_exact(0), "0");
+        assert_eq!(fmt::tokens_exact(999), "999");
+        assert_eq!(fmt::tokens_exact(1_000), "1,000");
+        assert_eq!(fmt::tokens_exact(1_730_848_235), "1,730,848,235");
+        assert_eq!(fmt::tokens_exact(13_101_054_884), "13,101,054,884");
+    }
+
+    #[test]
+    fn range_roundtrip() {
+        for r in super::Range::LIST {
+            assert_eq!(super::Range::from_key(r.key()), r);
+            assert_eq!(super::Range::from_label(r.label()), r);
         }
     }
 }

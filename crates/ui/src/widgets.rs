@@ -193,7 +193,7 @@ pub fn trend_strip(
     let days: Vec<(String, u64)> = daily
         .iter()
         .rev()
-        .take(30)
+        .take(60)
         .rev()
         .map(|(d, v, _)| (d.clone(), *v))
         .collect();
@@ -230,7 +230,7 @@ pub fn trend_strip(
 
             // Max label (top-left) + faint mid gridline.
             ctx.draw_text(
-                &fmt::tokens(max as u64),
+                &fmt::tokens_exact(max as u64),
                 &tf,
                 &Rect::new(0.0, 0.0, 120.0, top),
                 &ink,
@@ -271,7 +271,7 @@ pub fn trend_strip(
                     ctx.draw_rounded_rect(&bar, &ink, 1.0);
                     // Hover detail top-right: "MM-DD · 12.3M tok".
                     ctx.draw_text(
-                        &format!("{} · {} tok", d.get(5..10).unwrap_or(d), fmt::tokens(*v)),
+                        &format!("{} · {} tok", d.get(5..10).unwrap_or(d), fmt::tokens_exact(*v)),
                         &tf_r,
                         &Rect::new(w - 220.0, 0.0, w, top),
                         &ink,
