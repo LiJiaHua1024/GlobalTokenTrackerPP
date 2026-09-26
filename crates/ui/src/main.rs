@@ -499,10 +499,14 @@ impl Component for Shell {
                     KeyedView::new("prices", item("价格", Page::Prices)),
                 ],
             );
-        StackPanel::new()
-            .orientation(Orientation::Vertical)
+        // Root must be a Grid: a vertical StackPanel offers children infinite
+        // height, which makes the page ScrollViewer measure at full content
+        // size and never scroll. Star row bounds the scroll area.
+        Grid::new()
+            .rows([GridLength::Auto, GridLength::STAR])
             .children((
                 Border::new()
+                    .grid_row(0)
                     .padding(Thickness::xy(20.0, 8.0))
                     .border_brush(theme.divider)
                     .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0))
@@ -520,7 +524,7 @@ impl Component for Shell {
                                 nav,
                             )),
                     ),
-                content,
+                Border::new().grid_row(1).content(content),
             ))
     }
 }

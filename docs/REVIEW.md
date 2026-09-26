@@ -250,3 +250,10 @@
 - **实测**：4,971 事件落库（10,535 快照行去重收敛），swe-2-max 正确归 unpriced；UI 勾选行/按工具表出现 devin，截图核对。
 - **其余目标盘点（实地核查后如实标记）**：Copilot 日志只有进程生命周期无 token；Gemini/Antigravity 装了没用（conversations/ 空）；CodeBuddy 只有 memwatch+空 expert-history；Qoder 只有基础设施日志；Windsurf `.codeium` 全是 protobuf 上下文；Cursor 7,761 条 bubble `tokenCount` 全 0（服务端计费）配额 RPC 已是上限；cli-proxy-api 是代理层不采。
 - **测试**：+1（request_id 快照去重/字段映射/水位推进/二次扫描幂等），20/20 绿、clippy 0。
+
+## S18 页面纵向滚动 ✅
+
+- **根因**：根容器是垂直 `StackPanel`——主轴方向给子元素无限高度，`page_frame` 里的 `ScrollViewer` 被量成内容全高，永远没有可滚空间（XAML 经典坑）。
+- **修法**：根换 `Grid`（`Auto` 导航行 + `Star` 内容行），内容区被约束进可视高度 → ScrollViewer 生效；滚动条显式 `Auto`（Fluent 惯例：悬停才现细条）。
+- **验证路径（记录）**：注入输入（WM_MOUSEWHEEL/SendInput）对 WinUI3 输入岛无效，改用 **UI Automation**——`ScrollPattern.VerticallyScrollable=True`、`VerticalViewSize=68.3%`，`SetScrollPercent(100)` 后截图确认滚到底部（配额卡/未计价警示条可见）。这条 UIA 通道以后还可用于端到端 UI 验证。
+- **验证**：build/clippy 干净。

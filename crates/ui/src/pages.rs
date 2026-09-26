@@ -105,7 +105,9 @@ fn page_frame(theme: &Theme, body: View) -> View {
     if let Some(bg) = &theme.page_bg {
         frame = frame.background(*bg);
     }
-    ScrollViewer::new().content(frame.content(body))
+    ScrollViewer::new()
+        .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
+        .content(frame.content(body))
 }
 
 // ---------------------------------------------------------------- overview
