@@ -543,7 +543,7 @@ fn main() {
     std::panic::set_hook(Box::new(|info| {
         let bt = std::backtrace::Backtrace::capture();
         let msg = format!("PANIC: {info}\n{bt}");
-        let _ = std::fs::write("cl_panic.log", &msg);
+        let _ = std::fs::write("gtt_panic.log", &msg);
         eprintln!("{msg}");
     }));
     if let Err(e) = App::run_component::<Shell>(()) {
