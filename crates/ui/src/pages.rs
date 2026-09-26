@@ -6,9 +6,9 @@ use crate::config::UiConfig;
 use crate::theme::Theme;
 use crate::widgets as w;
 use crate::{Msg, Shell, Snapshot, DETAIL_PAGE_SIZE};
-use codeledger_core::store::EventRow;
-use codeledger_core::viewmodel::fmt;
-use codeledger_core::viewmodel::Range;
+use globaltokentracker_core::store::EventRow;
+use globaltokentracker_core::viewmodel::fmt;
+use globaltokentracker_core::viewmodel::Range;
 use windows_reactor::*;
 
 pub fn keyed(views: Vec<View>) -> impl Iterator<Item = KeyedView> {
@@ -768,7 +768,7 @@ pub fn prices_page(snap: Option<&Snapshot>, theme: &Theme) -> View {
                         match s.prices_synced_at {
                             Some(t) => format!(
                                 "联网同步于 {} 小时前",
-                                (codeledger_core::store::now_ms() - t) / 3_600_000
+                                (globaltokentracker_core::store::now_ms() - t) / 3_600_000
                             ),
                             None => "仅本地种子，尚未联网同步".to_string(),
                         }

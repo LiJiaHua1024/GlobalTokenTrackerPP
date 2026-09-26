@@ -1,4 +1,4 @@
-//! codeledger-ui — WinUI 3 shell via windows-reactor.
+//! globaltokentracker-ui — WinUI 3 shell via windows-reactor.
 //! Dumb renderer over core ViewModels; theme + layout are data (`ui.json`
 //! next to ledger.db), so skins / widget ordering survive without recompiles.
 
@@ -9,11 +9,11 @@ mod tray;
 mod watch;
 mod widgets;
 
-use codeledger_core::adapters;
-use codeledger_core::store::{default_db_path, EventRow, PriceRow, SourceHealth};
-use codeledger_core::viewmodel::fmt;
-use codeledger_core::viewmodel::Range;
-use codeledger_core::{Engine, OverviewVm, Store};
+use globaltokentracker_core::adapters;
+use globaltokentracker_core::store::{default_db_path, EventRow, PriceRow, SourceHealth};
+use globaltokentracker_core::viewmodel::fmt;
+use globaltokentracker_core::viewmodel::Range;
+use globaltokentracker_core::{Engine, OverviewVm, Store};
 use config::UiConfig;
 use pages::*;
 use std::path::PathBuf;
@@ -93,9 +93,9 @@ const REFRESH_SECS: u64 = 30;
 /// Spec §6.9: quota polling is low-frequency by design.
 const QUOTA_POLL_SECS: u64 = 30 * 60;
 
-/// `CL_DEBUG=1` → diagnostic stderr (invisible for normal GUI launches).
+/// `GTT_DEBUG=1` → diagnostic stderr (invisible for normal GUI launches).
 pub(crate) fn diag_enabled() -> bool {
-    std::env::var_os("CL_DEBUG").is_some()
+    std::env::var_os("GTT_DEBUG").is_some()
 }
 
 macro_rules! diag {
@@ -119,8 +119,8 @@ fn load_all(range: Range) -> Result<Snapshot, String> {
     let scan_ms = t.elapsed().as_millis();
     // Price book self-heals: stale >24h → pull models.dev+LiteLLM, reprice
     // unpriced events. Network failure keeps the current book untouched.
-    if codeledger_core::pricing::prices_stale(&engine.store).unwrap_or(false) {
-        match codeledger_core::pricing::refresh(&engine.store) {
+    if globaltokentracker_core::pricing::prices_stale(&engine.store).unwrap_or(false) {
+        match globaltokentracker_core::pricing::refresh(&engine.store) {
             Ok(r) => diag!(
                 "[prices] synced: dev={} litellm={} repriced={}",
                 r.models_dev, r.litellm, r.repriced
@@ -136,7 +136,7 @@ fn load_all(range: Range) -> Result<Snapshot, String> {
     let sources = engine.store.source_health().map_err(|e| e.to_string())?;
     let prices = engine.store.price_rows(5000).map_err(|e| e.to_string())?;
     let prices_synced_at =
-        codeledger_core::pricing::last_live_sync(&engine.store).unwrap_or(None);
+        globaltokentracker_core::pricing::last_live_sync(&engine.store).unwrap_or(None);
     Ok(Snapshot {
         vm,
         detail: DetailBundle {
@@ -213,9 +213,9 @@ impl Component for Shell {
         }
         let theme = Theme::resolve(&config.theme);
         // OTLP receiver: dedicated blocking thread (never the reactor pool).
-        // Port busy or CL_NO_OTEL → file-based sources only.
-        let _otel = codeledger_core::otel::spawn(db_path());
-        let page = match std::env::var("CL_PAGE").as_deref() {
+        // Port busy or GTT_NO_OTEL → file-based sources only.
+        let _otel = globaltokentracker_core::otel::spawn(db_path());
+        let page = match std::env::var("GTT_PAGE").as_deref() {
             Ok("detail") => Page::Detail,
             Ok("quota") => Page::Quota,
             Ok("sources") => Page::Sources,
@@ -231,7 +231,7 @@ impl Component for Shell {
             config,
             range,
             theme,
-            editing: std::env::var("CL_EDIT").is_ok(),
+            editing: std::env::var("GTT_EDIT").is_ok(),
             tray,
             trend: widgets::TrendHandle::default(),
             quota_at: None,
@@ -251,7 +251,7 @@ impl Component for Shell {
                         .map(|s| fmt::tokens_total(&s.vm.today))
                         .unwrap_or(0);
                     let _ = tray.set_tooltip(Some(format!(
-                        "CodeLedger — 今日 {}",
+                        "GlobalTokenTracker — 今日 {}",
                         fmt::tokens_exact(total)
                     )));
                 }
@@ -376,7 +376,7 @@ impl Component for Shell {
     }
 
     fn view(&self, _input: &(), context: &mut ViewContext<Self>) -> View {
-        context.window_title("CodeLedger");
+        context.window_title("GlobalTokenTracker");
         context.window_visuals(
             WindowVisuals::new()
                 .backdrop(WindowBackdrop::Mica)
@@ -432,7 +432,7 @@ impl Component for Shell {
                             .children((
                                 SymbolIcon::new().symbol(Symbol::ViewAll),
                                 TextBlock::new()
-                                    .text("CodeLedger")
+                                    .text("GlobalTokenTracker")
                                     .font_size(14.0)
                                     .font_weight(FontWeight::SEMI_BOLD)
                                     .vertical_alignment(VerticalAlignment::Center),
@@ -445,14 +445,14 @@ impl Component for Shell {
 }
 
 impl Shell {
-    /// Low-frequency vendor quota poll (spec §6.9) — `CL_NO_QUOTA` disables.
+    /// Low-frequency vendor quota poll (spec §6.9) — `GTT_NO_QUOTA` disables.
     /// Errors are logged via diag only; the quota page shows what landed.
     fn poll_quota_if_stale(&mut self, context: &ComponentContext<Self>) {
         let stale = self
             .quota_at
             .map(|t| t.elapsed().as_secs() > QUOTA_POLL_SECS)
             .unwrap_or(true);
-        if !stale || std::env::var_os("CL_NO_QUOTA").is_some() {
+        if !stale || std::env::var_os("GTT_NO_QUOTA").is_some() {
             return;
         }
         self.quota_at = Some(std::time::Instant::now());
@@ -461,7 +461,7 @@ impl Shell {
             let mut errs = Vec::new();
             match Store::open(&db_path()) {
                 Ok(store) => {
-                    for o in codeledger_core::quota::poll_all() {
+                    for o in globaltokentracker_core::quota::poll_all() {
                         if let Some(e) = o.error {
                             errs.push(format!("{}: {e}", o.app));
                         }

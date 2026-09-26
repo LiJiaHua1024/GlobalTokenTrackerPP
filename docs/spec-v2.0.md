@@ -1,4 +1,4 @@
-# AI 编码工具统一用量统计器（CodeLedger）——最终实施方案
+# AI 编码工具统一用量统计器（GlobalTokenTracker）——最终实施方案
 
 > 版本：v2.0（深度调研版）｜日期：2026-09-26
 > 调研方式：7 路智能体（本机两轮逐目录实测、cc-switch 源码级分析、TokenTracker/cursor-usage/tokcat/agent-trail 源码克隆拆解、价格表实测下载比对、官方文档核验）+ 本机 31 万条真实记录交叉对账。
@@ -115,7 +115,7 @@
 │ ⑤ 价格同步器: models.dev(主) + LiteLLM(分档) + OpenRouter(canonical_slug) + 内置离线快照 + 用户覆写      │
 └──────────────────────────────────┬──────────────────────────────────────────────────────────────────┘
                                    ▼  归一化管线（§7：字段变体→口径归一→模型别名→计价→provenance）
-┌──────────────────────── 存储层（~/.codeledger/ledger.db，SQLite WAL） ────────────────────────────────┐
+┌──────────────────────── 存储层（~/.globaltokentracker/ledger.db，SQLite WAL） ────────────────────────────────┐
 │ usage_events(明细, dedup_key UPSERT) │ sync_cursors(游标) │ quota_snapshots(配额时序)                    │
 │ prices / price_overrides / model_aliases │ daily_rollups(本地午夜对齐) │ sources(启停/健康)             │
 └──────────────────────────────────┬──────────────────────────────────────────────────────────────────┘

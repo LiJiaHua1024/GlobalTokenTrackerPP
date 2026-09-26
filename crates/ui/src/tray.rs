@@ -17,19 +17,19 @@ pub enum TrayAction {
     Quit,
 }
 
-/// Install the tray icon. `None` on failure or `CL_NOTRAY` (diagnostics).
+/// Install the tray icon. `None` on failure or `GTT_NOTRAY` (diagnostics).
 pub fn install() -> Option<TrayIcon> {
-    if std::env::var("CL_NOTRAY").is_ok() {
+    if std::env::var("GTT_NOTRAY").is_ok() {
         return None;
     }
     let icon = glyph_icon().ok()?;
     let menu = Menu::new();
-    let _ = menu.append(&MenuItem::with_id(MENU_SHOW, "显示 CodeLedger", true, None));
+    let _ = menu.append(&MenuItem::with_id(MENU_SHOW, "显示 GlobalTokenTracker", true, None));
     let _ = menu.append(&MenuItem::with_id(MENU_HIDE, "隐藏到托盘", true, None));
     let _ = menu.append(&MenuItem::with_id(MENU_QUIT, "退出", true, None));
     TrayIconBuilder::new()
         .with_menu(Box::new(menu))
-        .with_tooltip("CodeLedger")
+        .with_tooltip("GlobalTokenTracker")
         .with_icon(icon)
         .build()
         .map_err(|e| eprintln!("tray: install failed: {e}"))
@@ -44,7 +44,7 @@ pub fn focus_main_window() {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         AllowSetForegroundWindow, FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE,
     };
-    let title: Vec<u16> = "CodeLedger\0".encode_utf16().collect();
+    let title: Vec<u16> = "GlobalTokenTracker\0".encode_utf16().collect();
     unsafe {
         // Permit this process to steal foreground (background call otherwise
         // gets rejected silently on locked desktops).
@@ -66,7 +66,7 @@ pub fn focus_main_window() {}
 #[cfg(windows)]
 pub fn hide_main_window() {
     use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SW_HIDE};
-    let title: Vec<u16> = "CodeLedger\0".encode_utf16().collect();
+    let title: Vec<u16> = "GlobalTokenTracker\0".encode_utf16().collect();
     unsafe {
         let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
         if !hwnd.is_null() {

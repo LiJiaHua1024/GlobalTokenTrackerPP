@@ -1,15 +1,15 @@
-//! codeledger-cli — dev harness & power-user entry.
+//! globaltokentracker-cli — dev harness & power-user entry.
 //! `scan` | `report [today|week|month|all]` | `reconcile` | `sources`
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use codeledger_core::{Engine, Store, store::default_db_path};
+use globaltokentracker_core::{Engine, Store, store::default_db_path};
 use tabled::{Table, Tabled};
 
 #[derive(Parser)]
-#[command(name = "codeledger", version, about = "Unified AI-coding usage ledger")]
+#[command(name = "globaltokentracker", version, about = "Unified AI-coding usage ledger")]
 struct Cli {
-    /// Ledger DB path (default ~/.codeledger/ledger.db).
+    /// Ledger DB path (default ~/.globaltokentracker/ledger.db).
     #[arg(long, global = true)]
     db: Option<std::path::PathBuf>,
     #[command(subcommand)]
@@ -112,17 +112,17 @@ fn main() -> Result<()> {
             println!("daily_rollups: {n} rows rebuilt (local offset {off})");
         }
         Cmd::Export { span, out } => export(&engine, &span, out.as_deref())?,
-        Cmd::Otel => codeledger_core::otel::serve(&db)?,
+        Cmd::Otel => globaltokentracker_core::otel::serve(&db)?,
         Cmd::OtelSetup => {
-            let p = codeledger_core::otel::install_claude_env()?;
+            let p = globaltokentracker_core::otel::install_claude_env()?;
             println!("OTEL env merged into {}", p.display());
         }
         Cmd::Prices { update } => {
-            use codeledger_core::pricing;
+            use globaltokentracker_core::pricing;
             let last = pricing::last_live_sync(&engine.store)?;
             match last {
                 Some(t) => {
-                    let age_h = (codeledger_core::store::now_ms() - t) / 3_600_000;
+                    let age_h = (globaltokentracker_core::store::now_ms() - t) / 3_600_000;
                     println!("live price book: synced {age_h}h ago (stale>{})", pricing::PRICE_TTL_SECS / 3600);
                 }
                 None => println!("live price book: never synced (seed fallback active)"),
@@ -136,7 +136,7 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Quota => {
-            for o in codeledger_core::quota::poll_all() {
+            for o in globaltokentracker_core::quota::poll_all() {
                 match o.error {
                     Some(e) => eprintln!("{}: ERR {e}", o.app),
                     None => {
@@ -260,11 +260,11 @@ fn span_ms(span: &str) -> (Option<i64>, Option<i64>) {
 }
 
 fn local_offset() -> String {
-    codeledger_core::viewmodel::local_utc_offset()
+    globaltokentracker_core::viewmodel::local_utc_offset()
 }
 
 fn fmt_tok(n: u64) -> String {
-    codeledger_core::viewmodel::fmt::tokens_exact(n)
+    globaltokentracker_core::viewmodel::fmt::tokens_exact(n)
 }
 
 fn report(engine: &Engine, span: &str) -> Result<()> {
@@ -320,7 +320,7 @@ fn report(engine: &Engine, span: &str) -> Result<()> {
 }
 
 fn reconcile(engine: &Engine, ccs: Option<std::path::PathBuf>) -> Result<()> {
-    let path = ccs.unwrap_or_else(|| codeledger_core::sync::home(".cc-switch/cc-switch.db"));
+    let path = ccs.unwrap_or_else(|| globaltokentracker_core::sync::home(".cc-switch/cc-switch.db"));
     let conn = rusqlite::Connection::open_with_flags(
         format!("file:{}?mode=ro", path.to_string_lossy().replace('\\', "/")),
         rusqlite::OpenFlags::SQLITE_OPEN_URI | rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -361,7 +361,7 @@ fn reconcile(engine: &Engine, ccs: Option<std::path::PathBuf>) -> Result<()> {
     // total_token_usage.total_tokens (347/347 match, 0 miss); total_tokens
     // == input+output (cached ⊂ input, reasoning ⊂ output). Each file's last
     // cumulative line is already persisted in sync_cursors.adapter_state.cum.
-    let s5 = codeledger_core::sync::home(".codex/state_5.sqlite");
+    let s5 = globaltokentracker_core::sync::home(".codex/state_5.sqlite");
     if s5.exists() {
         let conn2 = rusqlite::Connection::open_with_flags(
             format!("file:{}?mode=ro", s5.to_string_lossy().replace('\\', "/")),
@@ -416,7 +416,7 @@ fn norm_path(p: &str) -> String {
     let abs = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        codeledger_core::sync::home(p)
+        globaltokentracker_core::sync::home(p)
     };
     abs.to_string_lossy().replace('/', "\\").to_lowercase()
 }

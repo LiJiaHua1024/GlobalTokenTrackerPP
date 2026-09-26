@@ -248,66 +248,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
-name = "codeledger-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "codeledger-core",
- "jiff",
- "rusqlite",
- "serde_json",
- "tabled",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "codeledger-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "crossbeam-channel",
- "dirs",
- "flate2",
- "jiff",
- "notify",
- "rayon",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.21",
- "tracing",
- "ureq",
-]
-
-[[package]]
-name = "codeledger-setup"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ureq",
- "winreg",
- "zip",
-]
-
-[[package]]
-name = "codeledger-ui"
-version = "0.1.0"
-dependencies = [
- "codeledger-core",
- "crossbeam-channel",
- "notify",
- "serde",
- "serde_json",
- "tray-icon",
- "windows-canvas",
- "windows-reactor",
- "windows-sys 0.60.2",
-]
-
-[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -812,6 +752,66 @@ checksum = "063ce2eb6a8d0ea93d2bf8ba1957e78dbab6be1c2220dd3daca57d5a9d869898"
 dependencies = [
  "libc",
  "system-deps",
+]
+
+[[package]]
+name = "globaltokentracker-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "globaltokentracker-core",
+ "jiff",
+ "rusqlite",
+ "serde_json",
+ "tabled",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "globaltokentracker-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crossbeam-channel",
+ "dirs",
+ "flate2",
+ "jiff",
+ "notify",
+ "rayon",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
+ "tracing",
+ "ureq",
+]
+
+[[package]]
+name = "globaltokentracker-setup"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ureq",
+ "winreg",
+ "zip",
+]
+
+[[package]]
+name = "globaltokentracker-ui"
+version = "0.1.0"
+dependencies = [
+ "crossbeam-channel",
+ "globaltokentracker-core",
+ "notify",
+ "serde",
+ "serde_json",
+ "tray-icon",
+ "windows-canvas",
+ "windows-reactor",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

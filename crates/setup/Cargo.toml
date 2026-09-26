@@ -1,14 +1,14 @@
 [package]
-name = "codeledger-setup"
+name = "globaltokentracker-setup"
 version.workspace = true
 edition.workspace = true
-description = "CodeLedger self-extracting installer (per-user, no admin)"
+description = "GlobalTokenTracker self-extracting installer (per-user, no admin)"
 
 [lints]
 workspace = true
 
 [[bin]]
-name = "codeledger-setup"
+name = "globaltokentracker-setup"
 path = "src/main.rs"
 
 [dependencies]

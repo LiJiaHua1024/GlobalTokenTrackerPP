@@ -73,7 +73,7 @@
   2. **watch 自激循环**：只读打开 SQLite 也会更新 `*-shm`（WAL 共享内存锁文件）→ 每次扫描触发新事件 → 无限重扫。过滤 `*-shm`/`*-journal`/`*.tmp` 解决；`-wal` 保留（真实写入先落 wal，不漏信号）。端到端验证：新文件写入 → 1 次 WatchFired → 1 次增量扫 → 游标落库。
 - **`tray.rs`**：系统托盘（程序化 32px 圆角图标+柱状字形，零资源文件），左键/双击/「显示」→ `FindWindowW+SetForegroundWindow` 聚焦（`AllowSetForegroundWindow` 解锁后台激活），「退出」→ `WindowRef::request_close`；tooltip 随每次 Loaded 刷新"今日 X tok"。
 - **限制记录**：reactor 0.100.0 `WindowRef` 无 hide/minimize → 托盘是启动器+状态牌，不能"最小化到托盘"（待上游 API 或自管 HWND）。
-- 诊断：`CL_DEBUG=1` 才开 stderr 日志；`CL_NOTRAY` 跳过托盘安装。
+- 诊断：`GTT_DEBUG=1` 才开 stderr 日志；`GTT_NOTRAY` 跳过托盘安装。
 - ui.json 持久化已实测：覆写 accent=#a371f7 + 部件重排/隐藏，重启后精确生效（截图核对）。
 
 ## P1 适配器扩展 ✅（Grok + WorkBuddy；Qoder 有意延后）
@@ -111,11 +111,11 @@
 - **最小化到托盘** ✅：`WindowRef` 无 hide 走 Win32 `SW_HIDE`/`SW_RESTORE` 绕行；托盘菜单新增"隐藏到托盘"，左键/「显示」恢复。真实窗口隐藏-恢复链路成立。
 - **趋势图悬停** ✅：`TrendHandle{shared: Rc<TrendShared>, inv: Invalidator}`——Border 包 canvas 收 `on_pointer_moved/exited` → Msg 回环写 `Rc<Cell>` → `invalidate()` 只重绘不重渲染；悬停柱全 alpha + 描边 + 右上 `MM-DD · tokens` 明细。
 - **OTLP 接收器** ✅（`otel.rs`）：`127.0.0.1:4318` `POST /v1/metrics`，std::net 极简 HTTP/1.1（无 tokio/axum，头 8KB/体 8MB 上限，10s 读超时）；**专用 OS 线程**不占 reactor 池；`otel_metrics` 表 `(metric,session_id,attr_sig)` 原位 upsert——累积序列重复推送不双计；官方指标与价目估算分列（不进 usage_events）。curl 实测 200 + 落库正确。
-- **Claude OTel 引导** ✅：`codeledger otel-setup` 合并写 `~/.claude/settings.json` env 块（serde_json `preserve_order` 保住 cc-switch 键序）；实测既有键全保留。
+- **Claude OTel 引导** ✅：`globaltokentracker otel-setup` 合并写 `~/.claude/settings.json` env 块（serde_json `preserve_order` 保住 cc-switch 键序）；实测既有键全保留。
 - **配额轮询器** ✅（`quota.rs`，tokcat 源码级复核）：
   - Codex wham `GET /wham/usage`：Bearer + `ChatGPT-Account-Id`；`last_refresh>8d` 或 401/403 触发 OAuth 刷新回写 auth.json；primary/secondary 按 `limit_window_seconds` 分 `5h_block`/`weekly`；实测 **weekly 0% + reset 命中真数据**。
   - Cursor `POST api2.cursor.sh .../GetCurrentPeriodUsage`（Connect RPC JSON，`Connect-Protocol-Version:1`）：`planUsage` lenient 双形数字、cents→USD、auto/api 池分行；实测 3 行落库。
-  - UI 30 分钟低频门（`CL_NO_QUOTA` 关），CLI `codeledger quota` 手动。UI 实测 4 行 0 错。
+  - UI 30 分钟低频门（`GTT_NO_QUOTA` 关），CLI `globaltokentracker quota` 手动。UI 实测 4 行 0 错。
 - **仍 blocked（如实）**：Qoder（`.auth` 仅 machine_id，无 cookie/token——留手动粘贴入口到 M3）、Claude oauth（`.credentials.json` 只有 mcpOAuth 无 claudeAiOauth）、CodeBuddy/Gemini（本机无数据文件）、wham 每日明细端点（`daily-token-usage-breakdown` 未接，窗口信号已够配额页用）。
 
 ## 待办（S9+）
@@ -166,13 +166,13 @@
 ## S11 单文件安装器 ✅
 
 - **需求**：安装文件必须是一个 exe。
-- **实现**：新 crate `codeledger-setup`——`include_bytes!` 内嵌 `payload.zip`（build.rs 兜底 22B 空 zip，dev 构建不受影响），运行时 zip-deflate 解压到 `%LOCALAPPDATA%\Programs\CodeLedger`。
-- **安装动作**：WinAppRuntime 检测（`Get-AppxPackage Microsoft.WindowsAppRuntime*`）→ 缺失则提示下载微软官方 aka.ms 安装包（ureq+rustls）→ taskkill 旧实例 → 释放文件 → 复制自身为卸载器 → WScript.Shell 快捷方式（powershell COM，免引 windows crate COM 面）→ HKCU `Uninstall\CodeLedger` 注册（DisplayVersion/EstimatedSize/QuietUninstallString）→ 用户 PATH 追加（去重）。
-- **卸载**：`--uninstall [--dir]`——杀进程、删快捷方式、删 HKCU 项、PATH 回滚、detach cmd `rmdir` 自删目录（程序运行中 exe 不可删 → 延迟 cmd）；用户数据 `~/.codeledger` 明确保留。
+- **实现**：新 crate `globaltokentracker-setup`——`include_bytes!` 内嵌 `payload.zip`（build.rs 兜底 22B 空 zip，dev 构建不受影响），运行时 zip-deflate 解压到 `%LOCALAPPDATA%\Programs\GlobalTokenTracker`。
+- **安装动作**：WinAppRuntime 检测（`Get-AppxPackage Microsoft.WindowsAppRuntime*`）→ 缺失则提示下载微软官方 aka.ms 安装包（ureq+rustls）→ taskkill 旧实例 → 释放文件 → 复制自身为卸载器 → WScript.Shell 快捷方式（powershell COM，免引 windows crate COM 面）→ HKCU `Uninstall\GlobalTokenTracker` 注册（DisplayVersion/EstimatedSize/QuietUninstallString）→ 用户 PATH 追加（去重）。
+- **卸载**：`--uninstall [--dir]`——杀进程、删快捷方式、删 HKCU 项、PATH 回滚、detach cmd `rmdir` 自删目录（程序运行中 exe 不可删 → 延迟 cmd）；用户数据 `~/.globaltokentracker` 明确保留。
 - **踩过的坑（实测抓出）**：
   1. `Command::arg()` 对 cmd `/C` 字符串做 `\"` 转义 → cmd 读到字面 `\"` 解析失败，自删静默不执行——改 `raw_arg()` 原样透传。
   2. UninstallString 原先不带 `--dir`——自定义目录安装后走注册表卸载会清错路径——始终显式携带。
-- **产出**：`installer/package.ps1` 一条命令：release 构建 → Compress-Archive 打 payload → 嵌包构建 → `dist\CodeLedger-Setup-<ver>-win-x64.exe`（**8.78MB**）+ SHA256。
+- **产出**：`installer/package.ps1` 一条命令：release 构建 → Compress-Archive 打 payload → 嵌包构建 → `dist\GlobalTokenTracker-Setup-<ver>-win-x64.exe`（**8.78MB**）+ SHA256。
 - **实测**：默认路径 install/uninstall 全链路、带空格 `--dir` 路径 install/uninstall（注册表串直接复用验证）、快捷方式/PATH/注册表落点逐项核对、CLI 安装后报表出真数据。
 - **边界**：WinAppRuntime 安装步骤本身可能弹 UAC（微软安装器行为，非我们可控）；`--quiet` 自动接受运行时安装；dev 桩 exe 拒绝安装并提示走 package.ps1。
 
@@ -180,7 +180,7 @@
 
 | 指标 | 实测 | 判定 |
 |---|---|---|
-| 安装器体积 | `CodeLedger-Setup-0.1.0-win-x64.exe` 8.78MB（双 exe deflate 压缩） | ✅ |
+| 安装器体积 | `GlobalTokenTracker-Setup-0.1.0-win-x64.exe` 8.78MB（双 exe deflate 压缩） | ✅ |
 | 联网价目刷新 | 2.4s（dev 7750 行 + litellm 3635 行 + 落库 + reprice 扫描），仅 UI 启动时 24h 陈旧时后台跑 | ✅ 不阻塞首帧 |
 | UI 启动/内存 | release 正常起窗，121.7MB RSS 与上轮一致（刷新在 load_all 内非阻塞） | ✅ 无回归 |
 | 新增出站端点 | models.dev + raw.githubusercontent.com（固定 HTTPS，ureq/rustls） | ✅ |
@@ -198,3 +198,13 @@
 - **`fmt::tokens_exact`**：千分位精确数字（`1,730,848,235`），全 UI + CLI `report`/`export` 表头统一替换；D2D 图顶标与悬停明细同步换精确值。
 - **实测截图**：近7天（4,760 事件/1.73B 精确）与全部（52,874 事件/60 桶趋势/活跃 14m12s）两档渲染均正确；持久化重启后范围保持。
 - **测试**：+3（hourly 分桶、tokens_exact 分组、Range key/label 往返）；18/18 绿，clippy 0。
+
+## S13 产品改名 CodeLedger → GlobalTokenTracker ✅
+
+- **全量改名**：crate 包名 `globaltokentracker-{core,ui,cli,setup}`、二进制 `globaltokentracker-*.exe`、窗口标题/托盘 tooltip/快捷方式/HKCU 卸载项（`Uninstall\GlobalTokenTracker`）/安装目录 `Programs\GlobalTokenTracker`/发布包 `GlobalTokenTracker-Setup-*`、诊断环境变量 `CL_*`→`GTT_*`、文档全扫。
+- **数据目录迁移**：`default_db_path()` 检测到 `~/.codeledger` 存在且新目录不存在时原地 `fs::rename` 到 `~/.globaltokentracker`——实测 52,874 事件无损迁移，ui.json 同步搬家。
+- **踩坑**：
+  1. HKCU\Environment 的 `Path` 写入被拦（未签名二进制的 EDR/策略保护，powershell 签名进程可写）→ PATH 追加改**尽力而为**，失败只告警不阻断安装。
+  2. `cargo clean -p` 匹配不到改名后的包指纹（"Removed 0 files"）且不清顶层 exe 硬链——package.ps1 改 touch build.rs 强制重嵌 payload。
+- **实测**：新名安装（PATH 拒绝优雅降级）→ CLI 报表出真数据 → 卸载目录自删干净；窗口标题、注册表、快捷方式均为新名；包 8.79MB。
+- **测试**：18/18 绿，clippy 0 警告。

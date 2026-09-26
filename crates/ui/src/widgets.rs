@@ -4,7 +4,7 @@
 
 use crate::theme::Theme;
 use crate::{Msg, Shell};
-use codeledger_core::viewmodel::fmt;
+use globaltokentracker_core::viewmodel::fmt;
 use std::cell::Cell;
 use std::rc::Rc;
 use windows_canvas::Invalidator;

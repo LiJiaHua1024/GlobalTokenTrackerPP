@@ -220,7 +220,7 @@ fn http_get(url: &str) -> Result<String> {
         .new_agent();
     let mut resp = agent
         .get(url)
-        .header("User-Agent", "CodeLedger")
+        .header("User-Agent", "GlobalTokenTracker")
         .call()
         .with_context(|| format!("GET {url}"))?;
     Ok(resp.body_mut().read_to_string()?)

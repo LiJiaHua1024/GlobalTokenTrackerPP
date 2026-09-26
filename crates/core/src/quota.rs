@@ -124,7 +124,7 @@ fn wham_usage(agent: &ureq::Agent, token: &str, account: Option<&str>) -> Result
         .get(CODEX_USAGE_URL)
         .header("Authorization", &format!("Bearer {token}"))
         .header("Accept", "application/json")
-        .header("User-Agent", "CodeLedger");
+        .header("User-Agent", "GlobalTokenTracker");
     if let Some(id) = account.filter(|s| !s.is_empty()) {
         req = req.header("ChatGPT-Account-Id", id);
     }
@@ -239,7 +239,7 @@ fn poll_cursor() -> Result<Vec<QuotaSnapshot>> {
         .header("Authorization", &format!("Bearer {token}"))
         .header("Connect-Protocol-Version", "1")
         .header("Accept", "application/json")
-        .header("User-Agent", "CodeLedger")
+        .header("User-Agent", "GlobalTokenTracker")
         .header("Content-Type", "application/json")
         .send_json(serde_json::json!({}))
         .map_err(|e| anyhow::anyhow!("cursor usage: {e}"))?;

@@ -1,10 +1,10 @@
 [package]
-name = "codeledger-ui"
+name = "globaltokentracker-ui"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-codeledger-core = { version = "0.1.0", path = "../core" }
+globaltokentracker-core = { version = "0.1.0", path = "../core" }
 crossbeam-channel = "0.5.15"
 notify = "8.2.0"
 serde = { version = "1.0.229", features = ["derive"] }

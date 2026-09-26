@@ -1,4 +1,4 @@
-# CodeLedger / GlobalTokenTracker — 工程实施计划
+# GlobalTokenTracker / GlobalTokenTracker — 工程实施计划
 
 > 依据 `docs/spec-v2.0.md`（v2.0 调研方案）。技术栈按新要求调整：**纯 Rust + WinUI 3（windows-reactor）**，替代原方案的 Tauri+React。
 > 日期：2026-09-26 ｜ 状态：进行中
@@ -31,7 +31,7 @@ XAML 编译器只支持 C#/C++，纯 Rust 只能 code-only 手写控件树（社
 ```
 GlobalTokenTracker/
 ├── crates/
-│   ├── core/        # codeledger-core —— 跨平台引擎（spec §4-§8 的全部逻辑）
+│   ├── core/        # globaltokentracker-core —— 跨平台引擎（spec §4-§8 的全部逻辑）
 │   │   ├── src/model.rs       # UsageEvent/CostSource/Provenance/InputSemantics
 │   │   ├── src/store/         # SQLite schema + 迁移 + 查询（ViewModel SQL 也在这里）
 │   │   ├── src/adapters/      # 12 个 SourceAdapter（P0 先做 4 个）
@@ -39,8 +39,8 @@ GlobalTokenTracker/
 │   │   ├── src/pricing/       # models.dev + LiteLLM + 覆写层 + 离线种子
 │   │   ├── src/sync/          # 字节游标 + 尾部指纹 + notify 监听 + 60s 轮询
 │   │   └── src/engine.rs      # 管线编排：scan → normalize → price → upsert → rollup
-│   ├── cli/         # codeledger-cli —— scan/report/reconcile/prices（开发验证 + 高级用户）
-│   └── ui/          # codeledger-ui —— windows-reactor WinUI3（cfg windows only）
+│   ├── cli/         # globaltokentracker-cli —— scan/report/reconcile/prices（开发验证 + 高级用户）
+│   └── ui/          # globaltokentracker-ui —— windows-reactor WinUI3（cfg windows only）
 └── docs/            # spec-v2.0.md（原始调研）、PLAN.md、REVIEW.md（每步审查记录）
 ```
 

@@ -3,7 +3,7 @@
 //! skins/layouts even without the in-app editor.
 
 use crate::theme::ThemeConfig;
-use codeledger_core::store::default_db_path;
+use globaltokentracker_core::store::default_db_path;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;

@@ -15,12 +15,17 @@ pub use query::{
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_VERSION: i64 = 1;
 
-/// Default database location: `~/.codeledger/ledger.db`.
+/// Default database location: `~/.globaltokentracker/ledger.db`.
 pub fn default_db_path() -> std::path::PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".codeledger")
-        .join("ledger.db")
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let dir = home.join(".globaltokentracker");
+    // Rename-era migration: pre-rename builds stored the ledger at
+    // ~/.codeledger. Move the whole dir (db + ui.json) once, in place.
+    let legacy = home.join(".codeledger");
+    if !dir.exists() && legacy.is_dir() {
+        let _ = std::fs::rename(&legacy, &dir);
+    }
+    dir.join("ledger.db")
 }
 
 pub struct Store {

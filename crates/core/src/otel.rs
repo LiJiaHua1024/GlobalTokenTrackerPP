@@ -23,9 +23,9 @@ const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Spawn the receiver on a dedicated OS thread (it blocks forever — must NOT
 /// go through reactor's task pool). Returns `None` if the port is taken or
-/// `CL_NO_OTEL` is set; the app then runs file-based sources only.
+/// `GTT_NO_OTEL` is set; the app then runs file-based sources only.
 pub fn spawn(db: PathBuf) -> Option<std::thread::JoinHandle<()>> {
-    if std::env::var_os("CL_NO_OTEL").is_some() {
+    if std::env::var_os("GTT_NO_OTEL").is_some() {
         return None;
     }
     let listener = match TcpListener::bind(DEFAULT_ADDR) {
@@ -46,7 +46,7 @@ pub fn spawn(db: PathBuf) -> Option<std::thread::JoinHandle<()>> {
     }))
 }
 
-/// Standalone (CLI `codeledger otel`) blocking variant.
+/// Standalone (CLI `globaltokentracker otel`) blocking variant.
 pub fn serve(db: &Path) -> Result<()> {
     let listener = TcpListener::bind(DEFAULT_ADDR)
         .with_context(|| format!("otel: bind {DEFAULT_ADDR}"))?;

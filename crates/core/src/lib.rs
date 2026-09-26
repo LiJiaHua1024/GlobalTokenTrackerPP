@@ -1,4 +1,4 @@
-//! codeledger-core — cross-platform usage-tracking engine.
+//! globaltokentracker-core — cross-platform usage-tracking engine.
 //!
 //! Contains zero platform/UI dependencies: every adapter, the normalization
 //! pipeline, pricing, SQLite storage and the sync scheduler live here so the

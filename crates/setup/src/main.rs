@@ -1,7 +1,7 @@
-//! `CodeLedger` self-extracting installer — per-user, no admin.
+//! `GlobalTokenTracker` self-extracting installer — per-user, no admin.
 //!
-//! `installer/package.ps1` drops `payload.zip` (codeledger-ui.exe +
-//! codeledger-cli.exe) into `crates/setup/payload/` before building; build.rs
+//! `installer/package.ps1` drops `payload.zip` (globaltokentracker-ui.exe +
+//! globaltokentracker-cli.exe) into `crates/setup/payload/` before building; build.rs
 //! embeds it via `include_bytes!`. Plain dev builds embed an empty zip and
 //! refuse to install.
 //!
@@ -17,12 +17,12 @@ use std::process::{Command, Stdio};
 
 static PAYLOAD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/payload.zip"));
 
-const APP: &str = "CodeLedger";
+const APP: &str = "GlobalTokenTracker";
 const VER: &str = env!("CARGO_PKG_VERSION");
 const RUNTIME_URL: &str =
     "https://aka.ms/windowsappsdk/1.8/latest/windowsappruntimeinstall-x64.exe";
 const UNINSTALL_KEY: &str =
-    r"Software\Microsoft\Windows\CurrentVersion\Uninstall\CodeLedger";
+    r"Software\Microsoft\Windows\CurrentVersion\Uninstall\GlobalTokenTracker";
 
 fn local_appdata() -> Result<PathBuf> {
     env::var_os("LOCALAPPDATA")
@@ -64,7 +64,7 @@ fn ensure_runtime(quiet: bool) -> Result<()> {
         std::io::stdin().read_line(&mut s)?;
         let s = s.trim();
         if !(s.is_empty() || s.eq_ignore_ascii_case("y")) {
-            println!("!! 已跳过 —— codeledger-ui.exe 在安装运行时后才能启动");
+            println!("!! 已跳过 —— globaltokentracker-ui.exe 在安装运行时后才能启动");
             return Ok(());
         }
     }
@@ -83,7 +83,7 @@ fn ensure_runtime(quiet: bool) -> Result<()> {
 }
 
 fn stop_running() {
-    for name in ["codeledger-ui.exe", "codeledger-cli.exe"] {
+    for name in ["globaltokentracker-ui.exe", "globaltokentracker-cli.exe"] {
         let _ = Command::new("taskkill")
             .args(["/F", "/IM", name])
             .stdout(Stdio::null())
@@ -126,8 +126,8 @@ fn make_shortcuts(dest: &Path) -> Result<()> {
         .join(r"Microsoft\Windows\Start Menu\Programs")
         .join(APP);
     fs::create_dir_all(&start)?;
-    let ui = dest.join("codeledger-ui.exe");
-    let uninstall = dest.join("codeledger-setup.exe");
+    let ui = dest.join("globaltokentracker-ui.exe");
+    let uninstall = dest.join("globaltokentracker-setup.exe");
     let script = format!(
         "$ws=New-Object -ComObject WScript.Shell;\
          $s=$ws.CreateShortcut('{}');$s.TargetPath='{}';$s.IconLocation='{}';$s.WorkingDirectory='{}';$s.Save();\
@@ -149,12 +149,12 @@ fn make_shortcuts(dest: &Path) -> Result<()> {
 fn register_uninstall(dest: &Path, size: u64) -> Result<()> {
     let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
     let (key, _) = hkcu.create_subkey(UNINSTALL_KEY)?;
-    let setup = dest.join("codeledger-setup.exe");
+    let setup = dest.join("globaltokentracker-setup.exe");
     key.set_value("DisplayName", &APP)?;
     key.set_value("DisplayVersion", &VER)?;
     key.set_value("Publisher", &APP)?;
     key.set_value("InstallLocation", &dest.display().to_string())?;
-    key.set_value("DisplayIcon", &dest.join("codeledger-ui.exe").display().to_string())?;
+    key.set_value("DisplayIcon", &dest.join("globaltokentracker-ui.exe").display().to_string())?;
     key.set_value("EstimatedSize", &u32::try_from(size / 1024).unwrap_or(u32::MAX))?;
     key.set_value("NoModify", &1u32)?;
     key.set_value("NoRepair", &1u32)?;
@@ -170,22 +170,31 @@ fn register_uninstall(dest: &Path, size: u64) -> Result<()> {
     Ok(())
 }
 
-/// Append dest to the *user* PATH so `codeledger-cli` works in terminals.
-fn extend_user_path(dest: &Path) -> Result<()> {
-    let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
-    let env_key = hkcu.open_subkey_with_flags(
-        "Environment",
-        winreg::enums::KEY_READ | winreg::enums::KEY_WRITE,
-    )?;
-    let cur: String = env_key.get_value("Path").unwrap_or_default();
-    let d = dest.display().to_string();
-    if cur.split(';').any(|p| p.trim_end_matches('\\').eq_ignore_ascii_case(d.trim_end_matches('\\'))) {
-        return Ok(());
+/// Append dest to the *user* PATH so `globaltokentracker-cli` works in
+/// terminals. Best-effort: EDR/policy may guard HKCU\Environment for unsigned
+/// binaries — a denied write must not fail the whole install.
+fn extend_user_path(dest: &Path) {
+    let inner = || -> Result<()> {
+        let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+        let env_key = hkcu.open_subkey_with_flags(
+            "Environment",
+            winreg::enums::KEY_READ | winreg::enums::KEY_WRITE,
+        )?;
+        let cur: String = env_key.get_value("Path").unwrap_or_default();
+        let d = dest.display().to_string();
+        if cur.split(';').any(|p| {
+            p.trim_end_matches('\\').eq_ignore_ascii_case(d.trim_end_matches('\\'))
+        }) {
+            return Ok(());
+        }
+        let new = if cur.is_empty() { d } else { format!("{cur};{d}") };
+        env_key.set_value("Path", &new)?;
+        Ok(())
+    };
+    match inner() {
+        Ok(()) => println!("==> 已加入用户 PATH（新开的终端生效）"),
+        Err(e) => println!("!! PATH 追加被拒（{e}）——不影响使用，CLI 可用完整路径"),
     }
-    let new = if cur.is_empty() { d } else { format!("{cur};{d}") };
-    env_key.set_value("Path", &new)?;
-    println!("==> 已加入用户 PATH（新开的终端生效）");
-    Ok(())
 }
 
 fn install(dest: &Path, quiet: bool) -> Result<()> {
@@ -197,18 +206,18 @@ fn install(dest: &Path, quiet: bool) -> Result<()> {
     let size = extract_payload(dest)?;
     // Persist a copy of this installer as the uninstaller.
     let self_exe = env::current_exe()?;
-    let setup_copy = dest.join("codeledger-setup.exe");
+    let setup_copy = dest.join("globaltokentracker-setup.exe");
     if self_exe.canonicalize()? != setup_copy.canonicalize().unwrap_or(setup_copy.clone()) {
         fs::copy(&self_exe, &setup_copy)?;
     }
     make_shortcuts(dest)?;
     register_uninstall(dest, size)?;
-    extend_user_path(dest)?;
+    extend_user_path(dest);
     println!();
     println!("{APP} {VER} 安装完成：");
     println!("  程序目录 : {}", dest.display());
     println!("  开始菜单 : %APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\{APP}");
-    println!("  数据目录 : %USERPROFILE%\\.codeledger（首次运行创建）");
+    println!("  数据目录 : %USERPROFILE%\\.globaltokentracker（首次运行创建）");
     Ok(())
 }
 
@@ -232,7 +241,7 @@ fn uninstall(dest: &Path) -> Result<()> {
             .collect();
         let _ = env_key.set_value("Path", &kept.join(";"));
     }
-    // We're running from dest\codeledger-setup.exe — schedule dir deletion
+    // We're running from dest\globaltokentracker-setup.exe — schedule dir deletion
     // via a detached cmd after this process exits. raw_arg keeps `/C ...`
     // unquoted in the command line so cmd parses `&`/`>` as metachars
     // (.arg() would backslash-escape the inner quotes and break /C).
@@ -246,7 +255,7 @@ fn uninstall(dest: &Path) -> Result<()> {
         .stderr(Stdio::null())
         .spawn()
         .context("schedule self-delete")?;
-    println!("已移除程序、快捷方式与卸载项；用户数据保留在 %USERPROFILE%\\.codeledger");
+    println!("已移除程序、快捷方式与卸载项；用户数据保留在 %USERPROFILE%\\.globaltokentracker");
     Ok(())
 }
 
