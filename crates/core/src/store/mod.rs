@@ -8,7 +8,9 @@ use rusqlite::{Connection, params};
 use std::path::Path;
 
 pub use cursor::{CursorAction, FileCursor, tail_fingerprint};
-pub use query::{AppSummary, DailyRow, Totals};
+pub use query::{
+    AppSummary, DailyRow, EventRow, PriceRow, QuotaRow, SourceHealth, Totals,
+};
 
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_VERSION: i64 = 1;

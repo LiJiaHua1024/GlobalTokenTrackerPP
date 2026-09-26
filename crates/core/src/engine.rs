@@ -62,6 +62,18 @@ impl Engine {
 
     fn scan_adapter(&self, adapter: &dyn SourceAdapter) -> Result<ScanReport> {
         let items = adapter.discover()?;
+        let report = self.scan_items(adapter, &items)?;
+        // Source-health bookkeeping for the data-sources page.
+        let _ = self.store.touch_source(
+            adapter.id(),
+            report.files_seen,
+            report.events_ingested,
+            report.errors.first().map(String::as_str),
+        );
+        Ok(report)
+    }
+
+    fn scan_items(&self, adapter: &dyn SourceAdapter, items: &[SourceItem]) -> Result<ScanReport> {
         let mut report = ScanReport {
             files_seen: items.len() as u64,
             ..Default::default()

@@ -190,7 +190,7 @@ mod tests {
 
         // First scan: Full.
         assert_eq!(s.cursor_action(&p, &key, 40)?, CursorAction::Full);
-        s.save_cursor("test", &key, &p, 40, 0)?;
+        s.save_cursor("test", &key, &p, 40, 0, None)?;
 
         // Unchanged.
         assert_eq!(s.cursor_action(&p, &key, 40)?, CursorAction::Unchanged);
@@ -203,7 +203,7 @@ mod tests {
             s.cursor_action(&p, &key, 50)?,
             CursorAction::Append { from: 40 }
         );
-        s.save_cursor("test", &key, &p, 50, 0)?;
+        s.save_cursor("test", &key, &p, 50, 0, None)?;
 
         // Truncate & rewrite → pin to EOF, never replay.
         std::fs::write(&p, b"cc")?;
@@ -220,7 +220,7 @@ mod tests {
         let s = Store::open_memory()?;
         let (_g, p) = tmpfile(b"0123456789abcdef0123456789abcdef0123456789");
         let key = p.to_string_lossy().to_string();
-        s.save_cursor("test", &key, &p, 40, 0)?;
+        s.save_cursor("test", &key, &p, 40, 0, None)?;
         // Rewrite first bytes, then extend — naive offset check would replay.
         let mut v = std::fs::read(&p)?;
         v[0] = b'X';

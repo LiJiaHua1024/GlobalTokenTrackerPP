@@ -31,12 +31,68 @@ pub struct AppSummary {
 }
 
 #[derive(Debug, Clone)]
+pub struct QuotaRow {
+    pub app: String,
+    pub account: Option<String>,
+    pub captured_at: i64,
+    pub window_kind: String,
+    pub used: Option<f64>,
+    pub limit_value: Option<f64>,
+    pub used_percent: Option<f64>,
+    pub resets_at: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PriceRow {
+    pub model: String,
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+    pub source: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SourceHealth {
+    pub source: String,
+    pub enabled: bool,
+    pub last_synced_at: Option<i64>,
+    pub last_error: Option<String>,
+    pub files_seen: u64,
+    pub rows_ingested: u64,
+    pub cursors: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct EventRow {
+    pub app: String,
+    pub model: Option<String>,
+    pub pricing_model: Option<String>,
+    pub project: Option<String>,
+    pub session_id: Option<String>,
+    pub ts_start: Option<i64>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub credits: Option<f64>,
+    pub cost_usd: Option<f64>,
+    pub cost_source: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub raw_ref: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct DailyRow {
     pub date: String, // YYYY-MM-DD in `tz`
     pub app: String,
     pub events: u64,
+    pub input_tokens: u64,
     pub output_tokens: u64,
+    pub reasoning_tokens: u64,
     pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
     pub cost_usd: f64,
     pub credits: f64,
 }
@@ -118,8 +174,9 @@ impl super::Store {
         let (w, p) = time_where(from_ms, to_ms);
         let mut st = self.conn().prepare(&format!(
             "SELECT strftime('%Y-%m-%d', ts_start/1000, 'unixepoch', '{utc_offset}') AS d, app,
-                    COUNT(*), COALESCE(SUM(output_tokens),0),
-                    COALESCE(SUM(cache_read_tokens),0),
+                    COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+                    COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cache_read_tokens),0),
+                    COALESCE(SUM(cache_write_5m_tokens+cache_write_1h_tokens),0),
                     COALESCE(SUM(cost_usd),0), COALESCE(SUM(credits),0)
              FROM usage_events {w}
              GROUP BY d, app ORDER BY d"
@@ -129,10 +186,13 @@ impl super::Store {
                 date: r.get(0)?,
                 app: r.get(1)?,
                 events: r.get::<_, i64>(2)? as u64,
-                output_tokens: r.get::<_, i64>(3)? as u64,
-                cache_read_tokens: r.get::<_, i64>(4)? as u64,
-                cost_usd: r.get(5)?,
-                credits: r.get(6)?,
+                input_tokens: r.get::<_, i64>(3)? as u64,
+                output_tokens: r.get::<_, i64>(4)? as u64,
+                reasoning_tokens: r.get::<_, i64>(5)? as u64,
+                cache_read_tokens: r.get::<_, i64>(6)? as u64,
+                cache_write_tokens: r.get::<_, i64>(7)? as u64,
+                cost_usd: r.get(8)?,
+                credits: r.get(9)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -164,6 +224,149 @@ impl super::Store {
                 },
             )
             .map_err(Into::into)
+    }
+
+    /// Latest quota snapshot per (app, window_kind) — for the quota page/tray.
+    pub fn latest_quotas(&self) -> Result<Vec<QuotaRow>> {
+        let mut st = self.conn().prepare(
+            "SELECT app, account, captured_at, window_kind, used, limit_value,
+                    used_percent, resets_at
+             FROM quota_snapshots q
+             WHERE captured_at = (SELECT MAX(captured_at) FROM quota_snapshots
+                                  WHERE app=q.app AND window_kind=q.window_kind)
+             ORDER BY app, captured_at DESC",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok(QuotaRow {
+                app: r.get(0)?,
+                account: r.get(1)?,
+                captured_at: r.get(2)?,
+                window_kind: r.get(3)?,
+                used: r.get(4)?,
+                limit_value: r.get(5)?,
+                used_percent: r.get(6)?,
+                resets_at: r.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Price book rows for the prices page.
+    pub fn price_rows(&self, limit: i64) -> Result<Vec<PriceRow>> {
+        let mut st = self.conn().prepare(
+            "SELECT model_id, input, output, cache_read, cache_write, source
+             FROM prices ORDER BY model_id LIMIT ?1",
+        )?;
+        let rows = st.query_map(params![limit], |r| {
+            Ok(PriceRow {
+                model: r.get(0)?,
+                input: r.get(1)?,
+                output: r.get(2)?,
+                cache_read: r.get(3)?,
+                cache_write: r.get(4)?,
+                source: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Models seen in events that resolved to no price (unpriced badge list).
+    pub fn unpriced_models(&self) -> Result<Vec<(String, u64)>> {
+        let mut st = self.conn().prepare(
+            "SELECT COALESCE(model, request_model, '?'), COUNT(*) FROM usage_events
+             WHERE pricing_model IS NULL AND cost_source='unpriced'
+             GROUP BY 1 ORDER BY 2 DESC",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64))
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Per-source health rows for the data-sources page.
+    pub fn source_health(&self) -> Result<Vec<SourceHealth>> {
+        let mut st = self.conn().prepare(
+            "SELECT s.source, s.enabled, s.last_synced_at, s.last_error,
+                    s.files_seen, s.rows_ingested,
+                    (SELECT COUNT(*) FROM sync_cursors c WHERE c.source=s.source) AS cursors
+             FROM sources s ORDER BY s.source",
+        )?;
+        let rows = st.query_map([], |r| {
+            Ok(SourceHealth {
+                source: r.get(0)?,
+                enabled: r.get::<_, i64>(1)? != 0,
+                last_synced_at: r.get(2)?,
+                last_error: r.get(3)?,
+                files_seen: r.get::<_, i64>(4)? as u64,
+                rows_ingested: r.get::<_, i64>(5)? as u64,
+                cursors: r.get::<_, i64>(6)? as u64,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Source health upsert after a scan (engine calls once per adapter).
+    pub fn touch_source(
+        &self,
+        source: &str,
+        files_seen: u64,
+        rows: u64,
+        error: Option<&str>,
+    ) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO sources(source, enabled, last_synced_at, last_error, files_seen, rows_ingested)
+             VALUES (?1,1,?2,?3,?4,?5)
+             ON CONFLICT(source) DO UPDATE SET
+               last_synced_at=excluded.last_synced_at, last_error=excluded.last_error,
+               files_seen=excluded.files_seen,
+               rows_ingested=sources.rows_ingested+excluded.rows_ingested",
+            params![source, super::now_ms(), error, files_seen as i64, rows as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Detail-page rows: newest events first.
+    pub fn events_page(&self, limit: i64, offset: i64) -> Result<Vec<EventRow>> {
+        let mut st = self.conn().prepare(
+            "SELECT app, model, pricing_model, project, session_id, ts_start,
+                    input_tokens, output_tokens, reasoning_tokens,
+                    cache_read_tokens, cache_write_5m_tokens+cache_write_1h_tokens,
+                    credits, cost_usd, cost_source, duration_ms, raw_ref
+             FROM usage_events ORDER BY ts_start DESC LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = st.query_map(params![limit, offset], |r| {
+            Ok(EventRow {
+                app: r.get(0)?,
+                model: r.get(1)?,
+                pricing_model: r.get(2)?,
+                project: r.get(3)?,
+                session_id: r.get(4)?,
+                ts_start: r.get(5)?,
+                input_tokens: r.get::<_, i64>(6)? as u64,
+                output_tokens: r.get::<_, i64>(7)? as u64,
+                reasoning_tokens: r.get::<_, i64>(8)? as u64,
+                cache_read_tokens: r.get::<_, i64>(9)? as u64,
+                cache_write_tokens: r.get::<_, i64>(10)? as u64,
+                credits: r.get(11)?,
+                cost_usd: r.get(12)?,
+                cost_source: r.get(13)?,
+                duration_ms: r.get(14)?,
+                raw_ref: r.get(15)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Hour-of-day histogram (UTC→local shift done by caller via offset string).
+    pub fn hourly_histogram(&self, utc_offset: &str) -> Result<Vec<(u8, u64)>> {
+        let mut st = self.conn().prepare(&format!(
+            "SELECT CAST(strftime('%H', ts_start/1000, 'unixepoch', '{utc_offset}') AS INTEGER) h,
+                    COUNT(*) FROM usage_events GROUP BY h ORDER BY h"
+        ))?;
+        let rows = st.query_map([], |r| {
+            Ok((r.get::<_, u8>(0)?, r.get::<_, i64>(1)? as u64))
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
     pub fn event_count(&self) -> Result<u64> {

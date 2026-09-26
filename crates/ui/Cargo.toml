@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 codeledger-core = { version = "0.1.0", path = "../core" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 tray-icon = "0.25.1"
 windows-canvas = "0.100.0"
 windows-reactor = "=0.100.0"

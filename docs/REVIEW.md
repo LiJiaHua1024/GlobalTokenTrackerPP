@@ -38,9 +38,35 @@
 
 ## S6 CLI ✅ `scan | report [today|week|month|all] | reconcile | sources`
 
-## 待办（S7+）
-- [ ] windows-reactor UI 壳：NavigationView 五页、Mica、托盘、明暗主题
+## S7 WinUI3 壳 ✅（reactor 0.100.0 实测）
+
+- **路线验证**：纯 Rust + WinUI3 窗口运行成功，解包模式自动 bootstrap（WinAppRuntime 2.5.1 命中），Mica 背板生效。
+- **API 偏差记录**（docs.rs 示例 ≠ 本地 0.100.0）：
+  - 无 `window_frame`/`menu_items`/`content` 便捷方法 → 用 `context.window_title` + `SlotsControl::slot/slots` + `SlotView::collection`。
+  - 动态子集必须 `keyed_children(KeyedView)`（`children` 只收静态元组/数组）；`IntoViews` 不接受 `Vec<View>`。
+  - `Button.content()` 消费自身返回 `View` → `on_click` 必须先调用。
+  - `update(ctx)` 签名是 `&ComponentContext`（非 `&mut`）；`ViewContext::message` 要 `Msg: Clone` → 用 `callback(move |_| Msg)`。
+  - 无 `font_family` 等字体 API（0.100.0）→ 换字体暂不支持，`ThemeConfig.font_family` 字段预留占位。
+  - `Brush` 是 Copy；`Thickness`/`CornerRadius` 非 Copy → Theme 存 f64 现造。
+- **NavigationView 在 0.100.0 解包模式下构造即 stowed crash（0xC000027B）**：二分确认纯 `slot(Content)` 也崩 → 改用 **SelectorBar** 顶部 pill 导航（WinUI Gallery 同款，更简约）。后续可换 Pivot/TabView 或等上游修复。
+- **真机验证**：窗口标题/尺寸正常，5 页全部渲染，45s 长跑过 ≥1 个 30s 自动刷新周期无崩溃；截图人工核过视觉效果。
+- **panic 诊断位**：`cl_panic.log`（stowed 异常无 stderr，panic hook 落盘）。
+
+## S7b 可扩展 UI 架构 ✅
+
+- **主题令牌**：`theme.rs` — `ThemeConfig`（JSON 覆写）→ `Theme`（解析后 Brush/度量）。颜色支持 8 种命名主题刷（随系统明暗）+ `#rrggbb/#aarrggbb` 纯值换肤；`warn`/`ok` 默认 Fluent 黄/绿（主题刷无对应）。
+- **布局配置**：`config.rs` — `ui.json`（与 ledger.db 同目录）持久化每页 `order`/`hidden`；`order_for` 容忍注册表新增部件。
+- **手动排序**：总览页"布局"开关进入编辑模式 → 每部件带上移/下移/隐藏按钮条，隐藏项以 chip 陈列可恢复。
+- **部件注册表**：`widgets.rs` `OVERVIEW_WIDGETS`（id/title/icon）—新增部件 = 一条注册 + 一个 match 臂。
+- **线条+图标划分**：`section_header`（SymbolIcon + 标题 + 拉伸发丝线）、`key_value_row` 行间发丝分隔（`line_separators` 可关）、卡片可选 `accent_edge` 左侧描边条、卡片间 `gap`/`section_gap` 令牌化。
+- **克制强调**：`badge()` 描边药丸（Accent/Warn/Danger/Muted 四档）仅用于状态信号——成本卡"估算"徽章+accent 值色（唯一排版强调点）、配额 ≥50% 出徽章（≥80 红/≥50 黄）、数据源异常红徽章、明细 unpriced 黄徽章。正常态一律素文本。
+- **残留限制**：reactor 无 font-family setter（换字体待上游）；SymbolIcon 无 foreground 着色；拖拽排序未做（先按钮排序，drag-drop 样例存在但复杂度高留 M2+）。
+
+## 待办（S8+）
+- [ ] 托盘（tray-icon 事件循环接到 reactor pump）
+- [ ] 趋势图升级 windows-canvas Direct2D
 - [ ] Grok/WorkBuddy/CodeBuddy/Gemini 适配器（P1-P2）
 - [ ] OTel 接收器 + wham/Qoder/Cursor 配额通道（M2/M3）
 - [ ] daily_rollups 生成任务、CSV 导出、prune（M4）
 - [ ] notify 监听 + 60s 轮询常驻（UI 壳内）
+- [ ] Codex 口径差异 2.18% 继续收敛（spec 基线语义修正后重定验收门）

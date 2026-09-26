@@ -11,7 +11,9 @@ pub mod normalize;
 pub mod pricing;
 pub mod store;
 pub mod sync;
+pub mod viewmodel;
 
 pub use engine::{Engine, ScanReport};
 pub use model::{CostSource, Provenance, QuotaSnapshot, UsageEvent, apps};
 pub use store::Store;
+pub use viewmodel::{DetailVm, OverviewVm};
