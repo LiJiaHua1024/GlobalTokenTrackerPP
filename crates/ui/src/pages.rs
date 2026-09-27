@@ -1045,19 +1045,42 @@ fn quota_row(theme: &Theme, q: &globaltokentracker_core::store::QuotaRow) -> Vie
         );
     }
     // `credits` rows carry remaining balance in `used` (see quota.rs) — never
-    // dress it as "已用".
-    let usage = if q.window_kind == "credits" {
-        q.used.map(|u| format!("余额 {}", fmt::tokens_exact(u as u64)))
+    // dress it as "已用". Compact 万/亿 keeps the meta line scannable; exact
+    // counts go on the tooltip for reconciliation.
+    let (usage, usage_exact) = if q.window_kind == "credits" {
+        (
+            q.used.map(|u| format!("余额 {}", fmt::tokens_compact(u as u64))),
+            q.used.map(|u| format!("余额 {}", fmt::tokens_exact(u as u64))),
+        )
     } else {
+        let pair = |(u, l): (f64, f64)| {
+            (
+                format!(
+                    "已用 {} / 上限 {}",
+                    fmt::tokens_compact(u as u64),
+                    fmt::tokens_compact(l as u64)
+                ),
+                format!(
+                    "已用 {} / 上限 {}",
+                    fmt::tokens_exact(u as u64),
+                    fmt::tokens_exact(l as u64)
+                ),
+            )
+        };
         match (q.used, q.limit_value) {
-            (Some(u), Some(l)) => Some(format!(
-                "已用 {} / 上限 {}",
-                fmt::tokens_exact(u as u64),
-                fmt::tokens_exact(l as u64)
-            )),
-            (Some(u), None) => Some(format!("用量 {}", fmt::tokens_exact(u as u64))),
-            (None, Some(l)) => Some(format!("上限 {}", fmt::tokens_exact(l as u64))),
-            (None, None) => None,
+            (Some(u), Some(l)) => {
+                let (c, e) = pair((u, l));
+                (Some(c), Some(e))
+            }
+            (Some(u), None) => (
+                Some(format!("用量 {}", fmt::tokens_compact(u as u64))),
+                Some(format!("用量 {}", fmt::tokens_exact(u as u64))),
+            ),
+            (None, Some(l)) => (
+                Some(format!("上限 {}", fmt::tokens_compact(l as u64))),
+                Some(format!("上限 {}", fmt::tokens_exact(l as u64))),
+            ),
+            (None, None) => (None, None),
         }
     };
     let mut meta = format!(
@@ -1068,13 +1091,15 @@ fn quota_row(theme: &Theme, q: &globaltokentracker_core::store::QuotaRow) -> Vie
     if let Some(u) = usage {
         meta = format!("{u} · {meta}");
     }
-    body.push(
-        TextBlock::new()
-            .text(meta)
-            .font_size(theme.label_size)
-            .foreground(theme.subtle)
-            .into(),
-    );
+    let mut meta_v: View = TextBlock::new()
+        .text(meta)
+        .font_size(theme.label_size)
+        .foreground(theme.subtle)
+        .into();
+    if let Some(e) = usage_exact {
+        meta_v = meta_v.tooltip(e);
+    }
+    body.push(meta_v);
     vstack(6.0, body)
 }
 

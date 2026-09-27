@@ -281,6 +281,24 @@ pub mod fmt {
         }
     }
 
+    /// Compact count for scan-first reading — 万/亿 at >=10_000 with one
+    /// trimmed decimal (64,425→"6.4万", 300,000→"30万"). Used where the
+    /// number is ambient context (quota rows); exact counts stay in the
+    /// tooltip for reconciliation against vendor dashboards.
+    pub fn tokens_compact(n: u64) -> String {
+        let trim = |v: f64| {
+            let s = format!("{v:.1}");
+            s.trim_end_matches(".0").to_string()
+        };
+        if n >= 100_000_000 {
+            format!("{}亿", trim(n as f64 / 1e8))
+        } else if n >= 10_000 {
+            format!("{}万", trim(n as f64 / 1e4))
+        } else {
+            n.to_string()
+        }
+    }
+
     pub fn tokens_total(t: &crate::store::Totals) -> u64 {
         t.input_tokens
             + t.output_tokens
@@ -350,6 +368,11 @@ mod tests {
         assert_eq!(fmt::tokens_exact(1_000), "1,000");
         assert_eq!(fmt::tokens_exact(1_730_848_235), "1,730,848,235");
         assert_eq!(fmt::tokens_exact(13_101_054_884), "13,101,054,884");
+        assert_eq!(fmt::tokens_compact(9_999), "9999");
+        assert_eq!(fmt::tokens_compact(10_000), "1万");
+        assert_eq!(fmt::tokens_compact(64_425), "6.4万");
+        assert_eq!(fmt::tokens_compact(300_000), "30万");
+        assert_eq!(fmt::tokens_compact(1_730_848_235), "17.3亿");
     }
 
     #[test]
