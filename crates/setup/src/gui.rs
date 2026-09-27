@@ -194,6 +194,9 @@ struct Shared {
 struct Gui {
     mode: Mode,
     dir: PathBuf,
+    /// Some(v) when an existing install is being upgraded — the path is
+    /// locked to the recorded InstallLocation and the copy reads "更新".
+    update_from: Option<String>,
     prog: HWND,
     status: HWND,
     primary: HWND,
@@ -364,10 +367,14 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wpar: WPARAM, lpar: LPARAM) ->
             let sub = font(11.5, false, dpi);
             let _ = SelectObject(mem, sub.into());
             let _ = SetTextColor(mem, COLORREF(SUBTLE));
-            let mut sub_t = w(&format!(
-                "{} — v{VER}",
-                if g.mode == Mode::Install { "本地 AI 编码工具用量统计" } else { "卸载程序" }
-            ));
+            let mut sub_t = w(&match g.mode {
+                Mode::Uninstall => format!("卸载程序 — v{VER}"),
+                Mode::Install => match &g.update_from {
+                    Some(old) if old != VER => format!("已安装 v{old} — 更新至 v{VER}"),
+                    Some(_) => format!("已安装 v{VER} — 重装修复"),
+                    None => format!("本地 AI 编码工具用量统计 — v{VER}"),
+                },
+            });
             let n2 = sub_t.len() - 1;
             let mut r2 = RECT { left: sx(44), top: sx(58), right: rc.right, bottom: sx(80) };
             DrawTextW(mem, &mut sub_t[..n2], &mut r2, DT_LEFT | DT_SINGLELINE);
@@ -711,7 +718,7 @@ fn start_work(hwnd: HWND) {
     });
 }
 
-pub fn run(mode: Mode, initial_dir: &Path) -> Result<()> {
+pub fn run(mode: Mode, initial_dir: &Path, update_from: Option<&str>) -> Result<()> {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -753,6 +760,7 @@ pub fn run(mode: Mode, initial_dir: &Path) -> Result<()> {
         let state = Box::new(Gui {
             mode,
             dir: initial_dir.to_path_buf(),
+            update_from: update_from.map(str::to_string),
             prog: HWND::default(),
             status: HWND::default(),
             primary: HWND::default(),
@@ -769,10 +777,15 @@ pub fn run(mode: Mode, initial_dir: &Path) -> Result<()> {
         });
         let state_ptr = Box::into_raw(state);
 
-        let title = w(if mode == Mode::Install {
-            "GlobalTokenTracker 安装"
-        } else {
-            "GlobalTokenTracker 卸载"
+        let title = w(match mode {
+            Mode::Uninstall => "GlobalTokenTracker 卸载",
+            Mode::Install => {
+                if update_from.is_some() {
+                    "GlobalTokenTracker 更新"
+                } else {
+                    "GlobalTokenTracker 安装"
+                }
+            }
         });
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -819,7 +832,12 @@ pub fn run(mode: Mode, initial_dir: &Path) -> Result<()> {
             let _ = SendMessageW(edit, WM_SETFONT, Some(WPARAM(font(10.5, false, dpi).0 as usize)), Some(LPARAM(1)));
             g.edit = edit;
             let br_t = w("浏览…");
-            make_btn(hwnd, &br_t, sx(492), sx(144), sx(96), sx(28), IDC_BROWSE, true, dpi);
+            let br = make_btn(hwnd, &br_t, sx(492), sx(144), sx(96), sx(28), IDC_BROWSE, true, dpi);
+            if update_from.is_some() {
+                // Upgrade in place: moving the app would orphan the old dir.
+                let _ = EnableWindow(edit, false);
+                let _ = EnableWindow(br, false);
+            }
             // Plain owner-drawn buttons (not AUTOCHECKBOX — the style bits
             // collide); clicks arrive as WM_COMMAND and flip Gui state.
             let c1t = w("创建开始菜单快捷方式");
@@ -848,7 +866,12 @@ pub fn run(mode: Mode, initial_dir: &Path) -> Result<()> {
             WS_CHILD, sx(32), sx(372), sx(596), sx(6),
             Some(hwnd), Some(hmenu_id(IDC_PROG)), Some(hinst), None,
         )?;
-        let ptxt = w(if mode == Mode::Install { "安装" } else { "卸载" });
+        let ptxt = w(match mode {
+            Mode::Uninstall => "卸载",
+            Mode::Install => {
+                if update_from.is_some() { "更新" } else { "安装" }
+            }
+        });
         g.primary = make_btn(hwnd, &ptxt, sx(496), sx(338), sx(132), sx(34), IDC_PRIMARY, true, dpi);
         let ctxt = w("取消");
         g.cancel = make_btn(hwnd, &ctxt, sx(384), sx(338), sx(104), sx(34), IDC_CANCEL, true, dpi);

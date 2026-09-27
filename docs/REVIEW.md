@@ -502,3 +502,14 @@
 - **引擎诊断**：`scan_once` 加适配器级 `debug!` 计时（id/ms/files/scanned），后续热点排障不用再插桩。
 - **验证**：新增 `prune_quotas` 测试（超龄删除+每键保最新）；codebuddy 测试改 `::default()` 构造。**50/50 测试、clippy `-D warnings` 0、release 干净**；UI 冷启动实测窗口 1365ms/首数据帧 1583ms（debug 对照 2090/2507）。
 - **未做（如实记录）**：每 tick 仍 reopen Store + PriceBook::load（~20ms，可换共享连接但改动大、收益小）；首帧仍等扫描完成（可先查旧账本先渲染再补扫，~200ms 收益、复杂度不值）；`usage_events` 自动 prune 未启用（CLI 手动 `prune` 保留——详情页历史是产品需求，不擅自开自动删）。
+
+## S42 安装器升级路径 ✅
+
+- **需求**：检查安装程序功能性，要求支持用更新版本的安装程序升级既有安装。
+- **审计结论（升级机制原本已具备的）**：`extract_payload` 原地覆盖 ui/cli exe；`register_uninstall` 重写 `DisplayVersion`；`self_exe→globaltokentracker-setup.exe` 拷贝使卸载器跟随新版；`stop_running` 先杀进程防文件锁；用户数据在 `%USERPROFILE%\.globaltokentracker`（安装目录之外）全程不动；`Store::open` 迁移保证旧库新读。
+- **修复的两个缺口**：
+  - **自定义 `--dir` 安装无记忆**——新版安装器原本会装回默认目录，把旧目录变成孤儿。新增 `installed_info()` 读 `Uninstall` 键的 `InstallLocation`+`DisplayVersion`（校验 `globaltokentracker-ui.exe` 真实存在，过滤陈旧注册项），无 `--dir` 时优先装到已记录位置；GUI 检测到既有安装进入"更新"态：标题/按钮改"更新"、副标题显示 `已安装 v{old} — 更新至 v{VER}`（同版本显示"重装修复"）、路径框与浏览按钮禁用（升级不搬家，避免孤儿目录）。
+  - **运行中的旧卸载器锁文件**——`stop_running` 补 `globaltokentracker-setup.exe`（一个开着的旧卸载器窗口会让 `fs::copy` 覆盖失败）；按自身映像名跳过自杀（重命名后的下载副本不会被自己 taskkill）。
+- **实测（0.1.0→0.2.0 全流程）**：`--quiet` 升级 → `DisplayVersion` 0.2.0、`setup.exe` 换成新版哈希；`--dir` 自定义安装后不带参再跑 → 写回记录的自定义目录、默认目录 mtime 不动；自定义目录卸载 → 目录+注册项清干净；再装回默认 → 注册表复原；全程 `ledger.db`（46MB）mtime 不变。GUI 截图确认"更新"态渲染。
+- **版本**：workspace bump 0.1.0 → 0.2.0（新增 4 适配器+性能改动累计够 minor）。
+- **已知边界（如实记录）**：GUI 子系统 exe 在 PowerShell 下 `&` 调用不等待——脚本里要 `Start-Process -Wait`；`--quiet` 的输出经 `attach_console` 写到真实控制台，重定向文件收不到（设计如此）；payload 只增不改——若未来重命名 exe，旧文件残留需主动清。

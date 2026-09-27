@@ -67,6 +67,22 @@ fn winapp_runtime_present() -> bool {
         .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
 }
 
+/// Existing install's recorded (version, location). Lets a newer installer
+/// upgrade in place even when the original install used a custom `--dir`.
+fn installed_info() -> Option<(String, PathBuf)> {
+    let key = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+        .open_subkey(UNINSTALL_KEY)
+        .ok()?;
+    let loc: String = key.get_value("InstallLocation").ok()?;
+    let dir = PathBuf::from(loc);
+    // Stale entry (dir deleted without uninstalling) is not an install.
+    if !dir.join("globaltokentracker-ui.exe").exists() {
+        return None;
+    }
+    let ver: String = key.get_value("DisplayVersion").unwrap_or_default();
+    Some((ver, dir))
+}
+
 fn ensure_runtime(log: &dyn Fn(String)) -> Result<()> {
     if winapp_runtime_present() {
         log("Windows App Runtime 已就位".into());
@@ -87,7 +103,20 @@ fn ensure_runtime(log: &dyn Fn(String)) -> Result<()> {
 }
 
 fn stop_running() {
-    for name in ["globaltokentracker-ui.exe", "globaltokentracker-cli.exe"] {
+    // An older installer/uninstaller window left open inside dest would lock
+    // globaltokentracker-setup.exe and fail the payload copy. Skip self by
+    // image name — a renamed download must not taskkill its own process.
+    let self_name = env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()));
+    for name in [
+        "globaltokentracker-ui.exe",
+        "globaltokentracker-cli.exe",
+        "globaltokentracker-setup.exe",
+    ] {
+        if self_name.as_deref() == Some(name) {
+            continue;
+        }
         let _ = Command::new("taskkill")
             .args(["/F", "/IM", name])
             .creation_flags(CREATE_NO_WINDOW)
@@ -393,6 +422,7 @@ fn main() -> Result<()> {
         usage();
         std::process::exit(2);
     }
+    let prior = if uninstall_flag { None } else { installed_info() };
     let dest = match dir.as_deref() {
         Some(d) => PathBuf::from(d),
         // The uninstaller copy lives at <dest>\globaltokentracker-setup.exe —
@@ -401,13 +431,18 @@ fn main() -> Result<()> {
             .ok()
             .and_then(|p| p.parent().map(Path::to_path_buf))
             .unwrap_or(dest_dir(None)?),
-        None => dest_dir(None)?,
+        // Upgrade in place: a custom --dir install keeps its location.
+        None => match &prior {
+            Some((_, d)) => d.clone(),
+            None => dest_dir(None)?,
+        },
     };
 
     if gui_mode {
         return gui::run(
             if uninstall_flag { gui::Mode::Uninstall } else { gui::Mode::Install },
             &dest,
+            prior.as_ref().map(|(v, _)| v.as_str()),
         );
     }
 
@@ -419,7 +454,11 @@ fn main() -> Result<()> {
         schedule_self_delete(&dest)?; // fires after this process exits
         println!("已移除程序、快捷方式与卸载项；用户数据保留在 %USERPROFILE%\\.globaltokentracker");
     } else {
-        println!("{APP} {VER} 安装程序 —— 安装到 {}", dest.display());
+        match &prior {
+            Some((v, _)) if v == VER => println!("{APP} {VER} 已安装 —— 重装修复 {}", dest.display()),
+            Some((v, _)) => println!("{APP} v{v} → v{VER} —— 更新 {}", dest.display()),
+            None => println!("{APP} {VER} 安装程序 —— 安装到 {}", dest.display()),
+        }
         install_steps(&dest, true, true, &mut step, &log)?;
         println!();
         println!("{APP} {VER} 安装完成。");
