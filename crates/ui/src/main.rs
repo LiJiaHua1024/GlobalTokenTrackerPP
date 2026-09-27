@@ -187,6 +187,27 @@ fn db_path() -> PathBuf {
     default_db_path()
 }
 
+/// Window icon as a real file. `AppWindow.SetIcon` does NOT resolve bare
+/// resource-ID strings for an unpackaged exe (verified: the window ended up
+/// with the generic pane glyph), so the embedded ICO is materialized once
+/// into the data dir — identical for dev runs and installed copies.
+pub(crate) fn window_icon_path() -> &'static str {
+    static P: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    P.get_or_init(|| {
+        let dir = db_path()
+            .parent()
+            .map(|d| d.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let p = dir.join("icon.ico");
+        if !p.exists() {
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(&p, include_bytes!("../../../assets/icon.ico"));
+        }
+        p.to_string_lossy().into_owned()
+    })
+    .as_str()
+}
+
 fn load_all(
     range: Range,
     apps: Option<Vec<String>>,
@@ -641,7 +662,10 @@ impl Component for Shell {
         context.window_visuals(
             WindowVisuals::new()
                 .backdrop(WindowBackdrop::Mica)
-                .client_size(1180.0, 780.0),
+                .client_size(1180.0, 780.0)
+                // Real .ico path materialized beside the ledger — the
+                // embedded resource still drives Explorer/shortcut icons.
+                .icon(window_icon_path()),
         );
         let snap = self.snap.as_ref();
         let theme = &self.theme;
@@ -690,9 +714,15 @@ impl Component for Shell {
             .spacing(14.0)
             .vertical_alignment(VerticalAlignment::Center)
             .children((
-                SymbolIcon::new()
-                    .symbol(Symbol::ViewAll)
-                    .vertical_alignment(VerticalAlignment::Center),
+                // Brand mark — the embedded PNG (assets/icon-64.png) keeps the
+                // titlebar logo identical to the window/tray icon with zero
+                // asset files at runtime.
+                ImageIcon::new()
+                    .source_data(EncodedImage::from_static(include_bytes!(
+                        "../../../assets/icon-64.png"
+                    )))
+                    .width(18.0)
+                    .height(18.0),
                 TextBlock::new()
                     .text("GlobalTokenTracker")
                     .font_size(13.0)

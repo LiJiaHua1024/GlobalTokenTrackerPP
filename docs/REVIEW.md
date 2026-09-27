@@ -371,3 +371,16 @@
 - **收益**：定时模式下活跃的 AI 工具高频写日志不再导致 UI 线程持续被唤醒（每个 WatchFired 都过 update/view），节奏真正由配置值决定；语义自洽——"仅文件变更"字面生效。
 - **验证（GTT_DEBUG stderr 实证）**：10s 模式下 touch 受监视文件 → 日志零 watcher 活动，仅周期 `start→loaded`；切"仅文件变更" → `[watch] armed on 10 roots` 补臂 → touch → `fired → scan start → loaded`。
 - clippy 0、25/25 测试。
+
+## S29 应用图标全链路落地 ✅
+
+- **需求**：用给定蓝结 logo 做应用图标。
+- **资产**：`assets/icon.png`（512px 圆角瓦片，Win11 Fluent 风格 18% 圆角）、`icon-64.png`（标题栏内嵌）、`icon.ico`（16/24/32/48/64/128/256 PNG 帧）——PIL 从源图生成。
+- **挂载点 ×4**：
+  1. **exe 资源**：`winresource` build-dep，`build.rs` 嵌 `1 ICON`——Explorer/快捷方式/任务栏回退都靠它；
+  2. **窗口/任务栏**：`WindowVisuals::icon(path)`→`AppWindow.SetIcon`——**资源 ID 字符串形式对 unpackaged exe 不解析**（实测窗口 ICON_BIG 画出通用占位符），改为 `window_icon_path()` 把内嵌 ico 一次性物化到数据目录再传真实路径——dev/安装形态通用；
+  3. **托盘**：`Icon::from_resource(1)`（标准 `LoadIconW` 对 exe 内嵌资源正常解析，实测验证）→ 物化文件兜底 → 程序化 glyph 最后兜底；
+  4. **标题栏品牌位**：`SymbolIcon::ViewAll` → `ImageIcon::source_data(EncodedImage::from_static(include_bytes!(icon-64.png)))`——与窗口/托盘同一张图，零运行时文件。
+  5. **安装器**：setup `build.rs` 同款嵌资源 + `WNDCLASSW.hIcon = LoadIconW(MAKEINTRESOURCE(1))`。
+- **踩坑**：`PCWSTR(1 as *const u16)` 触发 clippy `manual_dangling_ptr`——windows 0.62 未导出 `MAKEINTRESOURCEW`，改 `std::ptr::without_provenance::<u16>(1)`。
+- **验证**：exe 提取图标=蓝结瓦片；`WM_GETICON ICON_BIG` 画出蓝结（对比修复前的通用窗格图标）；`LoadIcon(module,1)` 返回蓝结（托盘路径等价验证）；标题栏截图确认品牌位换图。clippy 0、25/25 测试。

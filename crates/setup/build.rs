@@ -7,6 +7,14 @@ const EMPTY_ZIP: &[u8] = &[
 ];
 
 fn main() {
+    // Embed the app icon as resource #1 — installer window/titlebar and the
+    // installed exe pick it up via LoadIconW(MAKEINTRESOURCE(1)).
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        winresource::WindowsResource::new()
+            .set_icon("../../assets/icon.ico")
+            .compile()
+            .expect("embed icon resource");
+    }
     let src = Path::new("payload/payload.zip");
     let out = Path::new(&env::var("OUT_DIR").unwrap()).join("payload.zip");
     // No rerun-if-changed on purpose: default = re-run when any file in the

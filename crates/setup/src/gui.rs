@@ -725,10 +725,18 @@ pub fn run(mode: Mode, initial_dir: &Path) -> Result<()> {
         };
         let _ = GdiplusStartup(&mut gdip_token, &gdip_in, std::ptr::null_mut());
         let hinst: HINSTANCE = GetModuleHandleW(PCWSTR::null())?.into();
+        // Icon resource #1 is embedded by build.rs (assets/icon.ico) —
+        // MAKEINTRESOURCEW(1) = a non-provenance pointer carrying the ordinal.
+        let hicon = LoadIconW(
+            Some(hinst),
+            PCWSTR(std::ptr::without_provenance::<u16>(1)),
+        )
+        .unwrap_or_default();
         let wc = WNDCLASSW {
             hInstance: hinst,
             lpszClassName: w!("GttSetupWnd"),
             lpfnWndProc: Some(wnd_proc),
+            hIcon: hicon,
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
             hbrBackground: CreateSolidBrush(COLORREF(BG)),
             ..Default::default()

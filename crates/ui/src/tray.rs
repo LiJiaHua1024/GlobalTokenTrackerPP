@@ -22,7 +22,13 @@ pub fn install() -> Option<TrayIcon> {
     if std::env::var("GTT_NOTRAY").is_ok() {
         return None;
     }
-    let icon = glyph_icon().ok()?;
+    // Icon resource #1 is embedded in the exe by build.rs — LoadIconW resolves
+    // it fine (unlike AppWindow.SetIcon). Fall back to the materialized file,
+    // then the procedural glyph for non-Windows builds / broken resources.
+    let icon = Icon::from_resource(1, Some((32, 32)))
+        .or_else(|_| Icon::from_path(crate::window_icon_path(), Some((32, 32))))
+        .or_else(|_| glyph_icon())
+        .ok()?;
     let menu = Menu::new();
     let _ = menu.append(&MenuItem::with_id(MENU_SHOW, "显示 GlobalTokenTracker", true, None));
     let _ = menu.append(&MenuItem::with_id(MENU_HIDE, "隐藏到托盘", true, None));
