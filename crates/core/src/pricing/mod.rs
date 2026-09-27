@@ -54,13 +54,16 @@ impl PriceBook {
         seed::ensure_seeded(store)?;
         let mut map = HashMap::new();
         // Seed rows load first; live-synced sources overwrite on key collision.
-        // Precedence on key collision: seed < litellm < models.dev (live).
+        // Precedence on key collision: seed < litellm < models.dev < llmpricing
+        // (live). llmpricing.dev merges models.dev + OpenRouter + AA and has
+        // the widest coverage of the labs our users actually run.
         let mut st = store.conn().prepare(
             "SELECT model_id, input, output, cache_read, cache_write,
                     tier_above_200k_input, tier_1h_cache_write, tier_batch
              FROM prices
              ORDER BY CASE source
-                 WHEN 'seed' THEN 0 WHEN 'litellm' THEN 1 ELSE 2 END",
+                 WHEN 'seed' THEN 0 WHEN 'litellm' THEN 1
+                 WHEN 'models.dev' THEN 2 ELSE 3 END",
         )?;
         for r in st.query_map([], |r| {
             Ok((
@@ -187,12 +190,20 @@ impl PriceBook {
 const MODELS_DEV_URL: &str = "https://models.dev/api.json";
 const LITELLM_URL: &str =
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
+/// LLM Pricing (llmpricing.dev): static JSON, no key, CC BY 4.0.
+/// Models carry `reference` (official list) and `cheapest` (best host) quotes
+/// in $/1M — we book `reference`, falling back to `cheapest` when absent.
+const LLMPRICING_URL: &str = "https://llmpricing.dev/api/models.json";
 /// Auto-refresh cadence for the UI path.
-pub const PRICE_TTL_SECS: i64 = 24 * 3600;
+pub const PRICE_TTL_SECS: i64 = 12 * 3600;
+/// app_state key recording the last refresh ATTEMPT (success or failure) so a
+/// broken network does not re-hit the CDN on every scan tick.
+const LAST_ATTEMPT_KEY: &str = "prices_last_attempt";
 
 pub struct RefreshReport {
     pub models_dev: usize,
     pub litellm: usize,
+    pub llmpricing: usize,
     /// Formerly-unpriced events that gained a price after the refresh.
     pub repriced: u64,
 }
@@ -207,10 +218,15 @@ pub fn last_live_sync(store: &Store) -> Result<Option<i64>> {
     Ok(t)
 }
 
+/// Staleness follows the last refresh *attempt* (not last success) — repeated
+/// failures throttle to the TTL instead of retrying every scan. DBs that
+/// predate attempt tracking fall back to `fetched_at`.
 pub fn prices_stale(store: &Store) -> Result<bool> {
-    Ok(last_live_sync(store)?.is_none_or(|t| {
-        (now_ms() - t) / 1000 > PRICE_TTL_SECS
-    }))
+    let last = store
+        .get_state(LAST_ATTEMPT_KEY)?
+        .and_then(|s| s.parse::<i64>().ok())
+        .or(last_live_sync(store)?);
+    Ok(last.is_none_or(|t| (now_ms() - t) / 1000 > PRICE_TTL_SECS))
 }
 
 fn http_get(url: &str) -> Result<String> {
@@ -226,40 +242,40 @@ fn http_get(url: &str) -> Result<String> {
     Ok(resp.body_mut().read_to_string()?)
 }
 
-/// Fetch models.dev + LiteLLM price maps, upsert into `prices`, then reprice
-/// any event still marked `unpriced` so newly-covered models gain estimates.
-/// Offline/failed fetch leaves the existing book untouched (seed fallback).
+/// Fetch models.dev + LiteLLM + llmpricing.dev price maps, upsert into
+/// `prices`, then reprice any event still marked `unpriced` so newly-covered
+/// models gain estimates. Offline/failed fetch leaves the existing book
+/// untouched (seed fallback). `prices_last_attempt` is stamped up front so a
+/// persistent outage throttles to `PRICE_TTL_SECS` rather than every scan.
 pub fn refresh(store: &Store) -> Result<RefreshReport> {
     let now = now_ms();
+    store.set_state(LAST_ATTEMPT_KEY, &now.to_string())?;
     let mut report = RefreshReport {
         models_dev: 0,
         litellm: 0,
+        llmpricing: 0,
         repriced: 0,
     };
-    // Each source is independent: a single outage must not block the other.
-    // Both failing → Err, book untouched.
+    // Each source is independent: a single outage must not block the others.
+    // All failing → Err, book untouched.
     let mut errs = Vec::new();
-    let md = match http_get(MODELS_DEV_URL) {
+    let mut get_json = |url: &str, tag: &str| match http_get(url) {
         Ok(b) => match serde_json::from_str::<Value>(&b) {
             Ok(v) => Some(v),
             Err(e) => {
-                errs.push(format!("models.dev parse: {e}"));
+                errs.push(format!("{tag} parse: {e}"));
                 None
             }
         },
         Err(e) => {
-            errs.push(format!("models.dev fetch: {e}"));
+            errs.push(format!("{tag} fetch: {e}"));
             None
         }
     };
-    let ll_body = match http_get(LITELLM_URL) {
-        Ok(b) => Some(b),
-        Err(e) => {
-            errs.push(format!("litellm fetch: {e}"));
-            None
-        }
-    };
-    if md.is_none() && ll_body.is_none() {
+    let md = get_json(MODELS_DEV_URL, "models.dev");
+    let ll = get_json(LITELLM_URL, "litellm");
+    let lp = get_json(LLMPRICING_URL, "llmpricing");
+    if md.is_none() && ll.is_none() && lp.is_none() {
         anyhow::bail!("all price sources failed: {}", errs.join("; "));
     }
     let tx = store.conn().unchecked_transaction()?;
@@ -295,9 +311,7 @@ pub fn refresh(store: &Store) -> Result<RefreshReport> {
     //   input_cost_per_token_above_200k_tokens,
     //   cache_creation_input_token_cost_above_1hr,
     //   input_cost_per_token_batches}} — all $/token → ×1e6 to $/1M.
-    if let Some(body) = ll_body
-        && let Ok(ll) = serde_json::from_str::<Value>(&body)
-    {
+    if let Some(ll) = ll {
         let mut st = tx.prepare(
             "INSERT OR REPLACE INTO prices(provider, model_id, input, output, cache_read, cache_write,
                     tier_above_200k_input, tier_1h_cache_write, tier_batch, source, fetched_at)
@@ -322,6 +336,10 @@ pub fn refresh(store: &Store) -> Result<RefreshReport> {
             report.litellm += 1;
         }
     }
+
+    if let Some(lp) = lp {
+        report.llmpricing = upsert_llmpricing(&tx, &lp, now)?;
+    }
     tx.commit()?;
 
     // Re-price events that were unpriced at ingest — a grown price book may
@@ -329,6 +347,40 @@ pub fn refresh(store: &Store) -> Result<RefreshReport> {
     let book = PriceBook::load(store)?;
     report.repriced = reprice_unpriced(store, &book)?;
     Ok(report)
+}
+
+/// llmpricing.dev importer: {models:[{id, reference:{provider,input,output,
+/// cacheRead,official}, cheapest:{...}}]} — already $/1M, no conversion.
+/// Books the official `reference` quote; `cheapest` only fills gaps so a
+/// bargain host never understates the user's actual provider cost. The
+/// source exposes no cache-write price → column stays NULL (honest absence,
+/// not a guessed multiplier).
+fn upsert_llmpricing(conn: &rusqlite::Connection, lp: &Value, now: i64) -> Result<usize> {
+    let mut st = conn.prepare(
+        "INSERT OR REPLACE INTO prices(provider, model_id, input, output, cache_read, cache_write, source, fetched_at)
+         VALUES ('llmpricing', ?1, ?2, ?3, ?4, NULL, 'llmpricing', ?5)",
+    )?;
+    let mut n = 0usize;
+    for m in lp["models"].as_array().into_iter().flatten() {
+        let Some(id) = m["id"].as_str() else { continue };
+        let q = if m["reference"]["input"].is_number() {
+            &m["reference"]
+        } else {
+            &m["cheapest"]
+        };
+        if !q["input"].is_number() && !q["output"].is_number() {
+            continue; // neither quote usable
+        }
+        st.execute(rusqlite::params![
+            normalize_key(id),
+            q["input"].as_f64().unwrap_or(0.0),
+            q["output"].as_f64().unwrap_or(0.0),
+            q["cacheRead"].as_f64().unwrap_or(0.0),
+            now
+        ])?;
+        n += 1;
+    }
+    Ok(n)
 }
 
 /// Re-resolve `unpriced` events against the current book. Bounded by the
@@ -628,5 +680,94 @@ mod tests {
         s.upsert_event(&unpriced_ev("i1", "nope-model")).unwrap();
         let book = PriceBook::load(&s).unwrap();
         assert_eq!(reprice_unpriced(&s, &book).unwrap(), 0);
+    }
+
+    fn llmpricing_fixture() -> Value {
+        serde_json::json!({"meta": {"models": 3}, "models": [
+            {"id": "acme/glm-9",
+             "reference": {"provider": "acme", "input": 1.4, "output": 4.4,
+                            "cacheRead": 0.26, "official": true},
+             "cheapest": {"provider": "crof", "input": 0.3, "output": 1.05,
+                           "cacheRead": 0.05}},
+            {"id": "lab/no-ref",
+             "cheapest": {"provider": "x", "input": 0.5, "output": 2.0,
+                           "cacheRead": null}},
+            {"id": "lab/empty",
+             "reference": {"provider": "y"},
+             "cheapest": {"provider": "z"}}
+        ]})
+    }
+
+    #[test]
+    fn llmpricing_books_reference_then_cheapest() {
+        let s = Store::open_memory().unwrap();
+        let n = upsert_llmpricing(s.conn(), &llmpricing_fixture(), now_ms()).unwrap();
+        assert_eq!(n, 2); // lab/empty skipped — no usable quote
+        // reference wins over cheapest (official list price).
+        let (inp, outp, cr, cw): (f64, f64, f64, Option<f64>) = s
+            .conn()
+            .query_row(
+                "SELECT input, output, cache_read, cache_write FROM prices
+                 WHERE source='llmpricing' AND model_id='glm-9'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!((inp, outp, cr), (1.4, 4.4, 0.26));
+        assert_eq!(cw, None); // source has no cache-write field — honest NULL
+        // cheapest fills where reference lacks a numeric input.
+        let inp2: f64 = s
+            .conn()
+            .query_row(
+                "SELECT input FROM prices WHERE source='llmpricing' AND model_id='no-ref'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(inp2, 0.5);
+    }
+
+    #[test]
+    fn llmpricing_wins_key_collisions_not_overrides() {
+        let s = Store::open_memory().unwrap();
+        put_price(&s, "models.dev", "glm-9", 9.0, 9.0);
+        upsert_llmpricing(s.conn(), &llmpricing_fixture(), now_ms()).unwrap();
+        let book = PriceBook::load(&s).unwrap();
+        // live priority: llmpricing (aggregation of models.dev+OR+AA) wins.
+        let Resolution::Priced(_, _, p) = book.resolve("glm-9", None, None) else {
+            panic!("priced");
+        };
+        assert_eq!(p.input, 1.4);
+        // user override still outranks every live source.
+        s.conn()
+            .execute(
+                "INSERT INTO price_overrides(model_key, input, output, updated_at)
+                 VALUES ('glm-9', 42.0, 42.0, 0)",
+                [],
+            )
+            .unwrap();
+        let book = PriceBook::load(&s).unwrap();
+        let Resolution::Priced(_, via, p) = book.resolve("glm-9", None, None) else {
+            panic!("priced");
+        };
+        assert_eq!((via, p.input), ("override", 42.0));
+    }
+
+    #[test]
+    fn stale_gate_uses_attempt_stamp_12h_ttl() {
+        let s = Store::open_memory().unwrap();
+        // Fresh attempt (e.g. a failed fetch) → not stale for the next 12h.
+        s.set_state(LAST_ATTEMPT_KEY, &now_ms().to_string()).unwrap();
+        assert!(!prices_stale(&s).unwrap());
+        // Older than 12h → stale again.
+        let old = now_ms() - (PRICE_TTL_SECS + 60) * 1000;
+        s.set_state(LAST_ATTEMPT_KEY, &old.to_string()).unwrap();
+        assert!(prices_stale(&s).unwrap());
+        // No attempt stamp → falls back to live fetched_at.
+        s.conn()
+            .execute("DELETE FROM app_state WHERE key=?1", [LAST_ATTEMPT_KEY])
+            .unwrap();
+        put_price(&s, "models.dev", "m-z", 1.0, 1.0);
+        assert!(!prices_stale(&s).unwrap());
     }
 }

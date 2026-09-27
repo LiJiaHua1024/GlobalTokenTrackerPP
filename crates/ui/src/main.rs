@@ -216,19 +216,25 @@ fn load_all(
     range: Range,
     apps: Option<Vec<String>>,
     models: Option<Vec<String>>,
+    force_prices: bool,
 ) -> Result<Snapshot, String> {
     let store = Store::open(&db_path()).map_err(|e| e.to_string())?;
     let engine = Engine::new(store).map_err(|e| e.to_string())?;
     let t = std::time::Instant::now();
     let _ = engine.scan_once().map_err(|e| e.to_string());
     let scan_ms = t.elapsed().as_millis();
-    // Price book self-heals: stale >24h → pull models.dev+LiteLLM, reprice
-    // unpriced events. Network failure keeps the current book untouched.
-    if globaltokentracker_core::pricing::prices_stale(&engine.store).unwrap_or(false) {
+    // Price book: fetch once per launch (force_prices on the first load) and
+    // re-check every scan — stale >12h pulls models.dev + LiteLLM +
+    // llmpricing.dev, then reprices unpriced events. Attempts are throttled
+    // via prices_last_attempt so a dead network never hammers the CDNs;
+    // failure keeps the current book untouched.
+    if force_prices
+        || globaltokentracker_core::pricing::prices_stale(&engine.store).unwrap_or(false)
+    {
         match globaltokentracker_core::pricing::refresh(&engine.store) {
             Ok(r) => diag!(
-                "[prices] synced: dev={} litellm={} repriced={}",
-                r.models_dev, r.litellm, r.repriced
+                "[prices] synced: dev={} litellm={} llmpricing={} repriced={}",
+                r.models_dev, r.litellm, r.llmpricing, r.repriced
             ),
             Err(e) => diag!("[prices] refresh failed: {e}"),
         }
@@ -317,7 +323,10 @@ impl Component for Shell {
         let range = Range::from_key(&config.range);
         let app_filter = config.apps.clone();
         let model_filter = config.models.clone();
-        context.spawn_background(move |_| match load_all(range, app_filter, model_filter) {
+        // force_prices=true: one refresh attempt on every launch (per spec:
+        // 每次打开软件自动获取一次), off the UI thread. Subsequent scans only
+        // refresh when >12h stale.
+        context.spawn_background(move |_| match load_all(range, app_filter, model_filter, true) {
             Ok(s) => Msg::Loaded(Box::new(s)),
             Err(e) => Msg::Failed(e),
         });
@@ -826,7 +835,7 @@ impl Shell {
             let range = self.range;
             let apps = self.app_filter.clone();
             let models = self.model_filter.clone();
-            context.spawn_background(move |_| match load_all(range, apps, models) {
+            context.spawn_background(move |_| match load_all(range, apps, models, false) {
                 Ok(s) => Msg::Loaded(Box::new(s)),
                 Err(e) => Msg::Failed(e),
             });

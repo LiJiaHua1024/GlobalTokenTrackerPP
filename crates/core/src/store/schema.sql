@@ -123,3 +123,9 @@ CREATE TABLE IF NOT EXISTS otel_metrics (
   attrs_json TEXT NOT NULL DEFAULT '{}',
   PRIMARY KEY (metric, session_id, attr_sig)
 );
+
+-- 轻量 KV 表：价格抓取节流（last_attempt）等跨会话小状态。
+CREATE TABLE IF NOT EXISTS app_state (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);

@@ -49,7 +49,8 @@ enum Cmd {
     OtelSetup,
     /// Poll vendor quota channels (codex wham / cursor RPC) once.
     Quota,
-    /// Price book: show freshness; --update pulls models.dev + LiteLLM and
+    /// Price book: show freshness; --update pulls models.dev + LiteLLM +
+    /// llmpricing.dev and
     /// reprices events still marked unpriced.
     Prices {
         #[arg(long)]
@@ -133,8 +134,8 @@ fn main() -> Result<()> {
             if update {
                 let r = pricing::refresh(&engine.store)?;
                 println!(
-                    "synced: models.dev {} rows, litellm {} rows; repriced {} unpriced events",
-                    r.models_dev, r.litellm, r.repriced
+                    "synced: models.dev {} rows, litellm {} rows, llmpricing {} rows; repriced {} unpriced events",
+                    r.models_dev, r.litellm, r.llmpricing, r.repriced
                 );
             }
         }

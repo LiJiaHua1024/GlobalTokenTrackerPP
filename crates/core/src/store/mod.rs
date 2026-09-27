@@ -205,6 +205,23 @@ impl Store {
     pub(crate) fn conn(&self) -> &Connection {
         &self.conn
     }
+
+    /// app_state 小 KV：价格抓取节流等跨会话状态。
+    pub fn get_state(&self, key: &str) -> Result<Option<String>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT value FROM app_state WHERE key=?1")?;
+        let mut rows = st.query(params![key])?;
+        Ok(rows.next()?.map(|r| r.get(0)).transpose()?)
+    }
+
+    pub fn set_state(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO app_state(key, value) VALUES (?1, ?2)",
+            params![key, value],
+        )?;
+        Ok(())
+    }
 }
 
 pub fn now_ms() -> i64 {

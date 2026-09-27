@@ -394,3 +394,15 @@
 - **CodeBuddy 适配器**（`codebuddy_ide`，独立于 workbuddy）：解析 `%LOCALAPPDATA%/CodeBuddyExtension/Data/<user>/<host>/<acct>/history/<ws>/<conv>/messages/*.json`——assistant 消息 `extra.statsSnapshot` 是**会话级累计计数器**（input/output/cached/cacheWrite/thinking/elapsed/credit），逐消息差分（max 水位）出事件，合计=最终快照=厂商精确值；无快照消息跳过（其 token 已在累计内）。会话目录作 `Sqlite` kind SourceItem，`adapter_state` 存已处理文件名+累计水位，增量 O(新文件)。conv→cwd 经 `*/codebuddy-sessions.vscdb` 映射出 project。实测：31 事件、78.6M tokens 入账。
 - **取舍**：`lastStep*` 字段不用——多步轮次只报最后一次调用会漏计；差分把一轮多调用合并为一条事件（粒度换精确总额）。`Capability::Estimate`。
 - **验证**：UIA Invoke 折叠/展开往返截图确认；`latest_quotas` 15 行（原 3795+）；测试 29/29（新增 dedup、top-1、分组、CodeBuddy 差分 4 例）；clippy 0。
+
+## S31 llmpricing.dev 第三价目源 + 12h/启动双刷新 ✅
+
+- **需求**：在线计价改用 llmpricing.dev 资源；每 12h 自动刷新一次 + 每次打开软件自动获取一次。
+- **源选型**：`https://llmpricing.dev/api/models.json`——静态 JSON、无密钥、CDN、CORS 开放、CC BY 4.0；1970 模型归并自 models.dev + Artificial Analysis + OpenRouter。实抓验证：glm-5.3、deepseek-v4-pro/flash 等此前缺口全部命中。
+- **取价口径**：只入账 `reference`（官方牌价，`official` 标记）；reference 缺 numeric input 时 `cheapest` 兜底。不用 cheapest 替代 reference——最低托管价会低估用户真实供应商的成本（诚实估算原则）。`cacheRead` 直通；源无 cacheWrite 字段 → 列存 NULL（诚实缺失，不猜倍率），`compute()` 缺省回退照常生效。
+- **加载优先级**：seed(0) < litellm(1) < models.dev(2) < llmpricing(3)——ORDER BY CASE 显式分层，同键 llmpricing 胜出（它是 models.dev 的归并超集，且覆盖用户实际在用的国内模型更全）。用户 `price_overrides` 仍居顶（测试锁定）。provider 列存 'llmpricing'，价格页 source 列如实显示。
+- **刷新语义**：
+  - `PRICE_TTL_SECS` 24h → **12h**，`prices_stale` 判据从"上次成功 `fetched_at`"改为"上次**尝试** `prices_last_attempt`"（新 `app_state` KV 表，schema 幂等兼容旧库）——否则失败一次后每次扫描 tick 都重拉 ~1.5MB。
+  - **每次启动必刷一次**：首次 `load_all(range, apps, models, force_prices=true)`（后台线程，不阻塞首帧），与 12h 周期检查解耦；运行期内每次扫描复核 12h TTL。
+- **验证**：CLI `prices --update` 实抓：models.dev 7750 + litellm 3637 + llmpricing 1774 upsert（落库 1741 distinct 归一键）；`app_state.prices_last_attempt` 落戳；glm-5.3 解析得 1.4/4.4（官方价）。新增测试：reference/cheapest 取舍、空报价跳过、key 碰撞优先级、override 仍最高、12h 节流 3 例——**32/32 通过，clippy 0，release 干净**。
+- **归属**：CC BY 4.0 数据，源标注 `llmpricing`；`meta.syncedAt` 为上游构建时间，本库 `fetched_at` 记本地抓取时刻，两者语义分开。
