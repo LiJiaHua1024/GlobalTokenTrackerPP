@@ -257,3 +257,20 @@
 - **修法**：根换 `Grid`（`Auto` 导航行 + `Star` 内容行），内容区被约束进可视高度 → ScrollViewer 生效；滚动条显式 `Auto`（Fluent 惯例：悬停才现细条）。
 - **验证路径（记录）**：注入输入（WM_MOUSEWHEEL/SendInput）对 WinUI3 输入岛无效，改用 **UI Automation**——`ScrollPattern.VerticallyScrollable=True`、`VerticalViewSize=68.3%`，`SetScrollPercent(100)` 后截图确认滚到底部（配额卡/未计价警示条可见）。这条 UIA 通道以后还可用于端到端 UI 验证。
 - **验证**：build/clippy 干净。
+
+## S19 安装器 GUI（纯 Win32/GDI 深色 Fluent）✅
+
+- **约束**：安装器职责是在没有 WinAppRuntime 的机器上装运行时——**不能依赖 WinUI3/WebView2**，选纯 Win32+GDI 自绘。`windows 0.62.2` + `windows_subsystem="windows"`。
+- **界面**：`#202020` 底 / `#60CDFF` accent / Segoe UI / DWM 深色标题栏（`DWMWA_USE_IMMERSIVE_DARK_MODE`）/ Per-Monitor-V2 / `DarkMode_Explorer` 主题化 EDIT+CheckBox；accent 竖条+标题+副标题、发丝分隔线、owner-drawn 圆角主按钮（卸载态红色）与描边副按钮、自绘进度条控件（GWLP_USERDATA 存千分比）、`IFileOpenDialog` 现代选目录。660×430 固定窗。
+- **架构**：安装/卸载逻辑拆成 `install_steps`/`uninstall_steps`（`step(pct,label)`+`log` 回调），控制台与 GUI 共享同一代码路径；worker 线程跑活，`SendMessage` 更新状态/进度，`WM_APP_DONE` 切完成态。安装成功主键变"启动并关闭"（`ShellExecuteW` 拉起 ui.exe）。
+- **CLI 保持**：`--quiet`/`--uninstall`/`--dir`/`--cli`/`--help` 全保留；`AttachConsole(ATTACH_PARENT_PROCESS)`+`SetStdHandle` 重接 CONOUT$/CONIN$。`--uninstall` 不带 `--dir` 时默认 **current_exe 父目录**（卸载器副本就住在安装目录里）。
+- **过程中抓到并修掉的真实 bug**：
+  1. `SelectObject(mem, old)` 写在 `BitBlt` **之前**——先把位图换出再 blit 等于从 1×1 stock bitmap 拷贝，客户区全白（截图二分定位）。
+  2. **worker 里 `println!` 会 panic**——windows 子系统无控制台时 stdout 无效，写失败 panic 杀线程留下半装状态→GUI log sink 改 no-op（步骤标签+最终错误已够叙事）。
+  3. **安装中关窗杀进程=半装**——`WM_CLOSE` 在 `working` 时拦截并提示。
+  4. **每帧 WM_CTLCOLOR* 新建画刷泄漏**——画刷预建存 Gui 复用；STATIC 标签回 BG 刷（否则浅色带）、CHECKBOX 走 `WM_CTLCOLORBTN`+NULL_BRUSH。
+  5. **卸载自删竞态**——原实现在 steps 里立刻排延迟 rmdir，GUI 窗口还开着时 setup.exe 被自己锁住删不掉留半删→拆出 `schedule_self_delete`，GUI 改到 `WM_CLOSE`（done_ok 才排）、控制台路径退出前排。
+  6. **taskkill 挂死**——GUI 子进程 spawn 控制台程序时新控制台分配在本机环境下挂住（杀 cli 的 taskkill 15s+ 不退）；所有子 spawn 加 `CREATE_NO_WINDOW` 后实测秒过。
+  7. `--help` 原本什么都不印直接进安装流程；`--dir` 吃掉下一个 flag 的问题一并修。
+- **实测（发布包，非桩）**：GUI 安装→3 文件+快捷方式+注册项→完成态→"启动并关闭"拉起真 UI；GUI 卸载→杀运行中 UI→完成态→关窗→**整目录含自身自删干净**；`--quiet` install/uninstall 闭环（自删目录消失）；空载荷桩正确报错并恢复按钮可重试。
+- **已知限制**：MinTTY/Git-Bash 等无真控制台环境下 `--quiet`/`--help` 静默无输出（windows 子系统 exe 初始无 std 句柄，AttachConsole 无处可挂——功能正常仅无输出，cmd/PowerShell 控制台中正常）；建议真机手动过目一次窗口。
