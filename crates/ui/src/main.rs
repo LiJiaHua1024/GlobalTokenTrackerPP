@@ -25,6 +25,14 @@ use std::path::PathBuf;
 use theme::Theme;
 use windows_reactor::*;
 
+/// Result of one background refresh. `Unchanged` means the scan ingested
+/// nothing — the ~150ms of aggregate queries and the whole-view rebuild are
+/// skipped, and only the scan-time indicator updates.
+pub enum LoadOutcome {
+    Fresh(Box<Snapshot>),
+    Unchanged { scan_ms: u128, price_due: bool },
+}
+
 /// One background refresh produces this bundle (all Send-safe plain data).
 /// `sources`/`prices` are page-scoped: fetched only while that page is open —
 /// the 5k-row price table was otherwise rebuilt on every refresh tick.
@@ -86,6 +94,9 @@ pub struct Shell {
     /// A background price fetch is in flight — prevents overlapping pulls
     /// when consecutive scans all report `price_due`.
     prices_refreshing: bool,
+    /// Visible aggregates must rebuild even if the next scan lands nothing —
+    /// set by filter/range/page changes, quota polls and repricing.
+    views_stale: bool,
 }
 
 /// Which filter-strip picker is open — `Tools`/`Models` are multi-select
@@ -98,7 +109,7 @@ pub enum MenuKind {
 }
 
 pub enum Msg {
-    Loaded(Box<Snapshot>),
+    Loaded(LoadOutcome),
     Failed(String),
     Tick,
     Rescan,
@@ -229,18 +240,28 @@ fn load_all(
     models: Option<Vec<String>>,
     force_prices: bool,
     page: Page,
-) -> Result<Snapshot, String> {
+    // True when the caller knows visible data must be rebuilt even if the
+    // scan lands nothing (filter/range/page change, reprice, quota poll).
+    force_views: bool,
+) -> Result<LoadOutcome, String> {
     let store = Store::open(&db_path()).map_err(|e| e.to_string())?;
     let engine = Engine::new(store).map_err(|e| e.to_string())?;
     let t = std::time::Instant::now();
-    let _ = engine.scan_once().map_err(|e| e.to_string());
+    let report = engine.scan_once();
     let scan_ms = t.elapsed().as_millis();
+    // A failed scan can't prove "nothing changed" — rebuild views anyway.
+    let changed = report
+        .map(|r| r.events_ingested > 0 || r.quotas > 0)
+        .unwrap_or(true);
     // Price refresh runs as its own background task (see PricesDone) so a
     // slow network never gates first paint or a refresh tick. `price_due`
     // fires once per launch (force_prices) and whenever >12h stale; the
     // app_state attempt stamp throttles failures to the same TTL.
     let price_due = force_prices
         || globaltokentracker_core::pricing::prices_stale(&engine.store).unwrap_or(false);
+    if !force_views && !changed {
+        return Ok(LoadOutcome::Unchanged { scan_ms, price_due });
+    }
     let vm = engine
         .store
         .overview(range, apps.as_deref(), models.as_deref())
@@ -260,7 +281,7 @@ fn load_all(
         .map_err(|e| e.to_string())?;
     let prices_synced_at =
         globaltokentracker_core::pricing::last_live_sync(&engine.store).unwrap_or(None);
-    Ok(Snapshot {
+    Ok(LoadOutcome::Fresh(Box::new(Snapshot {
         vm,
         detail: DetailBundle {
             rows: d.rows,
@@ -272,7 +293,7 @@ fn load_all(
         prices_synced_at,
         price_due,
         scan_ms,
-    })
+    })))
 }
 
 /// Arms one periodic-refresh timer. `secs == 0` (仅文件变更) skips arming —
@@ -344,8 +365,8 @@ impl Component for Shell {
         // 每次打开软件自动获取一次), off the UI thread. Subsequent scans only
         // refresh when >12h stale.
         context.spawn_background(move |_| {
-            match load_all(range, app_filter, model_filter, true, page) {
-                Ok(s) => Msg::Loaded(Box::new(s)),
+            match load_all(range, app_filter, model_filter, true, page, true) {
+                Ok(s) => Msg::Loaded(s),
                 Err(e) => Msg::Failed(e),
             }
         });
@@ -380,52 +401,62 @@ impl Component for Shell {
             open_menu: None,
             quota_collapsed: std::collections::BTreeSet::new(),
             prices_refreshing: false,
+            views_stale: true,
         }
     }
 
     fn update(&mut self, message: Msg, context: &ComponentContext<Self>) {
         match message {
-            Msg::Loaded(s) => {
-                diag!("[scan] loaded, pending_rescan={}", self.pending_rescan);
-                // Tool names can vanish from the ledger (pruned data); keep the
-                // persisted filter honest — drop dead names and collapse back
-                // to None once it covers every live tool.
-                if let Some(f) = &mut self.app_filter {
-                    f.retain(|a| s.vm.apps.contains(a));
-                    if s.vm.apps.iter().all(|a| f.contains(a)) {
-                        self.app_filter = None;
+            Msg::Loaded(outcome) => {
+                let price_due = match outcome {
+                    LoadOutcome::Fresh(s) => {
+                        diag!("[scan] loaded, pending_rescan={}", self.pending_rescan);
+                        // Tool names can vanish from the ledger (pruned data);
+                        // keep the persisted filter honest — drop dead names
+                        // and collapse back to None on full coverage.
+                        if let Some(f) = &mut self.app_filter {
+                            f.retain(|a| s.vm.apps.contains(a));
+                            if s.vm.apps.iter().all(|a| f.contains(a)) {
+                                self.app_filter = None;
+                            }
+                            if self.app_filter != self.config.apps {
+                                self.config.apps = self.app_filter.clone();
+                                self.config.save();
+                            }
+                        }
+                        if let Some(f) = &mut self.model_filter {
+                            f.retain(|m| s.vm.models.contains(m));
+                            if s.vm.models.iter().all(|m| f.contains(m)) {
+                                self.model_filter = None;
+                            }
+                            if self.model_filter != self.config.models {
+                                self.config.models = self.model_filter.clone();
+                                self.config.save();
+                            }
+                        }
+                        let price_due = s.price_due;
+                        self.snap = Some(*s);
+                        if let Some(tray) = &self.tray {
+                            let total = self
+                                .snap
+                                .as_ref()
+                                .map(|s| fmt::tokens_total(&s.vm.today))
+                                .unwrap_or(0);
+                            let _ = tray.set_tooltip(Some(format!(
+                                "GlobalTokenTracker — 今日 {}",
+                                fmt::tokens_exact(total)
+                            )));
+                        }
+                        price_due
                     }
-                    if self.app_filter != self.config.apps {
-                        self.config.apps = self.app_filter.clone();
-                        self.config.save();
+                    LoadOutcome::Unchanged { scan_ms, price_due } => {
+                        if let Some(old) = &mut self.snap {
+                            old.scan_ms = scan_ms;
+                        }
+                        price_due
                     }
-                }
-                // Same reconcile for models: the checklist is scoped by the
-                // app filter, so unchecking a tool can retire model names.
-                if let Some(f) = &mut self.model_filter {
-                    f.retain(|m| s.vm.models.contains(m));
-                    if s.vm.models.iter().all(|m| f.contains(m)) {
-                        self.model_filter = None;
-                    }
-                    if self.model_filter != self.config.models {
-                        self.config.models = self.model_filter.clone();
-                        self.config.save();
-                    }
-                }
-                let price_due = s.price_due;
-                self.snap = Some(*s);
+                };
                 self.last_error = None;
-                if let Some(tray) = &self.tray {
-                    let total = self
-                        .snap
-                        .as_ref()
-                        .map(|s| fmt::tokens_total(&s.vm.today))
-                        .unwrap_or(0);
-                    let _ = tray.set_tooltip(Some(format!(
-                        "GlobalTokenTracker — 今日 {}",
-                        fmt::tokens_exact(total)
-                    )));
-                }
                 self.scanning = false;
                 self.poll_quota_if_stale(context);
                 // Detached price-source fetch: triggered here (post-load) so
@@ -452,6 +483,8 @@ impl Component for Shell {
             Msg::Failed(e) => {
                 self.last_error = Some(e);
                 self.scanning = false;
+                // The failed load may have owed the UI a forced rebuild.
+                self.views_stale = true;
                 if self.pending_rescan {
                     self.pending_rescan = false;
                     self.start_scan(context);
@@ -465,6 +498,7 @@ impl Component for Shell {
             Msg::Rescan => {
                 // Manual refresh dismisses an open picker — the user moved on.
                 self.open_menu = None;
+                self.views_stale = true;
                 self.start_scan(context);
             }
             Msg::SetRange(label) => {
@@ -476,6 +510,7 @@ impl Component for Shell {
                     self.config.save();
                     // New aggregates needed — reload through the normal scan
                     // path (data hit is small; totals/by_app are indexed).
+                    self.views_stale = true;
                     self.scanning = false;
                     self.start_scan(context);
                 }
@@ -507,6 +542,7 @@ impl Component for Shell {
                 };
                 self.config.apps = self.app_filter.clone();
                 self.config.save();
+                self.views_stale = true;
                 self.scanning = false;
                 self.start_scan(context);
             }
@@ -514,6 +550,7 @@ impl Component for Shell {
                 self.app_filter = filter;
                 self.config.apps = self.app_filter.clone();
                 self.config.save();
+                self.views_stale = true;
                 self.scanning = false;
                 self.start_scan(context);
             }
@@ -542,6 +579,7 @@ impl Component for Shell {
                 };
                 self.config.models = self.model_filter.clone();
                 self.config.save();
+                self.views_stale = true;
                 self.scanning = false;
                 self.start_scan(context);
             }
@@ -549,6 +587,7 @@ impl Component for Shell {
                 self.model_filter = filter;
                 self.config.models = self.model_filter.clone();
                 self.config.save();
+                self.views_stale = true;
                 self.scanning = false;
                 self.start_scan(context);
             }
@@ -639,6 +678,7 @@ impl Component for Shell {
                     _ => false,
                 };
                 if missing {
+                    self.views_stale = true;
                     self.start_scan(context);
                 }
             }
@@ -713,6 +753,11 @@ impl Component for Shell {
             }
             Msg::QuotaDone(n, errs) => {
                 diag!("[quota] {} rows, {} errors", n, errs.len());
+                if n > 0 {
+                    // New quota rows land outside the scan pipeline — force
+                    // the next refresh to rebuild views for them.
+                    self.views_stale = true;
+                }
                 for e in errs {
                     diag!("[quota] {e}");
                 }
@@ -725,7 +770,9 @@ impl Component for Shell {
                             "[prices] synced: dev={} litellm={} llmpricing={} repriced={}",
                             r.models_dev, r.litellm, r.llmpricing, r.repriced
                         );
-                        // Newly-priced events change visible USD — rescan once.
+                        // A successful sync refreshes prices_synced_at too;
+                        // repriced>0 additionally changes visible USD.
+                        self.views_stale = true;
                         if r.repriced > 0 {
                             self.start_scan(context);
                         }
@@ -900,13 +947,16 @@ impl Shell {
         if !self.scanning {
             diag!("[scan] start");
             self.scanning = true;
+            let force_views = std::mem::take(&mut self.views_stale);
             let range = self.range;
             let apps = self.app_filter.clone();
             let models = self.model_filter.clone();
             let page = self.page;
-            context.spawn_background(move |_| match load_all(range, apps, models, false, page) {
-                Ok(s) => Msg::Loaded(Box::new(s)),
-                Err(e) => Msg::Failed(e),
+            context.spawn_background(move |_| {
+                match load_all(range, apps, models, false, page, force_views) {
+                    Ok(s) => Msg::Loaded(s),
+                    Err(e) => Msg::Failed(e),
+                }
             });
         }
     }

@@ -488,3 +488,17 @@
   - 体积上界 = 2 代 × 压缩后大小（当前 ~44MB × 2 ≈ 88MB）。
 - **验证**：新增 3 测试（删库自愈+数据完整、损坏库自愈+`.corrupt` 留存、两代轮换+节流+memory 跳过）。CLI `scan` 实测生成 `backups/ledger.db`：`PRAGMA quick_check` ok、60,179 事件、独立 delete-journal 文件。**49/49 测试、clippy `-D warnings` 0**。
 - **取舍**：restore 只覆盖"文件缺失/打开失败"路径；打开正常但页级深损的场景不做启动时 `quick_check`（46MB 全扫每次打开太贵），VACUUM 失败会以错误暴露并在备份目录留下完好旧代——恢复窗口仍由 prev 代兜底。
+
+## S41 全面性能审计 + 空闲刷新零成本化 ✅
+
+- **需求**：全面 review 性能、启动速度及其他问题。
+- **实测基线**（本机 754 源文件 / 60K 事件 / 46MB 账本，debug CLI）：
+  - 单 tick 全扫 1.4s → **`codebuddy_ide` 单适配器独占 893ms**（57 个会话目录）；codex 36ms（515 文件 stat）、qoder 10ms，其余 ≤6ms。
+  - 冷启动（release）：窗口出现 1365ms，首个数据帧 1583ms —— `load_all` 路径 ≈220ms（Store::open ~10 + PriceBook::load 9 + scan ~170 + 聚合查询 ~50）。
+  - 聚合查询（60K 事件）：totals_all 27ms、totals_range 28ms、bucket_models 55ms、by_app 25ms、latest_quotas/price_rows <1ms——单条都不慢，**问题是每个空闲 tick 全跑一遍还重建整棵视图树**。
+- **修复一（codebuddy 热点）**：`session_dirs()` 原在 `scan_sqlite` 内**每个会话重跑**（57×全目录遍历+开 sqlite+ItemTable 全扫）→ 改为适配器实例级 `Mutex<Option<…>>` 缓存，每 tick 只算一次；锁在取 project 后即释放，不跨消息扫描；`files` 空/无新增时跳过 `save_cursor`。结果 **893ms → 49ms**，总扫描 **1.4s → 274ms**。
+- **修复二（空闲 tick 零视图成本）**：`load_all` 返回 `LoadOutcome::{Fresh, Unchanged}`——扫描 `events_ingested==0 && quotas==0` 且未强制时**跳过全部聚合查询与整树重建**，只回传 `scan_ms`/`price_due`。强制重建由 `views_stale` 标记驱动：初启、手动刷新、范围/工具/模型筛选变更、页面懒加载数据缺失、配额轮询入账（`QuotaDone n>0`）、定价重刷（`PricesDone`）、加载失败重试。扫描**失败视为已变**（不能证明"没变化"时保守重建）。空闲 tick 成本从 ~430ms（扫描+查询+重建）降到纯扫描 ~274ms，且 UI 线程零抖动。
+- **修复三（配额表有界化）**：`quota_snapshots` 每轮轮询全键追加历史行（本机 8 键已攒 11,431 行）——`prune_quotas` 挂进每日 `maybe_backup` 节流块：删除超 30 天历史行但**每键保留最新一行**（陈旧配额照常显示），prune 先于 `VACUUM INTO` 使备份始终收剪后体积。
+- **引擎诊断**：`scan_once` 加适配器级 `debug!` 计时（id/ms/files/scanned），后续热点排障不用再插桩。
+- **验证**：新增 `prune_quotas` 测试（超龄删除+每键保最新）；codebuddy 测试改 `::default()` 构造。**50/50 测试、clippy `-D warnings` 0、release 干净**；UI 冷启动实测窗口 1365ms/首数据帧 1583ms（debug 对照 2090/2507）。
+- **未做（如实记录）**：每 tick 仍 reopen Store + PriceBook::load（~20ms，可换共享连接但改动大、收益小）；首帧仍等扫描完成（可先查旧账本先渲染再补扫，~200ms 收益、复杂度不值）；`usage_events` 自动 prune 未启用（CLI 手动 `prune` 保留——详情页历史是产品需求，不擅自开自动删）。

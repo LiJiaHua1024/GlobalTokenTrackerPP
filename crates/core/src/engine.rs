@@ -79,8 +79,16 @@ impl Engine {
     }
 
     fn scan_adapter(&self, adapter: &dyn SourceAdapter) -> Result<ScanReport> {
+        let t0 = std::time::Instant::now();
         let items = adapter.discover()?;
         let report = self.scan_items(adapter, &items)?;
+        debug!(
+            adapter = adapter.id(),
+            ms = t0.elapsed().as_millis() as u64,
+            files = report.files_seen,
+            scanned = report.files_scanned,
+            "adapter scan"
+        );
         // Source-health bookkeeping for the data-sources page.
         let _ = self.store.touch_source(
             adapter.id(),

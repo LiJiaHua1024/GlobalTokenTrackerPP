@@ -29,7 +29,25 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-pub struct CodeBuddyIde;
+pub struct CodeBuddyIde {
+    /// `session:`→cwd map is per-scan stable; without this cache the IDE
+    /// session db was walked once per conversation (the dominant scan cost).
+    cwds: std::sync::Mutex<Option<BTreeMap<String, String>>>,
+}
+
+impl CodeBuddyIde {
+    pub fn new() -> Self {
+        Self {
+            cwds: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+impl Default for CodeBuddyIde {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// `…/CodeBuddyExtension/Data` — hosts `Data/<user>/<host>/<acct>/history`.
 fn data_root() -> PathBuf {
@@ -189,10 +207,16 @@ impl SourceAdapter for CodeBuddyIde {
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
-        let cwds = session_dirs();
-        let project = cwds
-            .get(&conv)
-            .and_then(|cwd| Path::new(cwd).file_name().map(|s| s.to_string_lossy().to_string()));
+        let project = {
+            let mut g = self.cwds.lock().unwrap_or_else(|e| e.into_inner());
+            g.get_or_insert_with(session_dirs)
+                .get(&conv)
+                .and_then(|cwd| {
+                    Path::new(cwd)
+                        .file_name()
+                        .map(|s| s.to_string_lossy().to_string())
+                })
+        };
 
         // New message files, oldest first so deltas walk the timeline forward.
         // Each candidate is read exactly once; unparseable files are still
@@ -217,6 +241,7 @@ impl SourceAdapter for CodeBuddyIde {
             })
             .unwrap_or_default();
         files.sort_by_key(|(ts, ..)| *ts);
+        let had_new = !files.is_empty();
 
         let mut out = ScanOutcome::default();
         for (_ts, stem, f, v) in files {
@@ -272,10 +297,15 @@ impl SourceAdapter for CodeBuddyIde {
         }
 
         // Persist via the conversation's index.json (a real file — the dir
-        // itself can't produce a tail fingerprint).
+        // itself can't produce a tail fingerprint). Skip the write entirely
+        // when nothing new was processed — otherwise every quiet tick issues
+        // one adapter_state UPDATE per conversation.
         let fp_file = [item.path.join("index.json"), item.path.join("..").join("index.json")]
             .into_iter()
             .find(|p| p.is_file());
+        if !had_new && cur.state.is_some() {
+            return Ok(out);
+        }
         if let Some(fp) = fp_file {
             store.save_cursor(
                 self.id(),
@@ -331,7 +361,7 @@ mod tests {
             path: conv.clone(),
             kind: SourceKind::Sqlite,
         };
-        let out = CodeBuddyIde.scan_sqlite(&item, &store).unwrap();
+        let out = CodeBuddyIde::default().scan_sqlite(&item, &store).unwrap();
         assert_eq!(out.events.len(), 2);
         let first = &out.events[0];
         assert_eq!(first.dedup_key, "codebuddy_ide:convX:req-1000-50");
@@ -350,7 +380,7 @@ mod tests {
         assert_eq!(second.credits, Some(0.5));
 
         // Re-scan: cursor state persists → zero new events.
-        let out2 = CodeBuddyIde.scan_sqlite(&item, &store).unwrap();
+        let out2 = CodeBuddyIde::default().scan_sqlite(&item, &store).unwrap();
         assert_eq!(out2.events.len(), 0);
 
         std::fs::remove_dir_all(&dir).ok();

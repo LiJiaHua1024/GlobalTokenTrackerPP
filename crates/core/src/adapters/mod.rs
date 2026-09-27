@@ -115,7 +115,7 @@ pub fn registry() -> Vec<Box<dyn SourceAdapter>> {
         Box::new(zcode::ZCode),
         Box::new(grok::Grok),
         Box::new(workbuddy::WorkBuddy),
-        Box::new(codebuddy::CodeBuddyIde),
+        Box::new(codebuddy::CodeBuddyIde::new()),
         Box::new(minimax_code::MiniMaxCode),
         Box::new(kimi_code::KimiCode),
         Box::new(cline::Cline),

@@ -33,6 +33,8 @@ pub fn default_db_path() -> std::path::PathBuf {
 /// data is append-only ingested, so losing a tool's local logs never
 /// loses history; losing this db would).
 pub const BACKUP_INTERVAL_MS: i64 = 86_400_000;
+/// Quota poll rows older than this are pruned during the daily backup pass.
+const QUOTA_RETENTION_MS: i64 = 30 * 86_400_000;
 
 pub struct Store {
     conn: Connection,
@@ -122,9 +124,24 @@ impl Store {
         if now_ms() - last < BACKUP_INTERVAL_MS {
             return Ok(false);
         }
+        self.prune_quotas(QUOTA_RETENTION_MS)?;
         self.backup_now()?;
         self.set_state("backup_last_at", &now_ms().to_string())?;
         Ok(true)
+    }
+
+    /// Age out quota history rows — they accumulate one row per poll per key
+    /// and nothing but `latest_quotas` reads them. The newest row per key is
+    /// always kept so a stale-but-live quota still displays.
+    pub fn prune_quotas(&self, older_than_ms: i64) -> Result<u64> {
+        let cutoff = now_ms() - older_than_ms;
+        let n = self.conn.execute(
+            "DELETE FROM quota_snapshots WHERE captured_at < ?1 AND id NOT IN (
+                 SELECT MAX(id) FROM quota_snapshots
+                 GROUP BY app, account, window_kind)",
+            params![cutoff],
+        )?;
+        Ok(n as u64)
     }
 
     /// `VACUUM INTO` yields a compacted, fully-checkpointed copy in one
@@ -713,6 +730,35 @@ mod tests {
         assert_eq!(
             rows.iter().filter(|r| r.app == "workbuddy").count(),
             1
+        );
+    }
+
+    #[test]
+    fn prune_quotas_ages_history_but_keeps_latest_per_key() {
+        let s = Store::open_memory().unwrap();
+        let now = now_ms();
+        let old = now - 40 * 86_400_000; // beyond the 30d retention window
+        // Two stale rows + one fresh row for one key; a stale-only key too.
+        for (kind, ts) in [("session_ctx", old), ("session_ctx", old + 1), ("session_ctx", now), ("weekly", old)] {
+            let mut q = quota_snap("wb", kind, Some(50.0), ts);
+            q.raw_json = Some(format!("ts{ts}"));
+            s.conn()
+                .execute(
+                    "INSERT INTO quota_snapshots(app,account,captured_at,window_kind,used,limit_value,used_percent,resets_at,raw_json)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                    params![q.app, q.account, q.captured_at, q.window_kind, q.used,
+                            q.limit_value, q.used_percent, q.resets_at, q.raw_json],
+                )
+                .unwrap();
+        }
+        let n = s.prune_quotas(30 * 86_400_000).unwrap();
+        assert_eq!(n, 2); // two stale session_ctx rows die
+        let rows = s.latest_quotas().unwrap();
+        // Fresh session_ctx + the kept-latest stale weekly both survive.
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows.iter().find(|r| r.window_kind == "weekly").unwrap().captured_at,
+            old
         );
     }
 }
