@@ -8,7 +8,37 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+/// Default periodic refresh cadence (seconds).
+pub const DEFAULT_REFRESH_SECS: u64 = 30;
+
+/// Periodic refresh options: `(seconds, label)`. `0` = no timer — the
+/// file watcher still live-refreshes on source changes.
+pub const REFRESH_OPTIONS: [(u64, &str); 5] = [
+    (0, "仅文件变更"),
+    (10, "10 秒"),
+    (30, "30 秒"),
+    (60, "1 分钟"),
+    (300, "5 分钟"),
+];
+
+/// Menu label → seconds, or `None` for an unknown label.
+pub fn refresh_secs_of(label: &str) -> Option<u64> {
+    REFRESH_OPTIONS
+        .iter()
+        .find(|(_, l)| *l == label)
+        .map(|(s, _)| *s)
+}
+
+/// Seconds → menu label; unknown values show the default cadence.
+pub fn refresh_label(secs: u64) -> &'static str {
+    REFRESH_OPTIONS
+        .iter()
+        .find(|(s, _)| *s == secs)
+        .map(|(_, l)| *l)
+        .unwrap_or("30 秒")
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
     pub theme: ThemeConfig,
@@ -17,8 +47,27 @@ pub struct UiConfig {
     /// Checked tool names for the app filter; `None`/absent = all tools.
     /// `Some(empty)` = user unchecked everything (an honest empty view).
     pub apps: Option<Vec<String>>,
+    /// Periodic refresh cadence in seconds; `0` = file-watch only.
+    #[serde(default = "default_refresh_secs")]
+    pub refresh_secs: u64,
     /// page name → layout
     pub pages: BTreeMap<String, PageLayout>,
+}
+
+fn default_refresh_secs() -> u64 {
+    DEFAULT_REFRESH_SECS
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            theme: ThemeConfig::default(),
+            range: String::new(),
+            apps: None,
+            refresh_secs: DEFAULT_REFRESH_SECS,
+            pages: BTreeMap::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

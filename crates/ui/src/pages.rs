@@ -2,7 +2,7 @@
 //! from `Theme`; overview blocks are config-ordered `widgets` so users can
 //! reorder/hide them (persisted in ui.json) without touching code.
 
-use crate::config::UiConfig;
+use crate::config::{refresh_label, UiConfig, REFRESH_OPTIONS};
 use crate::theme::Theme;
 use crate::widgets as w;
 use crate::{Msg, Shell, Snapshot, DETAIL_PAGE_SIZE};
@@ -464,6 +464,45 @@ fn app_checks(
         ))
 }
 
+/// Refresh-cadence picker — a DropDownButton carrying a MenuFlyout, so a
+/// pick auto-dismisses (a rich Flyout would stay open; wrong for one-shot
+/// selection). `0` seconds = file-watch only.
+fn refresh_picker(theme: &Theme, secs: u64, ctx: &mut ViewContext<Shell>) -> View {
+    let items = REFRESH_OPTIONS.iter().map(|(_, l)| MenuItem::item(*l, *l));
+    StackPanel::new()
+        .orientation(Orientation::Horizontal)
+        .spacing(8.0)
+        .children((
+            TextBlock::new()
+                .text("刷新")
+                .font_size(theme.label_size)
+                .foreground(theme.subtle)
+                .vertical_alignment(VerticalAlignment::Center),
+            DropDownButton::new()
+                .automation_name("刷新频率")
+                .content(refresh_label(secs))
+                .menu(Menu::new(items, ctx.callback(Msg::SetRefreshSecs))),
+        ))
+}
+
+/// Filter strip shared by overview + detail: tool-scope dropdown then the
+/// refresh-cadence picker, kept on one row that cannot overflow.
+fn filter_row(
+    s: &Snapshot,
+    theme: &Theme,
+    filter: &Option<Vec<String>>,
+    refresh_secs: u64,
+    ctx: &mut ViewContext<Shell>,
+) -> View {
+    StackPanel::new()
+        .orientation(Orientation::Horizontal)
+        .spacing(20.0)
+        .children((
+            app_checks(s, theme, filter, ctx),
+            refresh_picker(theme, refresh_secs, ctx),
+        ))
+}
+
 /// Bundle for the overview page — keeps the signature under the arg limit
 /// and makes the shell→page handoff explicit.
 pub struct OverviewArgs<'a> {
@@ -537,7 +576,7 @@ pub fn overview_page(
             .into_iter()
             .collect(),
         ),
-        app_checks(s, theme, app_filter, ctx),
+        filter_row(s, theme, app_filter, config.refresh_secs, ctx),
     ];
 
     for id in order.iter() {
@@ -706,6 +745,7 @@ pub fn detail_page(
     theme: &Theme,
     ctx: &mut ViewContext<Shell>,
     app_filter: &Option<Vec<String>>,
+    refresh_secs: u64,
 ) -> View {
     let Some(s) = snap else {
         return loading(theme, true);
@@ -761,7 +801,7 @@ pub fn detail_page(
                         .spacing(8.0)
                         .keyed_children(keyed(nav))],
                 ),
-                app_checks(s, theme, app_filter, ctx),
+                filter_row(s, theme, app_filter, refresh_secs, ctx),
                 w::card(
                     theme,
                     vstack(

@@ -19,7 +19,7 @@ use globaltokentracker_core::store::{default_db_path, EventRow, PriceRow, Source
 use globaltokentracker_core::viewmodel::fmt;
 use globaltokentracker_core::viewmodel::Range;
 use globaltokentracker_core::{Engine, OverviewVm, Store};
-use config::UiConfig;
+use config::{refresh_secs_of, UiConfig};
 use pages::*;
 use std::path::PathBuf;
 use theme::Theme;
@@ -98,12 +98,13 @@ pub enum Msg {
     /// Bulk tool-scope set from the filter flyout — `None` = all tools,
     /// `Some(vec![])` = deliberately empty view.
     SetApps(Option<Vec<String>>),
+    /// Refresh-cadence pick from the menu (carries the option label).
+    SetRefreshSecs(String),
     /// Background quota poll finished (rows written, channel errors).
     QuotaDone(usize, Vec<String>),
 }
 
 const DETAIL_PAGE_SIZE: i64 = 200;
-const REFRESH_SECS: u64 = 30;
 /// Spec §6.9: quota polling is low-frequency by design.
 const QUOTA_POLL_SECS: u64 = 30 * 60;
 
@@ -206,9 +207,14 @@ fn load_all(range: Range, apps: Option<Vec<String>>) -> Result<Snapshot, String>
     })
 }
 
-fn arm_refresh(context: &ComponentContext<Shell>) {
-    context.spawn_background(|_| {
-        std::thread::sleep(std::time::Duration::from_secs(REFRESH_SECS));
+/// Arms one periodic-refresh timer. `secs == 0` (仅文件变更) skips arming —
+/// the file watcher still live-refreshes on source changes.
+fn arm_refresh(context: &ComponentContext<Shell>, secs: u64) {
+    if secs == 0 {
+        return;
+    }
+    context.spawn_background(move |_| {
+        std::thread::sleep(std::time::Duration::from_secs(secs));
         Msg::Tick
     });
 }
@@ -331,7 +337,7 @@ impl Component for Shell {
                     self.pending_rescan = false;
                     self.start_scan(context);
                 } else {
-                    arm_refresh(context);
+                    arm_refresh(context, self.config.refresh_secs);
                 }
             }
             Msg::Failed(e) => {
@@ -341,7 +347,7 @@ impl Component for Shell {
                     self.pending_rescan = false;
                     self.start_scan(context);
                 } else {
-                    arm_refresh(context);
+                    arm_refresh(context, self.config.refresh_secs);
                 }
             }
             Msg::Tick | Msg::Rescan => {
@@ -395,6 +401,18 @@ impl Component for Shell {
                 self.config.save();
                 self.scanning = false;
                 self.start_scan(context);
+            }
+            Msg::SetRefreshSecs(label) => {
+                if let Some(secs) = refresh_secs_of(&label) {
+                    let was_off = self.config.refresh_secs == 0;
+                    self.config.refresh_secs = secs;
+                    self.config.save();
+                    // The chain is armed after each scan; kick one now when
+                    // leaving file-watch-only mode so the cadence starts.
+                    if was_off && secs > 0 && !self.scanning {
+                        arm_refresh(context, secs);
+                    }
+                }
             }
             Msg::WatchFired => {
                 diag!("[watch] fired, scanning={}", self.scanning);
@@ -529,7 +547,9 @@ impl Component for Shell {
                     app_filter: &self.app_filter,
                 },
             ),
-            Page::Detail => detail_page(snap, theme, context, &self.app_filter),
+            Page::Detail => {
+                detail_page(snap, theme, context, &self.app_filter, self.config.refresh_secs)
+            }
             Page::Quota => quota_page(snap, theme),
             Page::Sources => sources_page(snap, theme),
             Page::Prices => prices_page(snap, theme),

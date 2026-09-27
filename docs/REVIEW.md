@@ -316,3 +316,14 @@
   - 空选跨重启持久化（Some([]) 复原为诚实空视图）；
   - Flyout 在勾选后保持打开，可连续多选。
 - clippy 0 警告、24/24 测试。
+
+## S24 刷新频率下拉选择器 ✅
+
+- **需求**：数据定时刷新原写死 30s（`REFRESH_SECS`），用户要可配的下拉菜单。
+- **修法**：
+  - `UiConfig.refresh_secs` 持久化（serde 字段默认 + 手写 `Default` 都给 30——derive Default 会得到 0=手动，新装直接不刷新，必须手写）。
+  - 选项 `仅文件变更(0) / 10 秒 / 30 秒 / 1 分钟 / 5 分钟`，表驱动 `REFRESH_OPTIONS` + `refresh_secs_of`/`refresh_label` 双向映射。
+  - UI 用 `DropDownButton` + `Menu`（→原生 `MenuFlyout`，**点选自动收起**——rich Flyout 会停留，单选场景语义不对，这与工具筛选的多选 Flyout 刻意不同）。与工具筛选并排成 `filter_row`，总览/明细两页共用。
+  - `arm_refresh(ctx, secs)`：`0` 时不排定时器（文件 watcher 仍活刷新）；从 0 切回 >0 且不在扫描时立即补臂一个定时器，让新节奏立刻生效而不是等下一次扫描结束。`Msg::SetRefreshSecs(label)` 经 `refresh_secs_of` 反解标签→秒。
+- **验证**：UIA 打开菜单（5 项齐全）→ 点 `1 分钟` → 按钮标签即时变 `1 分钟`、菜单自动收起、`ui.json` 落 `refresh_secs:60`；重扫后周期定时器按新值臂。clippy 0、24/24 测试。
+- **说明**：`仅文件变更` 诚实语义——关掉的是周期性轮询，watcher 仍会在源文件变化时刷新；要彻底手动则用"刷新"按钮单次触发。
