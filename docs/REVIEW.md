@@ -290,3 +290,13 @@
 - **引擎门槛**：`is_billable` 之外为 `Capability::Metadata` 适配器放行 `ts_start` 非空的零计量事件——活动观测本身就是信息；Precise 适配器的严格计费门槛不变。
 - **验证**：真机扫描 cursor=64（与 type=1 气泡数一致）、qoder=86（86 文件一一对应）；重扫 +0 零重复；UI 勾选行出现两者，按工具表显示 `cursor · 64 事件 · 0 tok · $0.0000`；24/24 测试、clippy 0。
 - **如实声明**：两工具事件为**会话/提问级活动记录**，token 恒 0、成本归 unpriced/estimated，趋势图按 token 绘柱所以不产生柱形——这是数据真相，不是缺陷。若未来 Cursor/Qoder 本地写出真实 token 字段，适配器可直接扩展映射。
+
+## S22 安装器视觉打磨（GDI+ 抗锯齿）✅
+
+- **问题**：标题/副标题行距贴死（矩形重叠 4px）；复选框走系统主题、风格与自绘不统一；按钮/框全是 GDI `RoundRect` 无抗锯齿的锯齿毛边；编辑框 `WS_EX_CLIENTEDGE` 3D 凹边与扁平深色冲突；进度条是 6px 光板直线。
+- **修法**：接入 GDI+（系统 DLL 零依赖，`Win32_Graphics_GdiPlus`），`fill_rr`/`stroke_rr`/`draw_check` 三个抗锯齿圆角 helper 统一全部控件词汇——按钮填充+描边、进度条圆头轨道+填充、复选框圆角方框+对勾；编辑框去 3D 边、父窗口 WM_PAINT 里画 1px 圆角描边（聚焦时 accent 色，`EN_SETFOCUS/KILLFOCUS` 驱动重绘）；标题区行距拉开（title 22–54 / sub 58–80）。
+- **踩到并修掉的真实问题**：
+  1. `GdiplusStartup` 传 `SuppressBackgroundThread: TRUE` 被 GDI+ 1.0 判 `InvalidParameter`——所有绘制静默失败（`GdipCreateFromHDC` 报 `GdiplusNotInitialized`），改 FALSE 后正常（后台空闲线程代价可忽略）。
+  2. `BS_AUTOCHECKBOX | BS_OWNERDRAW` 样式位冲突——`0x03|0x0B=0x0B`，AUTO 语义被吞，勾选态 Windows 不维护（BM_GETCHECK 恒 0）→ 复选框改纯 `BS_OWNERDRAW` + Gui 自持 bool，WM_COMMAND 点击翻转 + InvalidateRect 重绘。
+  3. `GdiPlus::*` glob 导入的 `Status` 常量 `Ok` 遮蔽 `Result::Ok`——改显式导入列表。
+- **验证**：截图逐项核对（标题间距/勾选态 accent+对勾/按钮圆角无毛刺/编辑框描边/进度条圆角药丸）；BM_CLICK 点击复选框实测翻转；真实发布包端到端安装→完成态（进度条补满 100%）→"启动并关闭"。clippy 0、24/24 测试。
