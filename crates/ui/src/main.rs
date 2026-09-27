@@ -19,7 +19,7 @@ use globaltokentracker_core::store::{default_db_path, EventRow, PriceRow, Source
 use globaltokentracker_core::viewmodel::fmt;
 use globaltokentracker_core::viewmodel::Range;
 use globaltokentracker_core::{Engine, OverviewVm, Store};
-use config::{refresh_secs_of, UiConfig};
+use config::{UiConfig, REFRESH_OPTIONS};
 use pages::*;
 use std::path::PathBuf;
 use theme::Theme;
@@ -71,6 +71,17 @@ pub struct Shell {
     range: Range,
     /// Checked tools for the stats filter; `None` = all (persisted in ui.json).
     app_filter: Option<Vec<String>>,
+    /// Which filter-strip dropdown is open (in-content overlay, not a system
+    /// Flyout — so no FlyoutPresenter surface stroke/shadow halo).
+    open_menu: Option<MenuKind>,
+}
+
+/// Which filter-strip picker is open — `Tools` (multi-select checkboxes) or
+/// `Refresh` (single-select cadence radios).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum MenuKind {
+    Tools,
+    Refresh,
 }
 
 pub enum Msg {
@@ -98,8 +109,13 @@ pub enum Msg {
     /// Bulk tool-scope set from the filter flyout — `None` = all tools,
     /// `Some(vec![])` = deliberately empty view.
     SetApps(Option<Vec<String>>),
-    /// Refresh-cadence pick from the menu (carries the option label).
-    SetRefreshSecs(String),
+    /// Refresh-cadence pick from the picker flyout (seconds).
+    SetRefreshSecs(u64),
+    /// Filter-strip pill clicked — opens its overlay, or closes it when the
+    /// same one is already open; a different picker's overlay replaces it.
+    ToggleMenu(MenuKind),
+    /// Event sink for RadioButton uncheck transitions — nothing to do.
+    Noop,
     /// Background quota poll finished (rows written, channel errors).
     QuotaDone(usize, Vec<String>),
 }
@@ -298,6 +314,7 @@ impl Component for Shell {
             tray,
             trend: widgets::TrendHandle::default(),
             quota_at: None,
+            open_menu: None,
         }
     }
 
@@ -350,10 +367,16 @@ impl Component for Shell {
                     arm_refresh(context, self.config.refresh_secs);
                 }
             }
-            Msg::Tick | Msg::Rescan => {
+            Msg::Tick => {
+                self.start_scan(context);
+            }
+            Msg::Rescan => {
+                // Manual refresh dismisses an open picker — the user moved on.
+                self.open_menu = None;
                 self.start_scan(context);
             }
             Msg::SetRange(label) => {
+                self.open_menu = None;
                 let r = Range::from_label(&label);
                 if r != self.range {
                     self.range = r;
@@ -402,8 +425,10 @@ impl Component for Shell {
                 self.scanning = false;
                 self.start_scan(context);
             }
-            Msg::SetRefreshSecs(label) => {
-                if let Some(secs) = refresh_secs_of(&label) {
+            Msg::SetRefreshSecs(secs) => {
+                if REFRESH_OPTIONS.iter().any(|(s, _)| *s == secs)
+                    && secs != self.config.refresh_secs
+                {
                     let was_off = self.config.refresh_secs == 0;
                     self.config.refresh_secs = secs;
                     self.config.save();
@@ -413,7 +438,17 @@ impl Component for Shell {
                         arm_refresh(context, secs);
                     }
                 }
+                // Single-select semantics: a pick light-dismisses the panel.
+                self.open_menu = None;
             }
+            Msg::ToggleMenu(kind) => {
+                self.open_menu = if self.open_menu == Some(kind) {
+                    None
+                } else {
+                    Some(kind)
+                };
+            }
+            Msg::Noop => {}
             Msg::WatchFired => {
                 diag!("[watch] fired, scanning={}", self.scanning);
                 arm_watcher(context);
@@ -441,6 +476,7 @@ impl Component for Shell {
                 }
             }
             Msg::Nav(tag) => {
+                self.open_menu = None;
                 self.page = match tag.as_deref() {
                     Some("明细") | Some("detail") => Page::Detail,
                     Some("配额") | Some("quota") => Page::Quota,
@@ -450,6 +486,7 @@ impl Component for Shell {
                 };
             }
             Msg::DetailPage(page) => {
+                self.open_menu = None;
                 let apps = self.app_filter.clone();
                 context.spawn_background(move |_| {
                     match Store::open(&db_path())
@@ -466,6 +503,7 @@ impl Component for Shell {
                 }
             }
             Msg::ToggleEdit => {
+                self.open_menu = None;
                 self.editing = !self.editing;
             }
             Msg::MoveWidget(page, id, delta) => {
@@ -544,12 +582,9 @@ impl Component for Shell {
                     config: &self.config,
                     editing: self.editing,
                     trend: &self.trend,
-                    app_filter: &self.app_filter,
                 },
             ),
-            Page::Detail => {
-                detail_page(snap, theme, context, &self.app_filter, self.config.refresh_secs)
-            }
+            Page::Detail => detail_page(snap, theme, context),
             Page::Quota => quota_page(snap, theme),
             Page::Sources => sources_page(snap, theme),
             Page::Prices => prices_page(snap, theme),
@@ -591,21 +626,46 @@ impl Component for Shell {
                     .vertical_alignment(VerticalAlignment::Center),
                 nav,
             ));
+        // Filter chrome is a pinned strip between title bar and scrolling
+        // page on the data pages (overview/detail); it collapses elsewhere.
+        let chrome: View = match (self.page, snap) {
+            (Page::Overview | Page::Detail, Some(s)) => filter_chrome(
+                s,
+                theme,
+                &self.app_filter,
+                self.config.refresh_secs,
+                self.open_menu,
+                context,
+            ),
+            _ => Border::new().into(),
+        };
+        let chrome = Border::new().grid_row(1).content(chrome);
+        // Dropdown overlay renders last so its card floats above the page;
+        // closed → an empty background-less Border (XAML skips hit-testing
+        // null-background elements, so it never swallows clicks).
+        let overlay: View = match (self.page, snap, self.open_menu) {
+            (Page::Overview | Page::Detail, Some(s), Some(kind)) => {
+                dropdown_overlay(s, theme, &self.app_filter, self.config.refresh_secs, kind, context)
+            }
+            _ => Border::new().grid_row(2).into(),
+        };
         // Root must be a Grid: a vertical StackPanel offers children infinite
         // height, which makes the page ScrollViewer measure at full content
         // size and never scroll. Star row bounds the scroll area.
         Grid::new()
-            .rows([GridLength::Auto, GridLength::STAR])
+            .rows([GridLength::Auto, GridLength::Auto, GridLength::STAR])
             .children((
                 TitleBar::new()
                     .preferred_height(WindowTitleBarHeight::Tall)
                     .grid_row(0)
                     .slot(TitleBarSlot::Content, brand_nav),
+                chrome,
                 Border::new()
-                    .grid_row(1)
+                    .grid_row(2)
                     .border_brush(theme.divider)
                     .border_thickness(Thickness::new(0.0, 1.0, 0.0, 0.0))
                     .content(content),
+                overlay,
             ))
     }
 }

@@ -5,7 +5,7 @@
 use crate::config::{refresh_label, UiConfig, REFRESH_OPTIONS};
 use crate::theme::Theme;
 use crate::widgets as w;
-use crate::{Msg, Shell, Snapshot, DETAIL_PAGE_SIZE};
+use crate::{MenuKind, Msg, Shell, Snapshot, DETAIL_PAGE_SIZE};
 use globaltokentracker_core::store::EventRow;
 use globaltokentracker_core::viewmodel::fmt;
 use globaltokentracker_core::viewmodel::Range;
@@ -373,13 +373,30 @@ fn overview_widget(
     }
 }
 
-/// Tool-scope picker — a dropdown button opening a checkbox flyout so the
-/// strip never overflows the header. `filter` `None` = all checked;
-/// `Some(vec![])` = deliberately empty view.
-fn app_checks(
+/// Chrome-strip geometry — labels are width-pinned so the overlay panel can
+/// sit under its button without measuring: tools button starts at
+/// `CHROME_LEFT + LABEL_W + GROUP_GAP`, refresh at that plus the tools group
+/// width and the inter-group gap.
+const CHROME_LEFT: f64 = 24.0;
+const LABEL_W: f64 = 28.0;
+const GROUP_GAP: f64 = 8.0;
+const PICKER_GAP: f64 = 20.0;
+const TOOLS_BTN_W: f64 = 104.0;
+const REFRESH_BTN_W: f64 = 120.0;
+const TOOLS_PANEL_X: f64 = CHROME_LEFT + LABEL_W + GROUP_GAP;
+const REFRESH_PANEL_X: f64 =
+    TOOLS_PANEL_X + TOOLS_BTN_W + PICKER_GAP + LABEL_W + GROUP_GAP;
+
+/// Filter strip shared by overview + detail: tool-scope dropdown then the
+/// refresh-cadence picker, kept on one row that cannot overflow. Buttons
+/// toggle an in-content overlay (`dropdown_overlay`) instead of a system
+/// Flyout — see `Shell::open_menu`.
+pub fn filter_chrome(
     s: &Snapshot,
     theme: &Theme,
     filter: &Option<Vec<String>>,
+    refresh_secs: u64,
+    open: Option<MenuKind>,
     ctx: &mut ViewContext<Shell>,
 ) -> View {
     let total = s.vm.apps.len();
@@ -388,7 +405,87 @@ fn app_checks(
         Some(f) if f.is_empty() => "未选".into(),
         Some(f) => format!("已选 {f_len}/{total}", f_len = f.len()),
     };
-    let mut col: Vec<View> = Vec::with_capacity(total + 2);
+    StackPanel::new()
+        .orientation(Orientation::Horizontal)
+        .spacing(PICKER_GAP)
+        .margin(Thickness::xy(CHROME_LEFT, 4.0))
+        .children((
+            picker_button(
+                theme,
+                summary,
+                TOOLS_BTN_W,
+                open == Some(MenuKind::Tools),
+                MenuKind::Tools,
+                ctx,
+            ),
+            picker_button(
+                theme,
+                refresh_label(refresh_secs).to_string(),
+                REFRESH_BTN_W,
+                open == Some(MenuKind::Refresh),
+                MenuKind::Refresh,
+                ctx,
+            ),
+        ))
+}
+
+/// Label + fixed-width pill whose click toggles `kind` in `open_menu`.
+/// The chevron flips while the panel is open.
+fn picker_button(
+    theme: &Theme,
+    value: String,
+    width: f64,
+    open: bool,
+    kind: MenuKind,
+    ctx: &mut ViewContext<Shell>,
+) -> View {
+    let (label, a11y) = match kind {
+        MenuKind::Tools => ("工具", "工具筛选"),
+        MenuKind::Refresh => ("刷新", "刷新频率"),
+    };
+    StackPanel::new()
+        .orientation(Orientation::Horizontal)
+        .spacing(GROUP_GAP)
+        .children((
+            TextBlock::new()
+                .text(label)
+                .font_size(theme.label_size)
+                .foreground(theme.subtle)
+                .width(LABEL_W)
+                .vertical_alignment(VerticalAlignment::Center),
+            Button::new()
+                .automation_name(a11y)
+                .width(width)
+                .on_click(ctx.callback(move |_| Msg::ToggleMenu(kind)))
+                .content(
+                    StackPanel::new()
+                        .orientation(Orientation::Horizontal)
+                        .spacing(6.0)
+                        .children((
+                            TextBlock::new()
+                                .text(value)
+                                .font_size(theme.body_size)
+                                .vertical_alignment(VerticalAlignment::Center),
+                            TextBlock::new()
+                                .text(if open { "▴" } else { "▾" })
+                                .font_size(theme.label_size)
+                                .foreground(theme.subtle)
+                                .vertical_alignment(VerticalAlignment::Center),
+                        )),
+                ),
+        ))
+}
+
+/// Tool-checkbox rows plus the select-all / clear footer — extracted from the
+/// old flyout so the overlay and chrome stay in sync. `filter` `None` = all
+/// checked; `Some(vec![])` = deliberately empty view.
+fn tools_menu_items(
+    s: &Snapshot,
+    theme: &Theme,
+    filter: &Option<Vec<String>>,
+    ctx: &mut ViewContext<Shell>,
+) -> Vec<View> {
+    let mut col: Vec<View> = Vec::with_capacity(s.vm.apps.len() + 2);
     for name in &s.vm.apps {
         let checked = filter.as_ref().is_none_or(|f| f.contains(name));
         let n = name.clone();
@@ -425,82 +522,87 @@ fn app_checks(
                     .content("清空"),
             )),
     );
-    StackPanel::new()
-        .orientation(Orientation::Horizontal)
-        .spacing(8.0)
-        .children((
-            TextBlock::new()
-                .text("工具")
-                .font_size(theme.label_size)
-                .foreground(theme.subtle)
-                .vertical_alignment(VerticalAlignment::Center),
-            Button::new()
-                .automation_name("工具筛选")
+    col
+}
+
+/// Refresh-cadence radio rows — single-select, so a pick light-dismisses the
+/// panel (`SetRefreshSecs` clears `open_menu`). `0` seconds = file-watch only.
+fn refresh_menu_items(
+    theme: &Theme,
+    secs: u64,
+    ctx: &mut ViewContext<Shell>,
+) -> Vec<View> {
+    let mut rows: Vec<View> = Vec::with_capacity(REFRESH_OPTIONS.len());
+    for (s, label) in REFRESH_OPTIONS {
+        rows.push(
+            RadioButton::new()
+                .group_name("refresh-cadence")
+                .is_checked(s == secs)
+                .on_checked(ctx.callback(move |on: bool| {
+                    if on {
+                        Msg::SetRefreshSecs(s)
+                    } else {
+                        Msg::Noop
+                    }
+                }))
                 .content(
-                    StackPanel::new()
-                        .orientation(Orientation::Horizontal)
-                        .spacing(6.0)
-                        .children((
-                            TextBlock::new()
-                                .text(summary)
-                                .font_size(theme.body_size)
-                                .vertical_alignment(VerticalAlignment::Center),
-                            TextBlock::new()
-                                .text("▾")
-                                .font_size(theme.label_size)
-                                .foreground(theme.subtle)
-                                .vertical_alignment(VerticalAlignment::Center),
-                        )),
-                )
-                .flyout_with(
-                    Flyout::rich(
-                        StackPanel::new()
-                            .orientation(Orientation::Vertical)
-                            .spacing(10.0)
-                            .keyed_children(keyed(col)),
-                    )
-                    .placement(FlyoutPlacement::BottomEdgeAlignedLeft),
+                    TextBlock::new()
+                        .text(label)
+                        .font_size(theme.body_size),
                 ),
-        ))
+        );
+    }
+    rows
 }
 
-/// Refresh-cadence picker — a DropDownButton carrying a MenuFlyout, so a
-/// pick auto-dismisses (a rich Flyout would stay open; wrong for one-shot
-/// selection). `0` seconds = file-watch only.
-fn refresh_picker(theme: &Theme, secs: u64, ctx: &mut ViewContext<Shell>) -> View {
-    let items = REFRESH_OPTIONS.iter().map(|(_, l)| MenuItem::item(*l, *l));
-    StackPanel::new()
-        .orientation(Orientation::Horizontal)
-        .spacing(8.0)
-        .children((
-            TextBlock::new()
-                .text("刷新")
-                .font_size(theme.label_size)
-                .foreground(theme.subtle)
-                .vertical_alignment(VerticalAlignment::Center),
-            DropDownButton::new()
-                .automation_name("刷新频率")
-                .content(refresh_label(secs))
-                .menu(Menu::new(items, ctx.callback(Msg::SetRefreshSecs))),
-        ))
-}
-
-/// Filter strip shared by overview + detail: tool-scope dropdown then the
-/// refresh-cadence picker, kept on one row that cannot overflow.
-fn filter_row(
+/// In-content dropdown layer, rendered as the last child of the content cell
+/// so it paints over the page. The card carries our own border + background —
+/// the system FlyoutPresenter (which draws the pale surface stroke that read
+/// as a bright halo over dark chrome) is gone entirely. A full-area
+/// transparent border underneath swallows outside clicks to light-dismiss;
+/// the trigger row above stays live (overlay only covers the content row).
+pub fn dropdown_overlay(
     s: &Snapshot,
     theme: &Theme,
     filter: &Option<Vec<String>>,
-    refresh_secs: u64,
+    secs: u64,
+    open: MenuKind,
     ctx: &mut ViewContext<Shell>,
 ) -> View {
-    StackPanel::new()
-        .orientation(Orientation::Horizontal)
-        .spacing(20.0)
-        .children((
-            app_checks(s, theme, filter, ctx),
-            refresh_picker(theme, refresh_secs, ctx),
-        ))
+    let (x, items) = match open {
+        MenuKind::Tools => (TOOLS_PANEL_X, tools_menu_items(s, theme, filter, ctx)),
+        MenuKind::Refresh => (REFRESH_PANEL_X, refresh_menu_items(theme, secs, ctx)),
+    };
+    // Two-layer fill: `card_bg` is a *translucent* Fluent layer brush — over
+    // page content it lets the rows beneath bleed through (reads as a broken
+    // transparent popup). An opaque base under the tint composites to the
+    // same elevated-card look the cards get over the window surface.
+    let base = theme
+        .page_bg
+        .unwrap_or(Brush::Theme(ThemeBrush::SolidBackground));
+    // Margin positions the card inside the content cell — plain Grid, no
+    // Canvas (its empty-area hits can swallow presses meant for siblings).
+    Border::new()
+        .grid_row(2)
+        .horizontal_alignment(HorizontalAlignment::Left)
+        .vertical_alignment(VerticalAlignment::Top)
+        .margin(Thickness::new(x, 4.0, 0.0, 0.0))
+        .background(base)
+        .border_brush(theme.card_border)
+        .border_thickness(theme.card_border_thickness())
+        .corner_radius(CornerRadius::uniform(theme.radius))
+        .content(
+            Border::new()
+                .background(theme.card_bg)
+                .corner_radius(CornerRadius::uniform(theme.radius - 1.0))
+                .padding(Thickness::xy(12.0, 8.0))
+                .content(
+                    StackPanel::new()
+                        .orientation(Orientation::Vertical)
+                        .spacing(10.0)
+                        .keyed_children(keyed(items)),
+                ),
+        )
 }
 
 /// Bundle for the overview page — keeps the signature under the arg limit
@@ -510,7 +612,6 @@ pub struct OverviewArgs<'a> {
     pub config: &'a UiConfig,
     pub editing: bool,
     pub trend: &'a w::TrendHandle,
-    pub app_filter: &'a Option<Vec<String>>,
 }
 
 pub fn overview_page(
@@ -519,8 +620,7 @@ pub fn overview_page(
     ctx: &mut ViewContext<Shell>,
     args: &OverviewArgs,
 ) -> View {
-    let (config, editing, trend, app_filter) =
-        (args.config, args.editing, args.trend, args.app_filter);
+    let (config, editing, trend) = (args.config, args.editing, args.trend);
     let Some(s) = snap else {
         return loading(theme, args.scanning);
     };
@@ -576,7 +676,6 @@ pub fn overview_page(
             .into_iter()
             .collect(),
         ),
-        filter_row(s, theme, app_filter, config.refresh_secs, ctx),
     ];
 
     for id in order.iter() {
@@ -740,13 +839,7 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
-pub fn detail_page(
-    snap: Option<&Snapshot>,
-    theme: &Theme,
-    ctx: &mut ViewContext<Shell>,
-    app_filter: &Option<Vec<String>>,
-    refresh_secs: u64,
-) -> View {
+pub fn detail_page(snap: Option<&Snapshot>, theme: &Theme, ctx: &mut ViewContext<Shell>) -> View {
     let Some(s) = snap else {
         return loading(theme, true);
     };
@@ -801,7 +894,6 @@ pub fn detail_page(
                         .spacing(8.0)
                         .keyed_children(keyed(nav))],
                 ),
-                filter_row(s, theme, app_filter, refresh_secs, ctx),
                 w::card(
                     theme,
                     vstack(

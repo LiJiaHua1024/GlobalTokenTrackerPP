@@ -21,14 +21,6 @@ pub const REFRESH_OPTIONS: [(u64, &str); 5] = [
     (300, "5 分钟"),
 ];
 
-/// Menu label → seconds, or `None` for an unknown label.
-pub fn refresh_secs_of(label: &str) -> Option<u64> {
-    REFRESH_OPTIONS
-        .iter()
-        .find(|(_, l)| *l == label)
-        .map(|(s, _)| *s)
-}
-
 /// Seconds → menu label; unknown values show the default cadence.
 pub fn refresh_label(secs: u64) -> &'static str {
     REFRESH_OPTIONS

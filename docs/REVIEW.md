@@ -334,3 +334,17 @@
 - **修法**：用 WinUI `TitleBar` 控件（WinAppSDK 1.7+；安装器引导的是 1.8 runtime，兼容）。框架层把 `TitleBar` 节点自动映射为 `ExtendsContentIntoTitleBar(true)`+`SetTitleBar`，`preferred_height(Tall)`。`Content` 槽放 `[ViewAll 四格图标 + GlobalTokenTracker 字标 + SelectorBar 导航页签]`——品牌与一级导航整体进标题栏，省掉原 header 一整行；内容区顶边补 1px divider 衔接。
 - **选型笔记**：曾尝试给 `SymbolIcon` 上 accent 色——本框架的 `SymbolIcon`/`FontIcon` 未暴露 `foreground`/`font_size` setter（生成的绑定只有 `symbol`/`glyph`），保持默认白 glyph，与 Fluent 简约一致。
 - **验证**：截图核对标题栏 = 图标+字标+居中导航，caption 按钮（min/max/close）正常；UIA 点标题栏内"明细"→ 选中态与页面切换正常；`window_title("GlobalTokenTracker")` 保留（任务栏标题不受影响）。clippy 0、24/24 测试。
+
+## S26 下拉浮层去系统描边——改自绘内容内叠层 ✅
+
+- **问题**：统一样式后的两个下拉打开时，浮层四边有一条浅亮色描边（`FlyoutPresenter` 的 Fluent 默认 surface stroke + 光晕），在暗色主题下看起来像一圈"奇怪的光线"。框架（windows-reactor 0.100）的 `Flyout` 只暴露 content+placement，没有 FlyoutPresenter 样式/主题资源挂钩，无法覆盖系统描边。
+- **修法**：放弃系统 Flyout，改**内容内叠层**——面板作为根 Grid 内容行的最后一个子元素渲染（z 序最高），`Margin` 定位在按钮正下方。卡片本体=不透明底（`page_bg`/`SolidBackground`）+ 半透明卡片色罩层（`card_bg`），描边/圆角复用卡片 token —— 视觉上就是一张抬升的深色卡片，无任何系统 chrome。
+- **结构与状态**：
+  - 根 Grid 改为 `[Auto titlebar][Auto 筛选 chrome 行][Star 内容]`——筛选行从页面滚动区上移为固定 chrome 行（顺带获得"滚动不丢"的收益），仅总览/明细两页显示。
+  - `Shell.open_menu: Option<MenuKind>`（Tools/Refresh）；`Msg::ToggleMenu(kind)` 切换/替换；radio 选中自动收起（`SetRefreshSecs` 里清 open_menu）；`Nav`/`Rescan`/`SetRange`/`DetailPage`/`ToggleEdit` 等页面操作统一收起；`Tick`/后台消息不收起（多选列表需要跨刷新存活）。
+  - 按钮 pill 固定宽（工具 104 / 刷新 120），标签定宽 28 → 面板左缘由常量计算（60 / 220），不依赖运行时测量。
+- **过程中抓到并弃用的方案**：
+  1. `card_bg` 单层做面板 → 它是 Fluent **半透明**层画刷，叠在内容上直接透穿（用户截图可见"透明了"）→ 补不透明底层复合。
+  2. `Canvas` 绝对定位 → 弃用，普通 Grid + `Margin` 即可定位，少一层容器。
+  3. **Border 指针事件在 reactor 里实际不发**——全透明/半透明 dismiss 层铺满内容区（红底可视化验证覆盖无误）但 `on_pointer_pressed`/`on_pointer_moved` 均不派发；同框架趋势图 hover 也是同一死路（SendInput 真实点击能驱动 CheckBox/Button，唯独 Border 的 Pointer* 路由事件不触发）。放弃点击空白收起，以"操作即收起"替代。
+- **验证（UIA + SendInput 端到端）**：工具/刷新两面板均为不透明暗卡片、无亮边；勾选 zcode 实测翻转 + 面板停留多选；radio 选"10 秒"→ 自动收起 + 按钮标签更新 + `ui.json` 落 `refresh_secs:10`；明细页同样正常；放大截图确认四边仅自绘暗描边。clippy 0、24/24 测试。
