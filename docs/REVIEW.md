@@ -448,3 +448,16 @@
   - `kimi_code.rs`：Jsonl 源，`wire.jsonl` 行解析；`usage.record` → 事件，dedup `kimi_code:<文件>:<字节偏移>`（记录无自身 id，偏移天然稳定）；`inputOther` 本就是非缓存输入，直填 `input_tokens`；project 三级解析：`config.update.cwd`（权威、随段可见）→ `session_index.jsonl` → 缓存进 `adapter_state`（追加段从文件中部开始，看不到头部的 config.update），后解析到的 project 回填同段已入账事件。
   - 两者均 `Capability::Precise`（厂商逐调用精确计量）；`apps::MINIMAX_CODE`/`KIMI_CODE` 独立身份，配额/工具过滤/UI 显示名全链接通。
 - **验证**：新增 6 测试（minimax：增量水位/全零行跳过/project join/无表容错；kimi：turn+session 增量混计/project 三段解析/半行 defer）。**38/38 测试、clippy `-D warnings` 0、release 干净**。本机两个工具均未安装 → 无本地实测数据，扫描将自然显示"未安装"。
+
+## S37 Cline / Command Code 适配 ✅
+
+- **需求**：Cline、Command Code 均已开源，适配本地用量统计。
+- **源码取证**（官方源，非猜测）：
+  - `cline/cline`（VS Code 扩展 + CLI）：用量在 `ui_messages.json`（整文件 JSON 数组、全量重写而非追加——`core/storage/disk.ts`），`<dataDir>/tasks/<taskId>/`。`say:"api_req_started"/"api_req_finished"/"subagent_usage"/"deleted_api_reqs"` 行的 `text` JSON 携带 `tokensIn/tokensOut/cacheReads/cacheWrites/cost`（`shared/getApiMetrics.ts`）。语义实锤：`sdk/…/agent-events.ts` 注释明确 `tokensIn` 是**非缓存输入**（disjoint buckets，`tokensIn+cacheReads+cacheWrites`=总输入），`cost` 是 Cline 自算 USD。模型归属：`task_metadata.json` `model_usage[]` 按 `ts` 就近匹配；`state/taskHistory.json` 提供 `cwdOnTaskInitialization`/`apiProvider`（`legacy-state-reader.ts` 确认 CLI 布局）。
+  - `CommandCodeAI/command-code`（npm `command-code`，仓库仅 readme——dist bundle 为事实源）：会话在 `~/.commandcode/projects/<slugify(cwd)>/<sessionId>.jsonl`，首行 `{type:"session",…,"cwd"}`。用量挂在 assistant `message` entry 的 `usage` 字段（`createSessionRecorder` 把每个 `model_request_end` 折进恰好一条 assistant 行）：`{inputTokens,outputTokens,cacheReadTokens,cacheWriteTokens,cacheWriteTokens1h?,costUsd?}`。`estimateSessionCostUsd` 实锤：`inputTokens` **含** cache（`fresh = input − read − write`），`cacheWriteTokens1h` 是总量的 1h 子集（`min(1h,total)`、其余为 5m）。
+- **实现**：
+  - `cline.rs`：Sqlite-kind（适配器自管水位）——`ui_messages.json` 全量重写，按 `{len,mtime}` 快路径跳过未变文件；冷扫描才计 `deleted_api_reqs`（导入时被删历史的聚合），暖扫描跳过（每请求行已入账、删除消息不退 token）；`api_req_started`/`finished` 按 `combineApiRequests` 同款贪心配对——finished 行胜出，带指标的孤立 started 行 EOF 入账；编辑器宿主枚举 `<config>/*/User/globalStorage/saoudrizwan.claude-dev`（Code/Cursor/Windsurf/Insiders 等全兼容）+ CLI `~/.cline/data`（env `CLINE_DATA_DIR`/`CLINE_DIR` 覆盖）。
+  - `commandcode.rs`：标准 Jsonl 字节游标；`session` header 拿 cwd（权威 project），追加段走 `adapter_state` 缓存 → 目录 slug 兜底；侧车文件 `.checkpoints./.prompts./.v2.bak` 按官方 `isSessionTranscriptFileName` 排除。
+  - 两者 `cost→ProviderReported`、`Capability::Precise`；`apps::CLINE`/`COMMANDCODE` 独立身份。
+- **验证**：新增 9 测试（cline：配对胜出/孤立 started 入账/unchanged 快路径/deleted 仅冷扫/字段缺失容错；commandcode：cache 分层拆分/cwd 缓存接续/slug 兜底/全零跳过）。**44/44 测试、clippy `-D warnings` 0、release 干净**。本机未装两工具 → 数据源页显示"未安装"。
+- **已知边界**：cline `subagent_usage`/`deleted_api_reqs` 是聚合行与每请求行并存——按 `getApiMetrics` 同款全部计入（与 cline 自身显示总额一致）；`deleted_api_reqs` 冷扫一次后不再重放，运行中删除消息时旧请求行保留（token 已消耗不退账，语义更准）。

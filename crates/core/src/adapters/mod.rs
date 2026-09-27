@@ -14,7 +14,9 @@ use anyhow::Result;
 use std::path::PathBuf;
 
 pub mod claude;
+pub mod cline;
 pub mod codebuddy;
+pub mod commandcode;
 pub mod codex;
 pub mod cursor;
 pub mod devin;
@@ -116,6 +118,8 @@ pub fn registry() -> Vec<Box<dyn SourceAdapter>> {
         Box::new(codebuddy::CodeBuddyIde),
         Box::new(minimax_code::MiniMaxCode),
         Box::new(kimi_code::KimiCode),
+        Box::new(cline::Cline),
+        Box::new(commandcode::CommandCode),
     ]
 }
 
