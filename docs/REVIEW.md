@@ -34,7 +34,7 @@
 ## S5 计价管线 ✅（种子 20KB/2314 模型）
 - 内置离线种子：models.dev 全量精简到 `{model:[in,out,cr,cw]}` gzip=20KB → 零网络可计价。
 - 别名 BFS：rsplit('/') → ':'/('@'→'-')/小写/'[1m]' → openai./anthropic./moonshot./bedrock./global. 前缀剥离 → rfind('claude-') → -v数字/-YYYYMMDD/-effort 后缀 → 前缀匹配（带 dash 门槛）。
-- unpriced 不猜价：cost=0+cost_source='unpriced'（本机 codex-auto-review、gpt-reserve、custom-alpha 会命中）。
+- unpriced 不猜价：cost=0+cost_source='unpriced'（本机 codex-auto-review、gpt-reserve、custom-alpha 等别名会命中）。
 - **已知偏差**：claude 侧 Δcost=5.51% vs cc-switch——两家价目表不同源（我们 models.dev 种子 vs 其内置 218 表），spec 明确成本一律"估算"，在可解释范围；后续 M2 用 OTel official 成本校准。
 - **订阅美元列示注意**：codex/plus 等订阅制的 computed $ 是"若按 API 计价的等值"，UI 需与 credits/百分比分列（spec §7.4）。
 
@@ -529,10 +529,10 @@
 ## S44 安装器文件夹选择器异步化 ✅
 
 - **症状**：更新模式窗口里点"浏览…"无反应、无系统选择器弹出。
-- **根因（环境，非代码）**：本机挂有失联映射盘 `Z: → \<nas-ip>\<share>`——Windows 公共文件对话框枚举网络位置时长时间卡死。最小复现确认 `IFileOpenDialog::Show`、`SHBrowseForFolder`、.NET `FolderBrowserDialog` 全部同样卡死。
+- **根因（环境，非代码）**：测试机挂有失联的 SMB 映射盘（`Z: → \\<nas>\<share>`）——Windows 公共文件对话框枚举网络位置时长时间卡死。最小复现确认 `IFileOpenDialog::Show`、`SHBrowseForFolder`、.NET `FolderBrowserDialog` 全部同样卡死。
 - **修复（`crates/setup/src/gui.rs`）**：`pick_folder` 改为**全异步**——独立 STA 线程跑 `IFileOpenDialog`（自 `CoInitializeEx`），结果 `Box<Option<PathBuf>>` 经 `WM_APP_PICKED`（`WM_APP+2`）回主窗口；`pick_pending` 防重复点击，期间浏览按钮置灰 + 状态栏提示"若无响应请直接输入路径"；选/取消/失败都恢复按钮。窗口中途关闭时 `PostMessageW` 静默失败，无悬挂风险。卡死的对话框只泄漏 helper 线程直到进程退出，用户仍可手输路径。
 - **设计连带变更**：更新模式**重新允许换目录**（此前禁用浏览过于反直觉）——换目录安装后 `cleanup_prior_install`（main.rs:311）清旧 PATH 项 + `cmd` 延迟 `rmdir` 清旧目录（`new.starts_with(old)`/同路径/旧目录无 ui.exe 时跳过，防误删），GUI（gui.rs:757）与 console（main.rs:488）路径均接入。
-- **实测（UIA/Win32 驱动真实窗口）**：点击即返回不阻塞；对话框随后正常弹出；对话框开着时取消 → `pick_pending` 复位、按钮恢复；点"选择文件夹"确认 → 选中路径 `C:\Users\<user>\Documents` 正确写入安装路径框、按钮恢复。自动化踩坑：文件名框是 `ComboBoxEx32` 内嵌 Edit，UIA 的 Edit 枚举首项是列表项重命名框（误触"重命名"错误框，未造成实际改名）。
+- **实测（UIA/Win32 驱动真实窗口）**：点击即返回不阻塞；对话框随后正常弹出；对话框开着时取消 → `pick_pending` 复位、按钮恢复；点"选择文件夹"确认 → 选中路径正确写入安装路径框、按钮恢复。自动化踩坑：文件名框是 `ComboBoxEx32` 内嵌 Edit，UIA 的 Edit 枚举首项是列表项重命名框（误触"重命名"错误框，未造成实际改名）。
 - **验证**：50/50 测试、clippy `-D warnings` 0、release 干净；安装包重打（sha `6e28f3a2…`）。
 - **未做**：不会主动修复用户的失联网络映射——那是系统环境问题，安装器只需不卡死（已满足）；无超时强制关对话框（用户的选择权优先，挂起只损失一个 helper 线程）。
 

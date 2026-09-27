@@ -249,9 +249,9 @@ CREATE TABLE daily_rollups (
 | 工具 | 端点 | 凭据 | 实测状态 |
 |---|---|---|---|
 | Codex（ChatGPT 订阅） | `GET chatgpt.com/backend-api/wham/usage/daily-token-usage-breakdown`（每日 token 明细）、`.../usage/credit-usage-events`、`.../wham/profiles/me` | `~/.codex/auth.json` OAuth（刷新：`auth.openai.com/oauth/token`，client_id `app_EMoamEEZ73f0CkXaXp7hrann`，tokcat 已验证） | ✅ auth.json 存在（4218B） |
-| Claude（订阅） | `GET api.anthropic.com/api/oauth/usage`（tokcat 验证） | `~/.claude/.credentials.json` | ✅ 存在（<size>） |
-| Qoder（credits） | `GET qoder.com/api/v2/me/usages/big_model_credits`（CN 版 qoder.com.cn；v1 端点 + organization-shared 变体） | 需 cookie：本机 `~/.qoder/.auth/` 只有 machine_id 无 cookie → 用户手贴 / 客户端运行时走本地 IPC（`SharedClientCache/.info.json` JSON-RPC，新版路径已迁移，可能无此文件）/ renderer.log 正则兜底 | 🟡 需用户配合 |
-| Cursor | ①总量：Connect RPC `api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage`（Bearer 直连、无 CSRF，tokcat 验证）；②明细：`POST cursor.com/api/dashboard/get-filtered-usage-events`（per-chat `tokenUsage{input,output,cacheRead,cacheWrite,totalCents}`；**必须带 `Origin: https://cursor.com` 头**） | `%APPDATA%/Cursor/User/globalStorage/state.vscdb` 键 `cursorAuth/accessToken`（存在，JWT；⚠️ 两个参考项目都只实现了 macOS 路径，Windows 路径由我们补齐） | ✅ 凭据在 |
+| Claude（订阅） | `GET api.anthropic.com/api/oauth/usage`（tokcat 验证） | `~/.claude/.credentials.json` | ✅ 存在 |
+| Qoder（credits） | `GET qoder.com/api/v2/me/usages/big_model_credits`（CN 版 qoder.com.cn；v1 端点 + organization-shared 变体） | 需 cookie：`~/.qoder/.auth/` 可能仅有 machine_id 无 cookie → 用户手贴 / 客户端运行时走本地 IPC（`SharedClientCache/.info.json` JSON-RPC，新版路径已迁移，可能无此文件）/ renderer.log 正则兜底 | 🟡 需用户配合 |
+| Cursor | ①总量：Connect RPC `api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage`（Bearer 直连、无 CSRF，tokcat 验证）；②明细：`POST cursor.com/api/dashboard/get-filtered-usage-events`（per-chat `tokenUsage{input,output,cacheRead,cacheWrite,totalCents}`；**必须带 `Origin: https://cursor.com` 头**） | `%APPDATA%/Cursor/User/globalStorage/state.vscdb` 键 `cursorAuth/accessToken`（凭据存在时可直接使用，JWT 格式；⚠️ 两个参考项目都只实现了 macOS 路径，Windows 路径由我们补齐） | ✅ 凭据在 |
 | 被动配额 | Codex rollout 的 `rate_limits`（每请求免费刷新）；Claude OTel cost/token | 无需凭据 | ✅ |
 
 工程约束：轮询默认 30 分钟一次、可关、失败静默降级并标 `stale`；凭据只读、永不外传、日志脱敏；非公开端点失效时 UI 明确提示"通道失效"而非归零。
