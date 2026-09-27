@@ -1,10 +1,10 @@
 [package]
 name = "globaltokentracker-ui"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 
 [dependencies]
-globaltokentracker-core = { version = "0.1.0", path = "../core" }
+globaltokentracker-core = { workspace = true }
 crossbeam-channel = "0.5.15"
 notify = "8.2.0"
 serde = { version = "1.0.229", features = ["derive"] }

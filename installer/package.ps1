@@ -34,6 +34,13 @@ foreach ($exe in 'globaltokentracker-ui.exe', 'globaltokentracker-cli.exe') {
     if (-not (Test-Path (Join-Path $target $exe))) { throw "missing build output: $exe" }
 }
 
+# Sign the inner exes BEFORE they are embedded — Windows checks signatures on
+# the payload binaries at runtime, not just on the installer wrapper.
+& (Join-Path $PSScriptRoot 'sign.ps1') -File @(
+    (Join-Path $target 'globaltokentracker-ui.exe'),
+    (Join-Path $target 'globaltokentracker-cli.exe')
+)
+
 Write-Host '==> staging payload.zip' -ForegroundColor Cyan
 New-Item -ItemType Directory -Force -Path $payloadDir | Out-Null
 if (Test-Path $payloadZip) { Remove-Item $payloadZip -Force }
@@ -61,6 +68,9 @@ $dist = Join-Path $root 'dist'
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 $out = Join-Path $dist "GlobalTokenTracker-Setup-$ver-win-x64.exe"
 Copy-Item (Join-Path $target 'globaltokentracker-setup.exe') $out -Force
+
+# Sign the installer itself — this is the file recipients' SmartScreen sees.
+& (Join-Path $PSScriptRoot 'sign.ps1') -File $out
 
 $mb  = [math]::Round((Get-Item $out).Length / 1MB, 2)
 $sha = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()

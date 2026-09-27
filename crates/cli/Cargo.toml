@@ -1,12 +1,12 @@
 [package]
 name = "globaltokentracker-cli"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
-globaltokentracker-core = { version = "0.1.0", path = "../core" }
+globaltokentracker-core = { workspace = true }
 jiff = "0.2.37"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde_json = "1.0.151"

@@ -8,6 +8,9 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.90"
 
+[workspace.dependencies]
+globaltokentracker-core = { path = "crates/core" }
+
 [workspace.lints.rust]
 unsafe_code = "warn"
 

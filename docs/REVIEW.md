@@ -513,3 +513,15 @@
 - **实测（0.1.0→0.2.0 全流程）**：`--quiet` 升级 → `DisplayVersion` 0.2.0、`setup.exe` 换成新版哈希；`--dir` 自定义安装后不带参再跑 → 写回记录的自定义目录、默认目录 mtime 不动；自定义目录卸载 → 目录+注册项清干净；再装回默认 → 注册表复原；全程 `ledger.db`（46MB）mtime 不变。GUI 截图确认"更新"态渲染。
 - **版本**：workspace bump 0.1.0 → 0.2.0（新增 4 适配器+性能改动累计够 minor）。
 - **已知边界（如实记录）**：GUI 子系统 exe 在 PowerShell 下 `&` 调用不等待——脚本里要 `Start-Process -Wait`；`--quiet` 的输出经 `attach_console` 写到真实控制台，重定向文件收不到（设计如此）；payload 只增不改——若未来重命名 exe，旧文件残留需主动清。
+
+## S43 代码签名管线（EV 就绪）✅
+
+- **需求**：为后续 EV 签名做准备。
+- **管线**（`installer/sign.ps1` + `package.ps1` 两处挂钩）：
+  - payload 入 zip **前**签 ui/cli（内嵌二进制本体带签名），dist 落盘后签安装器外壳——SmartScreen 检查的两层都覆盖；
+  - 证书源三选一按优先级：环境变量 `GTT_SIGN_SHA1`（token/HSM 证书入 `CurrentUser\My`——EV token 客户端装好即出现，私钥不出 HSM）、`GTT_SIGN_PFX[+_PASS]`、`GTT_SIGN_DLIB[+_METADATA]`（Azure Trusted Signing 等云签）；`GTT_SIGN_TSA` 默认 DigiCert 时间戳；无配置时跳过并提示，本地构建不受影响；
+  - 签后逐文件 `signtool verify /pa` 强制校验。
+- **采购侧**（`docs/SIGNING.md`）：EV 只发组织——需营业执照主体；列了 SSL.com/Sectigo/DigiCert/GlobalSign 价位与 token/云 HSM 交付方式；特别评估了 **Azure Trusted Signing**（~$10/月、免硬件、SmartScreen 信誉基线即时生效）作为高性价比替代，管线已兼容其 dlib 模式。
+- **演练验证**：本地自签名测试证书（`CN=GlobalTokenTracker Dev (TEST)`，用户域、可删）跑通全流程——ui/cli/setup 三 exe `Get-AuthenticodeSignature Status=Valid` + DigiCert TSA 时间戳。真 EV 到手后仅改 `GTT_SIGN_SHA1` 指纹即可，零代码改动。dist 已重建为无签名净版。
+- **顺手修**：core/cli/ui 版本号原为硬编码 0.1.0 而 setup 用 `version.workspace=true`——`VER`/包名与各 crate 版本漂移。统一为 workspace 继承（`globaltokentracker-core` path 依赖改 `workspace=true` + 根 `[workspace.dependencies]`），0.2.0 单一事实源。
+- **验证**：50/50 测试、clippy `-D warnings` 0、release 干净、dist 9.45MB。

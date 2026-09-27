@@ -39,6 +39,9 @@ powershell -ExecutionPolicy Bypass -File installer\package.ps1
 
 产出 `dist\GlobalTokenTracker-Setup-<ver>-win-x64.exe`（附 SHA256）。
 
+签名（可选）：设置 `GTT_SIGN_SHA1`/`GTT_SIGN_PFX`/`GTT_SIGN_DLIB` 环境变量后
+自动签名 payload 与安装器并校验——采购与配置细节见 `docs\SIGNING.md`。
+
 ## CLI
 
 | 命令 | 作用 |
