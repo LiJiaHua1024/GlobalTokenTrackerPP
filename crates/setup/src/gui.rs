@@ -74,6 +74,8 @@ const IDC_STATUS: i32 = 112;
 const IDC_PROG: i32 = 113;
 
 const WM_APP_DONE: u32 = WM_APP + 1;
+/// lparam = Box<Option<PathBuf>> from the detached picker thread.
+const WM_APP_PICKED: u32 = WM_APP + 2;
 
 // ---------------------------------------------------------------- GDI+ AA helpers
 // GDI RoundRect/paths are aliased (visible burrs on rounded corners); GDI+
@@ -194,9 +196,11 @@ struct Shared {
 struct Gui {
     mode: Mode,
     dir: PathBuf,
-    /// Some(v) when an existing install is being upgraded — the path is
-    /// locked to the recorded InstallLocation and the copy reads "更新".
+    /// Some(v) when an existing install is being upgraded — copy reads
+    /// "更新"; picking a different dir migrates (old dir auto-cleaned).
     update_from: Option<String>,
+    /// Recorded InstallLocation of the existing install, if any.
+    prior_dir: Option<PathBuf>,
     prog: HWND,
     status: HWND,
     primary: HWND,
@@ -214,6 +218,9 @@ struct Gui {
     field_brush: HBRUSH,
     working: bool,
     done_ok: bool,
+    /// A folder-pick dialog is in flight — the button stays disabled until
+    /// WM_APP_PICKED lands (picked/cancelled) so slow dialogs can't stack.
+    pick_pending: bool,
     shared: Arc<Mutex<Shared>>,
 }
 
@@ -538,9 +545,13 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wpar: WPARAM, lpar: LPARAM) ->
             }
             match id {
                 IDC_BROWSE => {
-                    if let Some(p) = pick_folder(hwnd) {
-                        let s = w(&p.display().to_string());
-                        let _ = SetWindowTextW(GetDlgItem(Some(hwnd), IDC_EDIT).unwrap_or_default(), PCWSTR(s.as_ptr()));
+                    if !g.pick_pending {
+                        g.pick_pending = true;
+                        set_status(g.status, "打开文件夹选择器…（若无响应请直接输入路径）");
+                        if let Ok(b) = GetDlgItem(Some(hwnd), IDC_BROWSE) {
+                            let _ = EnableWindow(b, false);
+                        }
+                        pick_folder(hwnd);
                     }
                     LRESULT(0)
                 }
@@ -595,6 +606,25 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wpar: WPARAM, lpar: LPARAM) ->
                 _ => DefWindowProcW(hwnd, msg, wpar, lpar),
             }
         },
+        WM_APP_PICKED => unsafe {
+            let g = &mut *gui(hwnd);
+            let res = Box::from_raw(lpar.0 as *mut Option<PathBuf>);
+            if let Some(p) = *res {
+                let s = w(&p.display().to_string());
+                let _ = SetWindowTextW(
+                    GetDlgItem(Some(hwnd), IDC_EDIT).unwrap_or_default(),
+                    PCWSTR(s.as_ptr()),
+                );
+                set_status(g.status, "");
+            } else {
+                set_status(g.status, "");
+            }
+            g.pick_pending = false;
+            if let Ok(b) = GetDlgItem(Some(hwnd), IDC_BROWSE) {
+                let _ = EnableWindow(b, true);
+            }
+            LRESULT(0)
+        },
         WM_APP_DONE => unsafe {
             let g = &mut *gui(hwnd);
             g.working = false;
@@ -634,7 +664,7 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wpar: WPARAM, lpar: LPARAM) ->
             if g.mode == Mode::Uninstall && g.done_ok {
                 // Our exe lives inside the dir being deleted — only schedule
                 // the deferred rmdir now that the window is really closing.
-                let _ = crate::schedule_self_delete(&g.dir);
+                let _ = crate::schedule_dir_delete(&g.dir);
             }
             DefWindowProcW(hwnd, msg, wpar, lpar)
         },
@@ -646,8 +676,32 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wpar: WPARAM, lpar: LPARAM) ->
     }
 }
 
-fn pick_folder(hwnd: HWND) -> Option<PathBuf> {
+/// Folder picker on a detached STA helper thread — the common dialog
+/// enumerates shell network locations and can take seconds (or hang) on
+/// machines with a dead mapped drive. Never block the installer UI: the
+/// result (or cancel) arrives later as WM_APP_PICKED; a hung dialog just
+/// leaks the helper until process exit and the user can type the path.
+fn pick_folder(hwnd: HWND) {
+    let raw = hwnd.0 as usize;
+    std::thread::spawn(move || {
+        let out: Option<PathBuf> = pick_folder_inner(HWND(raw as *mut _));
+        // The window reads Box<Option<PathBuf>> in lparam and frees it.
+        let boxed = Box::new(out);
+        let _ = unsafe {
+            PostMessageW(
+                Some(HWND(raw as *mut _)),
+                WM_APP_PICKED,
+                WPARAM(0),
+                LPARAM(Box::into_raw(boxed) as isize),
+            )
+        };
+    });
+}
+
+fn pick_folder_inner(hwnd: HWND) -> Option<PathBuf> {
     unsafe {
+        // Helper thread needs its own STA.
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let dlg: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_ALL).ok()?;
         dlg.SetOptions(dlg.GetOptions().ok()? | FOS_PICKFOLDERS).ok()?;
         if dlg.Show(Some(hwnd)).is_err() {
@@ -675,6 +729,7 @@ fn start_work(hwnd: HWND) {
     let want_shortcut = g.mode == Mode::Install && g.chk_shortcut;
     let want_path = g.mode == Mode::Install && g.chk_path;
     let dir = g.dir.clone();
+    let prior_dir = g.prior_dir.clone();
     let mode = g.mode;
     let shared = g.shared.clone();
     // HWNDs are raw pointers in windows 0.62 → !Send. Cross the thread
@@ -695,7 +750,13 @@ fn start_work(hwnd: HWND) {
         // labels + the final error message carry the GUI narrative.
         let log = |_msg: String| {};
         let res = match mode {
-            Mode::Install => install_steps(&dir, want_shortcut, want_path, &mut step, &log),
+            Mode::Install => install_steps(&dir, want_shortcut, want_path, &mut step, &log)
+                .map(|()| {
+                    // Update that moved dirs — retire the old program dir.
+                    if let Some(old) = &prior_dir {
+                        crate::cleanup_prior_install(old, &dir, &log);
+                    }
+                }),
             Mode::Uninstall => uninstall_steps(&dir, &mut step, &log),
         };
         {
@@ -718,7 +779,12 @@ fn start_work(hwnd: HWND) {
     });
 }
 
-pub fn run(mode: Mode, initial_dir: &Path, update_from: Option<&str>) -> Result<()> {
+pub fn run(
+    mode: Mode,
+    initial_dir: &Path,
+    update_from: Option<&str>,
+    prior_dir: Option<PathBuf>,
+) -> Result<()> {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -761,6 +827,7 @@ pub fn run(mode: Mode, initial_dir: &Path, update_from: Option<&str>) -> Result<
             mode,
             dir: initial_dir.to_path_buf(),
             update_from: update_from.map(str::to_string),
+            prior_dir,
             prog: HWND::default(),
             status: HWND::default(),
             primary: HWND::default(),
@@ -773,6 +840,7 @@ pub fn run(mode: Mode, initial_dir: &Path, update_from: Option<&str>) -> Result<
             field_brush: CreateSolidBrush(COLORREF(CARD)),
             working: false,
             done_ok: false,
+            pick_pending: false,
             shared: Arc::new(Mutex::new(Shared::default())),
         });
         let state_ptr = Box::into_raw(state);
@@ -832,12 +900,7 @@ pub fn run(mode: Mode, initial_dir: &Path, update_from: Option<&str>) -> Result<
             let _ = SendMessageW(edit, WM_SETFONT, Some(WPARAM(font(10.5, false, dpi).0 as usize)), Some(LPARAM(1)));
             g.edit = edit;
             let br_t = w("浏览…");
-            let br = make_btn(hwnd, &br_t, sx(492), sx(144), sx(96), sx(28), IDC_BROWSE, true, dpi);
-            if update_from.is_some() {
-                // Upgrade in place: moving the app would orphan the old dir.
-                let _ = EnableWindow(edit, false);
-                let _ = EnableWindow(br, false);
-            }
+            make_btn(hwnd, &br_t, sx(492), sx(144), sx(96), sx(28), IDC_BROWSE, true, dpi);
             // Plain owner-drawn buttons (not AUTOCHECKBOX — the style bits
             // collide); clicks arrive as WM_COMMAND and flip Gui state.
             let c1t = w("创建开始菜单快捷方式");

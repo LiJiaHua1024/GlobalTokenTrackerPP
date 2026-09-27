@@ -304,13 +304,36 @@ pub fn uninstall_steps(
     Ok(())
 }
 
+/// After an upgrade moved the install dir, retire the old one: drop its
+/// PATH entry and defer-delete the folder (old exes were already stopped by
+/// `stop_running`). Refuses to wipe when `new` nests inside `old` — a rmdir
+/// of the parent would eat the fresh install.
+pub fn cleanup_prior_install(old: &Path, new: &Path, log: &dyn Fn(String)) {
+    let same = old
+        .canonicalize()
+        .ok()
+        .zip(new.canonicalize().ok())
+        .is_some_and(|(a, b)| a == b)
+        || old.display().to_string().trim_end_matches('\\').eq_ignore_ascii_case(
+            new.display().to_string().trim_end_matches('\\'),
+        );
+    if same || new.starts_with(old) || !old.join("globaltokentracker-ui.exe").exists() {
+        return;
+    }
+    log(format!("清理旧安装目录 {}", old.display()));
+    remove_user_path(old);
+    if let Err(e) = schedule_dir_delete(old) {
+        log(format!("旧目录延迟删除失败：{e}"));
+    }
+}
+
 /// Schedule deletion of `dest` after this process exits. Must be called at
 /// the LAST possible moment — while running, our own exe inside `dest` is
 /// locked and the rmdir would leave it behind. GUI mode calls this when the
 /// window actually closes; console mode right before exit.
 /// `raw_arg` keeps `/C ...` unquoted so cmd parses `&`/`>` as metachars
 /// (`.arg()` would backslash-escape the inner quotes and break `/C`).
-pub fn schedule_self_delete(dest: &Path) -> Result<()> {
+pub fn schedule_dir_delete(dest: &Path) -> Result<()> {
     Command::new("cmd")
         .raw_arg(format!(
             "/C ping 127.0.0.1 -n 2 >nul & rmdir /S /Q \"{}\"",
@@ -443,6 +466,7 @@ fn main() -> Result<()> {
             if uninstall_flag { gui::Mode::Uninstall } else { gui::Mode::Install },
             &dest,
             prior.as_ref().map(|(v, _)| v.as_str()),
+            prior.as_ref().map(|(_, d)| d.clone()),
         );
     }
 
@@ -451,7 +475,7 @@ fn main() -> Result<()> {
     if uninstall_flag {
         println!("{APP} 卸载 —— 移除 {}", dest.display());
         uninstall_steps(&dest, &mut step, &log)?;
-        schedule_self_delete(&dest)?; // fires after this process exits
+        schedule_dir_delete(&dest)?; // fires after this process exits
         println!("已移除程序、快捷方式与卸载项；用户数据保留在 %USERPROFILE%\\.globaltokentracker");
     } else {
         match &prior {
@@ -460,6 +484,9 @@ fn main() -> Result<()> {
             None => println!("{APP} {VER} 安装程序 —— 安装到 {}", dest.display()),
         }
         install_steps(&dest, true, true, &mut step, &log)?;
+        if let Some((_, old)) = &prior {
+            cleanup_prior_install(old, &dest, &log);
+        }
         println!();
         println!("{APP} {VER} 安装完成。");
         println!("  开始菜单 : %APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\{APP}");
