@@ -550,3 +550,13 @@
   - SQLite `Store` 每 `load_all` 开一次 drop 关一次；`PriceBook::load` 全量 8K 行生命周期单次调用
 - **如实记录的既有取舍（不改）**：`Box::into_raw(Gui)`/安装器 WM_APP_PICKED lparam 盒——进程级生存期/窗口已关时最多漏 24B；setup 控件 `WM_SETFONT` 的 ~8 个 HFONT 进程级不删（短生命周期安装器）；悬停柱的 450ms 驻留计时每次换柱 spawn 一次（上限 64 槽，自限）；`read_segment` 对超大单文件仍整读——改流式解析才解，值不值留待真有 GB 级源再说。
 - **验证**：50/50 测试、clippy `-D warnings` 0。
+
+## S46 BIL 发布工作流移植 ✅
+
+- **范围**：参照 Bilibili_Innocent_Lab 的 alpha/stable 双通道发布体系移植到 GTT（`.github/workflows/` + `.github/release-templates/`）。
+- **保留的 BIL 架构**：verify/publish 双 job、main 精确 SHA 校验 + 陈旧构建守卫（checkout SHA == GITHUB_SHA == remote main）、门禁步骤带名互不短路、环境保护、模板化发布说明、LLM 双槽位 + 规则回退、BUILD_INFO/SHA256SUMS 溯源、`gh release create`。
+- **GTT 适配**：Gradle/aapt/apksigner/R8 链 → `cargo test`/`clippy -D warnings`/`installer\package.ps1`；版本一致性校验重写为 `validate_build.py`（root Cargo.toml `[workspace.package] version` 为单一事实源：stable tag 必须全等，alpha 为 `vX.Y.Z-alpha.N` 同基版）；APK_* 模板 token → ASSET_*；`release_notes_config.json` 产品语境/领域词/禁用术语全量替换；`user_text_paths` 置空（解析器只认 Android `<string>` XML，指向 .rs 会静默空集——不假装生效）。
+- **取舍**：空 alpha tag 允许（push 触发只做构建验证不发版）；首个 stable 用合成基线条目（BIL 原设计，说明靠 release_summary 承载）；`sync-lsposed-release.yml` 无对应物不移植；签名 Secret 透传留位，未配置则产出未签名包。
+- **真实 runner 验证（push 触发）**：run 36334277350 verify job 9m24s 全绿——12/12 Python 测试、tooling 干跑（changelog 生成+模板渲染+token 零残留）、debug/release 构建、50/50 单测、clippy 0 警告、package.ps1 产出安装包；publish 正确跳过。
+- **首跑暴露并修复**：Python 3.14 + cp1252 控制台下 `SystemExit` 消息含 em-dash → 子进程 `UnicodeDecodeError`。子进程解码统一 `errors="replace"`，错误消息去非 ASCII。
+- **待办（使用时）**：发布前在仓库 Settings 建 `alpha-release`/`stable-release` 环境（可加审批）；首个 stable 建议手动填 `release_summary`。
