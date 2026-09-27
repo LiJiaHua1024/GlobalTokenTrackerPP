@@ -95,9 +95,75 @@ pub struct OverviewVm {
     /// checklist. Same invariant: never hidden by the model filter itself.
     pub models: Vec<String>,
     pub quotas: Vec<QuotaRow>,
+    /// Quota rows folded into one collapsible group per tool — the quota page
+    /// renders these, the overview strip keeps using the flat `quotas`.
+    pub quota_groups: Vec<QuotaGroupVm>,
     pub unpriced: Vec<(String, u64)>,
     /// Local UTC offset "+HH:MM" for display.
     pub tz_offset: String,
+}
+
+/// One collapsible section on the quota page: every window belonging to a
+/// single tool, newest-most-relevant first.
+#[derive(Debug, Clone)]
+pub struct QuotaGroupVm {
+    pub app: String,
+    /// UI-facing tool name (`workbuddy` → `WorkBuddy`).
+    pub display: String,
+    /// Highest used_percent in the group — the header badge.
+    pub worst_pct: Option<f64>,
+    pub rows: Vec<QuotaRow>,
+}
+
+/// Human-readable label for a `window_kind` raw id (spec §6.9 windows).
+pub fn quota_kind_label(kind: &str) -> &str {
+    match kind {
+        "5h_block" => "5 小时窗口",
+        "weekly" => "每周限额",
+        "monthly" => "每月限额",
+        "credits" => "剩余点数",
+        "billing_period" => "计费周期",
+        "auto_pool" => "Auto 用量池",
+        "api_pool" => "API 用量池",
+        "session_ctx" => "会话上下文",
+        other => other,
+    }
+}
+
+/// App-id → display name for quota group headers (adapter registry names are
+/// not reachable from the view model; keep the two in sync).
+pub fn app_display(app: &str) -> &str {
+    match app {
+        "claude" => "Claude",
+        "codex" => "Codex",
+        "cursor" => "Cursor",
+        "workbuddy" => "WorkBuddy",
+        "codebuddy_ide" => "CodeBuddy",
+        "codebuddy_cli" => "CodeBuddy CLI",
+        "qoder" => "Qoder",
+        "opencode" => "OpenCode",
+        "zcode" => "ZCode",
+        "grok" => "Grok",
+        "devin" => "Devin",
+        other => other,
+    }
+}
+
+/// Fold flat `latest_quotas` rows into per-app groups, ordered by app name.
+pub fn group_quotas(rows: Vec<QuotaRow>) -> Vec<QuotaGroupVm> {
+    let mut map: std::collections::BTreeMap<String, Vec<QuotaRow>> =
+        std::collections::BTreeMap::new();
+    for r in rows {
+        map.entry(r.app.clone()).or_default().push(r);
+    }
+    map.into_iter()
+        .map(|(app, rows)| QuotaGroupVm {
+            display: app_display(&app).to_string(),
+            worst_pct: rows.iter().filter_map(|r| r.used_percent).reduce(f64::max),
+            app,
+            rows,
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -158,6 +224,7 @@ impl Store {
             })
             .collect();
         let span = self.totals(start, None, apps, models)?;
+        let quotas = self.latest_quotas()?;
         Ok(OverviewVm {
             today: self.totals(Some(t0), None, apps, models)?,
             span,
@@ -167,7 +234,8 @@ impl Store {
             daily,
             apps: self.app_names()?,
             models: self.model_names(apps)?,
-            quotas: self.latest_quotas()?,
+            quota_groups: group_quotas(quotas.clone()),
+            quotas,
             unpriced: self.unpriced_models()?,
             tz_offset: tz,
         })
@@ -282,6 +350,34 @@ mod tests {
         assert_eq!(fmt::tokens_exact(1_000), "1,000");
         assert_eq!(fmt::tokens_exact(1_730_848_235), "1,730,848,235");
         assert_eq!(fmt::tokens_exact(13_101_054_884), "13,101,054,884");
+    }
+
+    #[test]
+    fn quota_groups_fold_per_app() {
+        use crate::store::QuotaRow;
+        let row = |app: &str, kind: &str, pct: Option<f64>| QuotaRow {
+            app: app.into(),
+            account: None,
+            captured_at: 0,
+            window_kind: kind.into(),
+            used: None,
+            limit_value: None,
+            used_percent: pct,
+            resets_at: None,
+        };
+        let groups = super::group_quotas(vec![
+            row("workbuddy", "session_ctx", Some(21.5)),
+            row("codex", "weekly", Some(3.0)),
+            row("codex", "5h_block", Some(81.0)),
+        ]);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].app, "codex");
+        assert_eq!(groups[0].rows.len(), 2);
+        assert_eq!(groups[0].worst_pct, Some(81.0));
+        assert_eq!(groups[0].display, "Codex");
+        assert_eq!(groups[1].app, "workbuddy");
+        assert_eq!(super::quota_kind_label("session_ctx"), "会话上下文");
+        assert_eq!(super::quota_kind_label("brand_new_kind"), "brand_new_kind");
     }
 
     #[test]

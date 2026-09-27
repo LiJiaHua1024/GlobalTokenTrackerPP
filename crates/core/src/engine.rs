@@ -241,7 +241,8 @@ impl Engine {
         }
         for q in quotas {
             match self.store.insert_quota(&q) {
-                Ok(()) => report.quotas += 1,
+                Ok(true) => report.quotas += 1,
+                Ok(false) => {}
                 Err(e) => report.errors.push(format!("{adapter_id} quota: {e:#}")),
             }
         }

@@ -993,64 +993,160 @@ pub fn detail_page(snap: Option<&Snapshot>, theme: &Theme, ctx: &mut ViewContext
 
 // ---------------------------------------------------------------- quota
 
-pub fn quota_page(snap: Option<&Snapshot>, theme: &Theme) -> View {
+/// One quota window row inside an app group card — distinct labels per
+/// window_kind, percent badge + bar when known, usage/limit and reset on the
+/// meta line.
+fn quota_row(theme: &Theme, q: &globaltokentracker_core::store::QuotaRow) -> View {
+    let label = globaltokentracker_core::viewmodel::quota_kind_label(&q.window_kind);
+    let mut title: Vec<View> = vec![
+        TextBlock::new()
+            .text(label)
+            .font_size(theme.body_size)
+            .font_weight(FontWeight::SEMI_BOLD)
+            .vertical_alignment(VerticalAlignment::Center)
+            .into(),
+    ];
+    if let Some(acc) = &q.account {
+        title.push(w::badge(theme, acc.clone(), w::BadgeTone::Muted));
+    }
+    let mut head: Vec<View> = vec![cell(
+        0,
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(8.0)
+            .keyed_children(keyed(title)),
+    )];
+    if let Some(pct) = q.used_percent {
+        head.push(cell(
+            1,
+            w::badge(
+                theme,
+                format!("{pct:.1}%"),
+                if pct > 80.0 {
+                    w::BadgeTone::Danger
+                } else if pct > 50.0 {
+                    w::BadgeTone::Warn
+                } else {
+                    w::BadgeTone::Muted
+                },
+            ),
+        ));
+    }
+    let mut body: Vec<View> = vec![Grid::new()
+        .columns([GridLength::STAR, GridLength::Auto])
+        .keyed_children(keyed(head))];
+    if let Some(pct) = q.used_percent {
+        body.push(
+            ProgressBar::new()
+                .value(pct)
+                .maximum(100.0)
+                .minimum(0.0)
+                .into(),
+        );
+    }
+    // `credits` rows carry remaining balance in `used` (see quota.rs) — never
+    // dress it as "已用".
+    let usage = if q.window_kind == "credits" {
+        q.used.map(|u| format!("余额 {}", fmt::tokens_exact(u as u64)))
+    } else {
+        match (q.used, q.limit_value) {
+            (Some(u), Some(l)) => Some(format!(
+                "已用 {} / 上限 {}",
+                fmt::tokens_exact(u as u64),
+                fmt::tokens_exact(l as u64)
+            )),
+            (Some(u), None) => Some(format!("用量 {}", fmt::tokens_exact(u as u64))),
+            (None, Some(l)) => Some(format!("上限 {}", fmt::tokens_exact(l as u64))),
+            (None, None) => None,
+        }
+    };
+    let mut meta = format!(
+        "重置 {} · 采集 {}",
+        fmt::until(q.resets_at),
+        fmt::ts_short(Some(q.captured_at))
+    );
+    if let Some(u) = usage {
+        meta = format!("{u} · {meta}");
+    }
+    body.push(
+        TextBlock::new()
+            .text(meta)
+            .font_size(theme.label_size)
+            .foreground(theme.subtle)
+            .into(),
+    );
+    vstack(6.0, body)
+}
+
+/// Quota page — one collapsible card per tool (a vendor can expose several
+/// windows; a flat list once flooded the page with WorkBuddy session marks).
+pub fn quota_page(
+    snap: Option<&Snapshot>,
+    theme: &Theme,
+    collapsed: &std::collections::BTreeSet<String>,
+    ctx: &mut ViewContext<Shell>,
+) -> View {
     let Some(s) = snap else {
         return loading(theme, true);
     };
     let mut list: Vec<View> = Vec::new();
-    for q in &s.vm.quotas {
-        let pct = q.used_percent.unwrap_or(0.0);
-        list.push(w::card(
-            theme,
-            StackPanel::new()
-                .orientation(Orientation::Vertical)
-                .spacing(8.0)
-                .children((
-                    Grid::new()
-                        .columns([GridLength::STAR, GridLength::Auto])
-                        .children([
-                            cell(
-                                0,
-                                StackPanel::new()
-                                    .orientation(Orientation::Horizontal)
-                                    .spacing(8.0)
-                                    .children((
-                                        SymbolIcon::new().symbol(Symbol::Clock),
-                                        TextBlock::new()
-                                            .text(format!("{} · {}", q.app, q.window_kind))
-                                            .font_weight(FontWeight::SEMI_BOLD)
-                                            .vertical_alignment(VerticalAlignment::Center),
-                                    )),
+    for g in &s.vm.quota_groups {
+        let open = !collapsed.contains(&g.app);
+        let worst = g.worst_pct.unwrap_or(0.0);
+        let app_key = g.app.clone();
+        let header_btn = Button::new()
+            .automation_name(format!("配额组 {}", g.display))
+            .horizontal_alignment(HorizontalAlignment::Stretch)
+            .horizontal_content_alignment(HorizontalAlignment::Stretch)
+            .on_click(ctx.callback(move |_| Msg::ToggleQuotaGroup(app_key.clone())))
+            .content(
+                Grid::new()
+                    .columns([GridLength::STAR, GridLength::Auto, GridLength::Auto])
+                    .column_spacing(8.0)
+                    .children([
+                        cell(
+                            0,
+                            StackPanel::new()
+                                .orientation(Orientation::Horizontal)
+                                .spacing(8.0)
+                                .children((
+                                    SymbolIcon::new().symbol(Symbol::Clock),
+                                    TextBlock::new()
+                                        .text(format!("{} · {} 项配额", g.display, g.rows.len()))
+                                        .font_weight(FontWeight::SEMI_BOLD)
+                                        .vertical_alignment(VerticalAlignment::Center),
+                                )),
+                        ),
+                        cell(
+                            1,
+                            w::badge(
+                                theme,
+                                format!("{worst:.1}%"),
+                                if worst > 80.0 {
+                                    w::BadgeTone::Danger
+                                } else if worst > 50.0 {
+                                    w::BadgeTone::Warn
+                                } else {
+                                    w::BadgeTone::Muted
+                                },
                             ),
-                            cell(
-                                1,
-                                w::badge(
-                                    theme,
-                                    format!("{pct:.1}%"),
-                                    if pct > 80.0 {
-                                        w::BadgeTone::Danger
-                                    } else if pct > 50.0 {
-                                        w::BadgeTone::Warn
-                                    } else {
-                                        w::BadgeTone::Muted
-                                    },
-                                ),
-                            ),
-                        ]),
-                    ProgressBar::new()
-                        .value(pct)
-                        .maximum(100.0)
-                        .minimum(0.0),
-                    TextBlock::new()
-                        .text(format!(
-                            "reset {} · account {}",
-                            fmt::until(q.resets_at),
-                            q.account.clone().unwrap_or_else(|| "—".into())
-                        ))
-                        .font_size(theme.label_size)
-                        .foreground(theme.subtle),
-                )),
-        ));
+                        ),
+                        cell(
+                            2,
+                            TextBlock::new()
+                                .text(if open { "▴" } else { "▾" })
+                                .font_size(theme.label_size)
+                                .foreground(theme.subtle)
+                                .vertical_alignment(VerticalAlignment::Center)
+                                .into(),
+                        ),
+                    ]),
+            );
+        let mut inner: Vec<View> = vec![header_btn];
+        if open {
+            inner.extend(g.rows.iter().map(|q| quota_row(theme, q)));
+        }
+        list.push(w::card(theme, vstack(10.0, inner)));
     }
     if list.is_empty() {
         list.push(

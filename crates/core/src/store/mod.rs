@@ -4,7 +4,7 @@ mod cursor;
 mod query;
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
 pub use cursor::{CursorAction, FileCursor, tail_fingerprint};
@@ -172,14 +172,34 @@ impl Store {
         Ok(n > 0)
     }
 
-    pub fn insert_quota(&self, q: &crate::model::QuotaSnapshot) -> Result<()> {
+    /// Insert a quota snapshot — skipped when identical in every user-visible
+    /// field to the latest row for the same (app, account, window_kind), so
+    /// unchanged subscription windows don't pile up duplicate history rows.
+    /// `raw_json`/`captured_at` deltas alone never resurrect a skipped value.
+    /// Returns `true` when a row was actually inserted.
+    pub fn insert_quota(&self, q: &crate::model::QuotaSnapshot) -> Result<bool> {
+        type QVals = (Option<f64>, Option<f64>, Option<f64>, Option<i64>);
+        let latest: Option<QVals> = self
+            .conn
+            .query_row(
+                "SELECT used, limit_value, used_percent, resets_at
+                 FROM quota_snapshots
+                 WHERE app = ?1 AND account IS ?2 AND window_kind = ?3
+                 ORDER BY captured_at DESC, id DESC LIMIT 1",
+                params![q.app, q.account, q.window_kind],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        if latest == Some((q.used, q.limit_value, q.used_percent, q.resets_at)) {
+            return Ok(false);
+        }
         self.conn.execute(
             "INSERT INTO quota_snapshots(app,account,captured_at,window_kind,used,limit_value,used_percent,resets_at,raw_json)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![q.app, q.account, q.captured_at, q.window_kind, q.used,
                     q.limit_value, q.used_percent, q.resets_at, q.raw_json],
         )?;
-        Ok(())
+        Ok(true)
     }
 
     pub(crate) fn conn(&self) -> &Connection {
@@ -435,4 +455,74 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].model.as_deref(), Some("gpt-x"));
     }
+
+    fn quota_snap(app: &str, kind: &str, pct: Option<f64>, at: i64) -> crate::model::QuotaSnapshot {
+        crate::model::QuotaSnapshot {
+            app: app.into(),
+            account: None,
+            captured_at: at,
+            window_kind: kind.into(),
+            used: Some(10.0),
+            limit_value: Some(100.0),
+            used_percent: pct,
+            resets_at: None,
+            raw_json: None,
+        }
+    }
+
+    #[test]
+    fn insert_quota_dedups_identical_snapshots() {
+        let s = Store::open_memory().unwrap();
+        let q = quota_snap("workbuddy", "session_ctx", Some(21.5), 1000);
+        s.insert_quota(&q).unwrap();
+        // Same values re-polled later — must not append.
+        let mut q2 = q.clone();
+        q2.captured_at = 2000;
+        s.insert_quota(&q2).unwrap();
+        let n: i64 = s
+            .conn()
+            .query_row("SELECT COUNT(*) FROM quota_snapshots", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+        // A real change lands.
+        let mut q3 = q.clone();
+        q3.captured_at = 3000;
+        q3.used_percent = Some(42.0);
+        s.insert_quota(&q3).unwrap();
+        let n: i64 = s
+            .conn()
+            .query_row("SELECT COUNT(*) FROM quota_snapshots", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn latest_quotas_one_row_per_key() {
+        let s = Store::open_memory().unwrap();
+        // Flood: many snapshots sharing the MAX captured_at (WorkBuddy's
+        // batch-updated session watermarks did exactly this).
+        for i in 0..50 {
+            let mut q = quota_snap("workbuddy", "session_ctx", Some(21.5), 999);
+            q.raw_json = Some(format!("dup{i}"));
+            s.conn()
+                .execute(
+                    "INSERT INTO quota_snapshots(app,account,captured_at,window_kind,used,limit_value,used_percent,resets_at,raw_json)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                    params![q.app, q.account, q.captured_at, q.window_kind, q.used,
+                            q.limit_value, q.used_percent, q.resets_at, q.raw_json],
+                )
+                .unwrap();
+        }
+        s.insert_quota(&quota_snap("codex", "weekly", Some(3.0), 500))
+            .unwrap();
+        s.insert_quota(&quota_snap("codex", "5h_block", Some(80.0), 600))
+            .unwrap();
+        let rows = s.latest_quotas().unwrap();
+        assert_eq!(rows.len(), 3); // exactly one per (app, kind)
+        assert_eq!(
+            rows.iter().filter(|r| r.app == "workbuddy").count(),
+            1
+        );
+    }
 }
+

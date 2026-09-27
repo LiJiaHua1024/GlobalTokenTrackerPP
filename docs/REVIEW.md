@@ -384,3 +384,13 @@
   5. **安装器**：setup `build.rs` 同款嵌资源 + `WNDCLASSW.hIcon = LoadIconW(MAKEINTRESOURCE(1))`。
 - **踩坑**：`PCWSTR(1 as *const u16)` 触发 clippy `manual_dangling_ptr`——windows 0.62 未导出 `MAKEINTRESOURCEW`，改 `std::ptr::without_provenance::<u16>(1)`。
 - **验证**：exe 提取图标=蓝结瓦片；`WM_GETICON ICON_BIG` 画出蓝结（对比修复前的通用窗格图标）；`LoadIcon(module,1)` 返回蓝结（托盘路径等价验证）；标题栏截图确认品牌位换图。clippy 0、25/25 测试。
+
+## S30 配额面板分组折叠 + CodeBuddy 接入 ✅
+
+- **需求**：配额按同一软件来源折叠、更细区分窗口类型；WorkBuddy 一长串刷屏；CodeBuddy（与 WorkBuddy 同厂商不同产品）未参与计数。
+- **配额刷屏根因**：`latest_quotas` 用 `captured_at = MAX(...)` 联结——WorkBuddy `session_usage` 批量更新产生同毫秒时间戳，MAX 命中全部 3995 行快照。修为 `ROW_NUMBER() OVER (PARTITION BY app, account, window_kind ORDER BY captured_at DESC, id DESC)` top-1——每身份键**恰好一行**，不同 account（codex 的 free/plus/prolite）仍是独立配额主体。
+- **写入端去重**：`insert_quota` 先查同键最新行，所有用户可见字段（used/limit/pct/resets_at）全等则跳过——增量轮询不再为不变窗口堆历史（存量 11409 行保留，查询路径已正确）。
+- **配额页**：`OverviewVm.quota_groups`（`group_quotas` 按 app 折叠 + `quota_kind_label` 中文标签：5h_block→5 小时窗口、session_ctx→会话上下文、credits→剩余点数（`used`=余额语义单独标注）等）；每 app 一张卡，透明底 `Button` 头（名称·N 项配额·worst 徽章·▾/▴），点击经 `ToggleQuotaGroup` 折叠/展开（`Shell.quota_collapsed` 会话态）。行内 account 以徽章区分多账号。
+- **CodeBuddy 适配器**（`codebuddy_ide`，独立于 workbuddy）：解析 `%LOCALAPPDATA%/CodeBuddyExtension/Data/<user>/<host>/<acct>/history/<ws>/<conv>/messages/*.json`——assistant 消息 `extra.statsSnapshot` 是**会话级累计计数器**（input/output/cached/cacheWrite/thinking/elapsed/credit），逐消息差分（max 水位）出事件，合计=最终快照=厂商精确值；无快照消息跳过（其 token 已在累计内）。会话目录作 `Sqlite` kind SourceItem，`adapter_state` 存已处理文件名+累计水位，增量 O(新文件)。conv→cwd 经 `*/codebuddy-sessions.vscdb` 映射出 project。实测：31 事件、78.6M tokens 入账。
+- **取舍**：`lastStep*` 字段不用——多步轮次只报最后一次调用会漏计；差分把一轮多调用合并为一条事件（粒度换精确总额）。`Capability::Estimate`。
+- **验证**：UIA Invoke 折叠/展开往返截图确认；`latest_quotas` 15 行（原 3795+）；测试 29/29（新增 dedup、top-1、分组、CodeBuddy 差分 4 例）；clippy 0。

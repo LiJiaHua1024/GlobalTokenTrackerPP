@@ -351,15 +351,20 @@ impl super::Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
-    /// Latest quota snapshot per (app, window_kind) — for the quota page/tray.
+    /// Latest quota snapshot per (app, account, window_kind) — exactly one row
+    /// per identity key (`ROW_NUMBER` top-1; a `MAX(captured_at)=` join would
+    /// return every row tied at the max timestamp, which is how WorkBuddy's
+    /// batch-updated `session_ctx` watermarks flooded the quota page).
     pub fn latest_quotas(&self) -> Result<Vec<QuotaRow>> {
         let mut st = self.conn().prepare(
             "SELECT app, account, captured_at, window_kind, used, limit_value,
                     used_percent, resets_at
-             FROM quota_snapshots q
-             WHERE captured_at = (SELECT MAX(captured_at) FROM quota_snapshots
-                                  WHERE app=q.app AND window_kind=q.window_kind)
-             ORDER BY app, captured_at DESC",
+             FROM (SELECT *, ROW_NUMBER() OVER (
+                       PARTITION BY app, account, window_kind
+                       ORDER BY captured_at DESC, id DESC) rn
+                   FROM quota_snapshots)
+             WHERE rn = 1
+             ORDER BY app, window_kind, account",
         )?;
         let rows = st.query_map([], |r| {
             Ok(QuotaRow {

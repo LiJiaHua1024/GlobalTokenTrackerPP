@@ -76,6 +76,8 @@ pub struct Shell {
     /// Which filter-strip dropdown is open (in-content overlay, not a system
     /// Flyout — so no FlyoutPresenter surface stroke/shadow halo).
     open_menu: Option<MenuKind>,
+    /// Quota page: app groups the user folded away (default all expanded).
+    quota_collapsed: std::collections::BTreeSet<String>,
 }
 
 /// Which filter-strip picker is open — `Tools`/`Models` are multi-select
@@ -121,6 +123,8 @@ pub enum Msg {
     /// Filter-strip pill clicked — opens its overlay, or closes it when the
     /// same one is already open; a different picker's overlay replaces it.
     ToggleMenu(MenuKind),
+    /// Quota group header clicked — fold/unfold the app's quota windows.
+    ToggleQuotaGroup(String),
     /// Event sink for RadioButton uncheck transitions — nothing to do.
     Noop,
     /// Background quota poll finished (rows written, channel errors).
@@ -353,6 +357,7 @@ impl Component for Shell {
             trend: widgets::TrendHandle::default(),
             quota_at: None,
             open_menu: None,
+            quota_collapsed: std::collections::BTreeSet::new(),
         }
     }
 
@@ -537,6 +542,11 @@ impl Component for Shell {
                     Some(kind)
                 };
             }
+            Msg::ToggleQuotaGroup(app) => {
+                if !self.quota_collapsed.remove(&app) {
+                    self.quota_collapsed.insert(app);
+                }
+            }
             Msg::Noop => {}
             Msg::WatchFired => {
                 diag!("[watch] fired, scanning={}", self.scanning);
@@ -683,7 +693,7 @@ impl Component for Shell {
                 },
             ),
             Page::Detail => detail_page(snap, theme, context),
-            Page::Quota => quota_page(snap, theme),
+            Page::Quota => quota_page(snap, theme, &self.quota_collapsed, context),
             Page::Sources => sources_page(snap, theme),
             Page::Prices => prices_page(snap, theme),
         };
@@ -797,7 +807,7 @@ impl Shell {
                             errs.push(format!("{}: {e}", o.app));
                         }
                         for q in o.quotas {
-                            if store.insert_quota(&q).is_ok() {
+                            if matches!(store.insert_quota(&q), Ok(true)) {
                                 n += 1;
                             }
                         }
