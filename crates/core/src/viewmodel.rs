@@ -145,6 +145,8 @@ pub fn app_display(app: &str) -> &str {
         "zcode" => "ZCode",
         "grok" => "Grok",
         "devin" => "Devin",
+        "minimax_code" => "MiniMax Code",
+        "kimi_code" => "Kimi Code",
         other => other,
     }
 }

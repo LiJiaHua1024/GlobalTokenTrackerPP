@@ -436,3 +436,15 @@
 - **对齐项**：`price_row` 改用明细同款 chrome——padding `xy(10,5)`、`theme.line_separators` 控制底部 1px 分割线、隔行 `argb(10,128,128,128)` 斑马纹；整表（表头+行）包进 `w::card` 卡片；行 tooltip 显示完整 `model_id`（截断 56 字符时的全名回退）。
 - 表头本来就是明细同款（`padding(10,6)` + 底部分割线 + label_size 半粗 subtle 标签）。
 - **验证**：截图确认卡片包裹+斑马纹+分割线渲染；32/32 测试、clippy 0。
+
+## S36 MiniMax Code / Kimi Code 适配 ✅
+
+- **需求**：MiniMax Code、Kimi Code 均已开源，适配其本地用量统计。
+- **源码取证**（官方仓库，非猜测）：
+  - `MiniMax-AI/minimax-code`：数据根 `~/.minimax`（旧 `~/.mavis`，迁移后 `.mavis` 变成指向 `.minimax` 的 junction —— `packages/config/src/data-dir.ts` `createCompatLink`）。用量在 SQLite `v2/sqlite/runtime-state.sqlite` 的 **`local_runtime_token_usage`**（`infra/db/schema/usage.ts`）：每行一次 LLM 调用，`id` 自增 PK、`session_id`、`agent_name`、`turn_id`、`model`、`ts`(epoch ms)、`input/output/reasoning/cache_read/cache_write_tokens`、`cost_usd`、`raw`；`local_runtime_sessions` 提供 `project_workspace_dir`/`workspace_dir`。
+  - `MoonshotAI/kimi-code`：数据根 `$KIMI_CODE_HOME || ~/.kimi-code`（官方文档 `docs/en/configuration/data-locations.md`）。会话日志 `sessions/<workDirKey>/<sessionId>/agents/<agent>/wire.jsonl`；`usage.record` 记录 = **每次 LLM 调用的增量**（`agent/usage/usageOps.ts` + `human/usage/machine.ts` 直接累加），`usageScope` 只标记调用出处（turn/session），**不按 scope 过滤**，否则非 turn 调用会漏计。`TokenUsage` 仅 `inputOther/output/inputCacheRead/inputCacheCreation` 四字段 —— **无 reasoning 拆分**。`config.update` 记录带 `cwd`；`session_index.jsonl` 提供 sessionId→workDir 兜底。
+- **实现**：
+  - `minimax_code.rs`：Sqlite 源，`id > 水位` 增量（自增 PK 天然单调）；`cost_usd` 厂商自记 → `ProviderReported`；project 取 `project_workspace_dir` 原值（与 claude/codex 存全路径一致）；dedup `minimax_code:<数据根basename>:<id>`（`.minimax` 与 `.minimax-<profile>` 多 profile 隔离）；`.mavis*` 只在没有任何 `.minimax*` 目录且自身非 junction 时才扫（防迁移后同一文件双读双计）；`local_runtime_token_usage` 表不存在视为"无数据"不报错。
+  - `kimi_code.rs`：Jsonl 源，`wire.jsonl` 行解析；`usage.record` → 事件，dedup `kimi_code:<文件>:<字节偏移>`（记录无自身 id，偏移天然稳定）；`inputOther` 本就是非缓存输入，直填 `input_tokens`；project 三级解析：`config.update.cwd`（权威、随段可见）→ `session_index.jsonl` → 缓存进 `adapter_state`（追加段从文件中部开始，看不到头部的 config.update），后解析到的 project 回填同段已入账事件。
+  - 两者均 `Capability::Precise`（厂商逐调用精确计量）；`apps::MINIMAX_CODE`/`KIMI_CODE` 独立身份，配额/工具过滤/UI 显示名全链接通。
+- **验证**：新增 6 测试（minimax：增量水位/全零行跳过/project join/无表容错；kimi：turn+session 增量混计/project 三段解析/半行 defer）。**38/38 测试、clippy `-D warnings` 0、release 干净**。本机两个工具均未安装 → 无本地实测数据，扫描将自然显示"未安装"。

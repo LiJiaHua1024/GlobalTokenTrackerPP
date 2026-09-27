@@ -19,6 +19,8 @@ pub mod codex;
 pub mod cursor;
 pub mod devin;
 pub mod grok;
+pub mod kimi_code;
+pub mod minimax_code;
 pub mod opencode;
 pub mod qoder;
 pub mod workbuddy;
@@ -112,6 +114,8 @@ pub fn registry() -> Vec<Box<dyn SourceAdapter>> {
         Box::new(grok::Grok),
         Box::new(workbuddy::WorkBuddy),
         Box::new(codebuddy::CodeBuddyIde),
+        Box::new(minimax_code::MiniMaxCode),
+        Box::new(kimi_code::KimiCode),
     ]
 }
 

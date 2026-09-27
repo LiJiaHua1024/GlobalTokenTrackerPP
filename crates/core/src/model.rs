@@ -20,6 +20,8 @@ pub mod apps {
     pub const COPILOT: &str = "copilot";
     pub const DEVIN: &str = "devin";
     pub const WINDSURF: &str = "windsurf";
+    pub const MINIMAX_CODE: &str = "minimax_code";
+    pub const KIMI_CODE: &str = "kimi_code";
 }
 
 /// Where the raw record came from (spec §5 `provenance`).
