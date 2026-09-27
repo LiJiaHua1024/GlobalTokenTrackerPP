@@ -280,7 +280,7 @@ pub fn uninstall_steps(
 /// locked and the rmdir would leave it behind. GUI mode calls this when the
 /// window actually closes; console mode right before exit.
 /// `raw_arg` keeps `/C ...` unquoted so cmd parses `&`/`>` as metachars
-/// (.arg() would backslash-escape the inner quotes and break /C).
+/// (`.arg()` would backslash-escape the inner quotes and break `/C`).
 pub fn schedule_self_delete(dest: &Path) -> Result<()> {
     Command::new("cmd")
         .raw_arg(format!(
