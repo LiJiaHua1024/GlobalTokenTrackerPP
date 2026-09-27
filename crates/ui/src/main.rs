@@ -772,9 +772,14 @@ impl Component for Shell {
                 .text(label)
                 .is_selected(self.page == page)
         };
+        // Nav floats on row 0 centered across the full window width — the
+        // TitleBar.Content slot centers within the area that excludes the
+        // caption buttons, which reads as left-shifted.
         let nav = SelectorBar::new()
             .on_selected_text_changed(context.callback(Msg::Nav))
             .horizontal_alignment(HorizontalAlignment::Center)
+            .vertical_alignment(VerticalAlignment::Center)
+            .grid_row(0)
             .collection_slot(
                 SelectorBarSlot::Items,
                 [
@@ -843,8 +848,8 @@ impl Component for Shell {
             .children((
                 TitleBar::new()
                     .preferred_height(WindowTitleBarHeight::Tall)
-                    .grid_row(0)
-                    .slot(TitleBarSlot::Content, nav),
+                    .grid_row(0),
+                nav,
                 brand,
                 chrome,
                 Border::new()
