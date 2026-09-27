@@ -461,3 +461,10 @@
   - 两者 `cost→ProviderReported`、`Capability::Precise`；`apps::CLINE`/`COMMANDCODE` 独立身份。
 - **验证**：新增 9 测试（cline：配对胜出/孤立 started 入账/unchanged 快路径/deleted 仅冷扫/字段缺失容错；commandcode：cache 分层拆分/cwd 缓存接续/slug 兜底/全零跳过）。**44/44 测试、clippy `-D warnings` 0、release 干净**。本机未装两工具 → 数据源页显示"未安装"。
 - **已知边界**：cline `subagent_usage`/`deleted_api_reqs` 是聚合行与每请求行并存——按 `getApiMetrics` 同款全部计入（与 cline 自身显示总额一致）；`deleted_api_reqs` 冷扫一次后不再重放，运行中删除消息时旧请求行保留（token 已消耗不退账，语义更准）。
+
+## S38 浮点显示去尾零 ✅
+
+- **需求**：明细页大量条目成本显示 `$0.0000`（千分位整数+4位定宽小数），尾零无意义。
+- **根因**：`fmt::usd` 对 <$1 固定 `{:.4}`——`$0.5000`/`$0.0100`/`$0.0000` 全带尾零；同类还有 `{c:.1}cr`→`"5.0cr"`、`{pct:.1}%`→`"45.0%"`、`duration`→`"2.0s"`。
+- **修复**：新增 `fmt::trim_f(v,prec)`——按 prec 定宽后去尾零/尾点，**prec=0 跳过 trimming**（否则 `"180"`→`"18"`）；`usd` 按量级选 0/2/4 位再过 `trim_f`：≥$100 整元不变，≥$1 `"$45.20"→"$45.2"`，<$1 `"$0.0000"→"$0"`、`"$0.0038"` 有效精度保留；`credits`/`used_percent`/`worst_pct`/`duration` 同步走 `trim_f`；`tokens_compact` <1万分支改走 `tokens_exact` 保千分位（`9999`→`"9,999"`）。
+- **验证**：UIA 实测明细页成本列 `$0.0000`→`$0`；新增 2 测试（`trim_f` 边界含 prec=0 保整数零、四舍五入越界 `0.00004`→`"0"`；`usd` 各量级）；**46/46 测试、clippy `-D warnings` 0**。

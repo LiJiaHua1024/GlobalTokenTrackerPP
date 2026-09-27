@@ -275,14 +275,27 @@ pub mod fmt {
         out
     }
 
-    pub fn usd(v: f64) -> String {
-        if v >= 100.0 {
-            format!("${:.0}", v)
-        } else if v >= 1.0 {
-            format!("${:.2}", v)
-        } else {
-            format!("${:.4}", v)
+    /// Float with `prec` decimals then strip insignificant zeros/dot:
+    /// trim_f(0.5,4)="0.5", trim_f(45.20,2)="45.2", trim_f(0.0,4)="0".
+    /// prec=0 skips trimming so "180" never degrades to "18".
+    pub fn trim_f(v: f64, prec: usize) -> String {
+        let s = format!("{v:.prec$}");
+        if !s.contains('.') {
+            return s;
         }
+        let t = s.trim_end_matches('0').trim_end_matches('.');
+        if t.is_empty() { "0".into() } else { t.into() }
+    }
+
+    pub fn usd(v: f64) -> String {
+        let prec = if v >= 100.0 {
+            0
+        } else if v >= 1.0 {
+            2
+        } else {
+            4
+        };
+        format!("${}", trim_f(v, prec))
     }
 
     /// Compact count for scan-first reading — 万/亿 at >=10_000 with one
@@ -299,7 +312,7 @@ pub mod fmt {
         } else if n >= 10_000 {
             format!("{}万", trim(n as f64 / 1e4))
         } else {
-            n.to_string()
+            tokens_exact(n)
         }
     }
 
@@ -354,7 +367,7 @@ pub mod fmt {
         if ms >= 60_000 {
             format!("{}m{}s", ms / 60_000, (ms % 60_000) / 1000)
         } else if ms >= 1000 {
-            format!("{:.1}s", ms as f64 / 1000.0)
+            format!("{}s", trim_f(ms as f64 / 1000.0, 1))
         } else {
             format!("{ms}ms")
         }
@@ -372,11 +385,35 @@ mod tests {
         assert_eq!(fmt::tokens_exact(1_000), "1,000");
         assert_eq!(fmt::tokens_exact(1_730_848_235), "1,730,848,235");
         assert_eq!(fmt::tokens_exact(13_101_054_884), "13,101,054,884");
-        assert_eq!(fmt::tokens_compact(9_999), "9999");
+        assert_eq!(fmt::tokens_compact(9_999), "9,999");
         assert_eq!(fmt::tokens_compact(10_000), "1万");
         assert_eq!(fmt::tokens_compact(64_425), "6.4万");
         assert_eq!(fmt::tokens_compact(300_000), "30万");
         assert_eq!(fmt::tokens_compact(1_730_848_235), "17.3亿");
+    }
+
+    #[test]
+    fn trim_f_strips_insignificant_zeros() {
+        assert_eq!(fmt::trim_f(0.5, 4), "0.5");
+        assert_eq!(fmt::trim_f(0.0038, 4), "0.0038");
+        assert_eq!(fmt::trim_f(0.0, 4), "0");
+        assert_eq!(fmt::trim_f(45.20, 2), "45.2");
+        assert_eq!(fmt::trim_f(45.25, 2), "45.25");
+        assert_eq!(fmt::trim_f(180.0, 0), "180"); // prec=0 must not eat integer zeros
+        assert_eq!(fmt::trim_f(100.0, 1), "100");
+        assert_eq!(fmt::trim_f(2.0, 1), "2");
+        assert_eq!(fmt::trim_f(0.00004, 4), "0"); // below precision → clean zero
+    }
+
+    #[test]
+    fn usd_trims_trailing_zeros() {
+        assert_eq!(fmt::usd(0.0), "$0");
+        assert_eq!(fmt::usd(0.5), "$0.5");
+        assert_eq!(fmt::usd(0.01), "$0.01");
+        assert_eq!(fmt::usd(0.0038), "$0.0038");
+        assert_eq!(fmt::usd(45.2), "$45.2");
+        assert_eq!(fmt::usd(45.25), "$45.25");
+        assert_eq!(fmt::usd(180.0), "$180");
     }
 
     #[test]

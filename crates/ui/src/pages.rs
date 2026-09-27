@@ -860,7 +860,7 @@ fn event_row(theme: &Theme, r: &EventRow, zebra: bool) -> View {
     let mut cost = r
         .cost_usd
         .map(fmt::usd)
-        .or_else(|| r.credits.map(|c| format!("{c:.1}cr")))
+        .or_else(|| r.credits.map(|c| format!("{}cr", fmt::trim_f(c, 1))))
         .unwrap_or_else(|| "—".into());
     match r.cost_source.as_deref() {
         Some("estimated") => cost.push_str(" ≈"),
@@ -1021,7 +1021,7 @@ fn quota_row(theme: &Theme, q: &globaltokentracker_core::store::QuotaRow) -> Vie
             1,
             w::badge(
                 theme,
-                format!("{pct:.1}%"),
+                format!("{}%", fmt::trim_f(pct, 1)),
                 if pct > 80.0 {
                     w::BadgeTone::Danger
                 } else if pct > 50.0 {
@@ -1146,7 +1146,7 @@ pub fn quota_page(
                             1,
                             w::badge(
                                 theme,
-                                format!("{worst:.1}%"),
+                                format!("{}%", fmt::trim_f(worst, 1)),
                                 if worst > 80.0 {
                                     w::BadgeTone::Danger
                                 } else if worst > 50.0 {
