@@ -71,16 +71,19 @@ pub struct Shell {
     range: Range,
     /// Checked tools for the stats filter; `None` = all (persisted in ui.json).
     app_filter: Option<Vec<String>>,
+    /// Checked display-model names; `None` = all (persisted in ui.json).
+    model_filter: Option<Vec<String>>,
     /// Which filter-strip dropdown is open (in-content overlay, not a system
     /// Flyout — so no FlyoutPresenter surface stroke/shadow halo).
     open_menu: Option<MenuKind>,
 }
 
-/// Which filter-strip picker is open — `Tools` (multi-select checkboxes) or
-/// `Refresh` (single-select cadence radios).
+/// Which filter-strip picker is open — `Tools`/`Models` are multi-select
+/// checkbox lists, `Refresh` is single-select cadence radios.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MenuKind {
     Tools,
+    Models,
     Refresh,
 }
 
@@ -109,6 +112,10 @@ pub enum Msg {
     /// Bulk tool-scope set from the filter flyout — `None` = all tools,
     /// `Some(vec![])` = deliberately empty view.
     SetApps(Option<Vec<String>>),
+    /// Model checkbox toggled (display-model name, new checked state).
+    ToggleModel(String, bool),
+    /// Bulk model-scope set — `None` = all models, `Some(vec![])` = empty view.
+    SetModels(Option<Vec<String>>),
     /// Refresh-cadence pick from the picker flyout (seconds).
     SetRefreshSecs(u64),
     /// Filter-strip pill clicked — opens its overlay, or closes it when the
@@ -180,7 +187,11 @@ fn db_path() -> PathBuf {
     default_db_path()
 }
 
-fn load_all(range: Range, apps: Option<Vec<String>>) -> Result<Snapshot, String> {
+fn load_all(
+    range: Range,
+    apps: Option<Vec<String>>,
+    models: Option<Vec<String>>,
+) -> Result<Snapshot, String> {
     let store = Store::open(&db_path()).map_err(|e| e.to_string())?;
     let engine = Engine::new(store).map_err(|e| e.to_string())?;
     let t = std::time::Instant::now();
@@ -199,11 +210,11 @@ fn load_all(range: Range, apps: Option<Vec<String>>) -> Result<Snapshot, String>
     }
     let vm = engine
         .store
-        .overview(range, apps.as_deref())
+        .overview(range, apps.as_deref(), models.as_deref())
         .map_err(|e| e.to_string())?;
     let d = engine
         .store
-        .detail(0, DETAIL_PAGE_SIZE, apps.as_deref())
+        .detail(0, DETAIL_PAGE_SIZE, apps.as_deref(), models.as_deref())
         .map_err(|e| e.to_string())?;
     let sources = engine.store.source_health().map_err(|e| e.to_string())?;
     let prices = engine.store.price_rows(5000).map_err(|e| e.to_string())?;
@@ -280,7 +291,8 @@ impl Component for Shell {
         let config = UiConfig::load();
         let range = Range::from_key(&config.range);
         let app_filter = config.apps.clone();
-        context.spawn_background(move |_| match load_all(range, app_filter) {
+        let model_filter = config.models.clone();
+        context.spawn_background(move |_| match load_all(range, app_filter, model_filter) {
             Ok(s) => Msg::Loaded(Box::new(s)),
             Err(e) => Msg::Failed(e),
         });
@@ -307,6 +319,7 @@ impl Component for Shell {
             pending_rescan: false,
             last_error: None,
             app_filter: config.apps.clone(),
+            model_filter: config.models.clone(),
             config,
             range,
             theme,
@@ -332,6 +345,18 @@ impl Component for Shell {
                     }
                     if self.app_filter != self.config.apps {
                         self.config.apps = self.app_filter.clone();
+                        self.config.save();
+                    }
+                }
+                // Same reconcile for models: the checklist is scoped by the
+                // app filter, so unchecking a tool can retire model names.
+                if let Some(f) = &mut self.model_filter {
+                    f.retain(|m| s.vm.models.contains(m));
+                    if s.vm.models.iter().all(|m| f.contains(m)) {
+                        self.model_filter = None;
+                    }
+                    if self.model_filter != self.config.models {
+                        self.config.models = self.model_filter.clone();
                         self.config.save();
                     }
                 }
@@ -425,6 +450,41 @@ impl Component for Shell {
                 self.scanning = false;
                 self.start_scan(context);
             }
+            Msg::ToggleModel(model, on) => {
+                let all: Vec<String> = self
+                    .snap
+                    .as_ref()
+                    .map(|s| s.vm.models.clone())
+                    .unwrap_or_default();
+                // Same collapse rule as tools: full coverage → None.
+                let mut set: std::collections::BTreeSet<String> = self
+                    .model_filter
+                    .clone()
+                    .unwrap_or_else(|| all.to_vec())
+                    .into_iter()
+                    .collect();
+                if on {
+                    set.insert(model);
+                } else {
+                    set.remove(&model);
+                }
+                self.model_filter = if all.iter().all(|m| set.contains(m)) {
+                    None
+                } else {
+                    Some(set.into_iter().collect())
+                };
+                self.config.models = self.model_filter.clone();
+                self.config.save();
+                self.scanning = false;
+                self.start_scan(context);
+            }
+            Msg::SetModels(filter) => {
+                self.model_filter = filter;
+                self.config.models = self.model_filter.clone();
+                self.config.save();
+                self.scanning = false;
+                self.start_scan(context);
+            }
             Msg::SetRefreshSecs(secs) => {
                 if REFRESH_OPTIONS.iter().any(|(s, _)| *s == secs)
                     && secs != self.config.refresh_secs
@@ -488,10 +548,11 @@ impl Component for Shell {
             Msg::DetailPage(page) => {
                 self.open_menu = None;
                 let apps = self.app_filter.clone();
+                let models = self.model_filter.clone();
                 context.spawn_background(move |_| {
-                    match Store::open(&db_path())
-                        .and_then(|s| s.detail(page, DETAIL_PAGE_SIZE, apps.as_deref()))
-                    {
+                    match Store::open(&db_path()).and_then(|s| {
+                        s.detail(page, DETAIL_PAGE_SIZE, apps.as_deref(), models.as_deref())
+                    }) {
                         Ok(d) => Msg::DetailLoaded(d.rows, d.total_events, page),
                         Err(e) => Msg::Failed(e.to_string()),
                     }
@@ -628,15 +689,16 @@ impl Component for Shell {
             ));
         // Filter chrome is a pinned strip between title bar and scrolling
         // page on the data pages (overview/detail); it collapses elsewhere.
+        let chrome_state = ChromeState {
+            apps: &self.app_filter,
+            models: &self.model_filter,
+            refresh_secs: self.config.refresh_secs,
+            open: self.open_menu,
+        };
         let chrome: View = match (self.page, snap) {
-            (Page::Overview | Page::Detail, Some(s)) => filter_chrome(
-                s,
-                theme,
-                &self.app_filter,
-                self.config.refresh_secs,
-                self.open_menu,
-                context,
-            ),
+            (Page::Overview | Page::Detail, Some(s)) => {
+                filter_chrome(s, theme, &chrome_state, context)
+            }
             _ => Border::new().into(),
         };
         let chrome = Border::new().grid_row(1).content(chrome);
@@ -645,7 +707,7 @@ impl Component for Shell {
         // null-background elements, so it never swallows clicks).
         let overlay: View = match (self.page, snap, self.open_menu) {
             (Page::Overview | Page::Detail, Some(s), Some(kind)) => {
-                dropdown_overlay(s, theme, &self.app_filter, self.config.refresh_secs, kind, context)
+                dropdown_overlay(s, theme, &chrome_state, kind, context)
             }
             _ => Border::new().grid_row(2).into(),
         };
@@ -710,7 +772,8 @@ impl Shell {
             self.scanning = true;
             let range = self.range;
             let apps = self.app_filter.clone();
-            context.spawn_background(move |_| match load_all(range, apps) {
+            let models = self.model_filter.clone();
+            context.spawn_background(move |_| match load_all(range, apps, models) {
                 Ok(s) => Msg::Loaded(Box::new(s)),
                 Err(e) => Msg::Failed(e),
             });

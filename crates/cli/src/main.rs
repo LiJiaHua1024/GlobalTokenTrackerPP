@@ -104,7 +104,10 @@ fn main() -> Result<()> {
         Cmd::Reconcile { ccswitch } => reconcile(&engine, ccswitch)?,
         Cmd::Sources => {
             println!("adapters: {}", engine.adapter_ids().join(", "));
-            println!("events in ledger: {}", engine.store.event_count(None)?);
+            println!(
+                "events in ledger: {}",
+                engine.store.event_count(None, None)?
+            );
         }
         Cmd::Rollup => {
             let off = local_offset();
@@ -269,7 +272,7 @@ fn fmt_tok(n: u64) -> String {
 
 fn report(engine: &Engine, span: &str) -> Result<()> {
     let (f, t) = span_ms(span);
-    let tot = engine.store.totals(f, t, None)?;
+    let tot = engine.store.totals(f, t, None, None)?;
     println!(
         "\n== {span} ==  events {} | in {} out {} reasoning {} cacheR {} cacheW {} | credits {:.2} | est. ${:.2}\n",
         tot.events,
@@ -301,7 +304,7 @@ fn report(engine: &Engine, span: &str) -> Result<()> {
     }
     let rows: Vec<Row> = engine
         .store
-        .by_app(f, t, None)?
+        .by_app(f, t, None, None)?
         .into_iter()
         .map(|a| Row {
             app: a.app,

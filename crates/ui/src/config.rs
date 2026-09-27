@@ -39,6 +39,9 @@ pub struct UiConfig {
     /// Checked tool names for the app filter; `None`/absent = all tools.
     /// `Some(empty)` = user unchecked everything (an honest empty view).
     pub apps: Option<Vec<String>>,
+    /// Checked display-model names for the model filter — same semantics as
+    /// `apps` (`None` = all, `Some(empty)` = deliberately empty view).
+    pub models: Option<Vec<String>>,
     /// Periodic refresh cadence in seconds; `0` = file-watch only.
     #[serde(default = "default_refresh_secs")]
     pub refresh_secs: u64,
@@ -56,6 +59,7 @@ impl Default for UiConfig {
             theme: ThemeConfig::default(),
             range: String::new(),
             apps: None,
+            models: None,
             refresh_secs: DEFAULT_REFRESH_SECS,
             pages: BTreeMap::new(),
         }

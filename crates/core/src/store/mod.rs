@@ -317,7 +317,7 @@ mod tests {
             .prune_events(BOUNDARY_MS + 86_400_000 * 90)
             .unwrap();
         assert_eq!(pruned, 1);
-        assert_eq!(s.event_count(None).unwrap(), 1);
+        assert_eq!(s.event_count(None, None).unwrap(), 1);
         // Both rollup rows survive — the pruned day's aggregate included.
         let kept: i64 = s
             .conn()
@@ -335,7 +335,7 @@ mod tests {
             .unwrap();
         s.upsert_event(&ev_ts("h3", 1_736_937_000_000 + 3_000_000))
             .unwrap();
-        let rows = s.hourly(0, "+00:00", None).unwrap();
+        let rows = s.hourly(0, "+00:00", None, None).unwrap();
         let labels: Vec<&str> = rows.iter().map(|r| r.date.as_str()).collect();
         // h1+h2 fold into one 10:00 bucket; h3 lands in 11:00.
         assert_eq!(labels, ["10:00", "11:00"]);
@@ -347,19 +347,27 @@ mod tests {
         let s = Store::open_memory().unwrap();
         let mut a = ev_ts("a1", BOUNDARY_MS);
         a.app = "claude".into();
+        a.model = Some("opus".into());
         let mut b = ev_ts("b1", BOUNDARY_MS);
         b.app = "codex".into();
+        b.model = Some("gpt-x".into());
         s.upsert_event(&a).unwrap();
         s.upsert_event(&b).unwrap();
         let only = |name: &str| vec![name.to_string()];
         // None = all; Some(subset) scopes; Some(empty) = nothing.
-        assert_eq!(s.event_count(None).unwrap(), 2);
-        assert_eq!(s.event_count(Some(only("claude").as_slice())).unwrap(), 1);
-        assert_eq!(s.event_count(Some(&[])).unwrap(), 0);
-        let t = s.totals(None, None, Some(only("codex").as_slice())).unwrap();
+        assert_eq!(s.event_count(None, None).unwrap(), 2);
+        assert_eq!(
+            s.event_count(Some(only("claude").as_slice()), None)
+                .unwrap(),
+            1
+        );
+        assert_eq!(s.event_count(Some(&[]), None).unwrap(), 0);
+        let t = s
+            .totals(None, None, Some(only("codex").as_slice()), None)
+            .unwrap();
         assert_eq!(t.events, 1);
         assert_eq!(
-            s.by_app(None, None, Some(only("claude").as_slice()))
+            s.by_app(None, None, Some(only("claude").as_slice()), None)
                 .unwrap()
                 .len(),
             1
@@ -368,8 +376,63 @@ mod tests {
             s.app_names().unwrap(),
             vec!["claude".to_string(), "codex".to_string()]
         );
-        let rows = s.events_page(10, 0, Some(only("codex").as_slice())).unwrap();
+        let rows = s
+            .events_page(10, 0, Some(only("codex").as_slice()), None)
+            .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].app, "codex");
+    }
+
+    #[test]
+    fn model_filter_scopes_queries() {
+        let s = Store::open_memory().unwrap();
+        let mut a = ev_ts("a1", BOUNDARY_MS);
+        a.model = Some("opus".into());
+        let mut b = ev_ts("b1", BOUNDARY_MS);
+        b.app = "codex".into();
+        b.model = Some("gpt-x".into());
+        let mut c = ev_ts("c1", BOUNDARY_MS); // no model → falls into "?"
+        c.app = "codex".into();
+        s.upsert_event(&a).unwrap();
+        s.upsert_event(&b).unwrap();
+        s.upsert_event(&c).unwrap();
+        let only = |name: &str| vec![name.to_string()];
+        // Distinct display-model list: named models + the "?" bucket.
+        assert_eq!(
+            s.model_names(None).unwrap(),
+            vec!["?".to_string(), "gpt-x".to_string(), "opus".to_string()]
+        );
+        // Named model scopes; "?" is filterable too.
+        assert_eq!(
+            s.event_count(None, Some(only("opus").as_slice())).unwrap(),
+            1
+        );
+        assert_eq!(
+            s.event_count(None, Some(only("?").as_slice())).unwrap(),
+            1
+        );
+        assert_eq!(s.event_count(None, Some(&[])).unwrap(), 0);
+        // Filters combine: app × model intersects honestly.
+        let t = s
+            .totals(
+                None,
+                None,
+                Some(only("claude").as_slice()),
+                Some(only("gpt-x").as_slice()),
+            )
+            .unwrap();
+        assert_eq!(t.events, 0);
+        // model_names cascades off the app filter: scoping to an app that
+        // only emits "opus" drops "gpt-x" from the checklist.
+        assert_eq!(
+            s.model_names(Some(only("claude").as_slice())).unwrap(),
+            vec!["opus".to_string()]
+        );
+        // Detail rows honor the model filter.
+        let rows = s
+            .events_page(10, 0, None, Some(only("gpt-x").as_slice()))
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].model.as_deref(), Some("gpt-x"));
     }
 }

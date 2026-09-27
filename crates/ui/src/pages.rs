@@ -374,37 +374,50 @@ fn overview_widget(
 }
 
 /// Chrome-strip geometry — labels are width-pinned so the overlay panel can
-/// sit under its button without measuring: tools button starts at
-/// `CHROME_LEFT + LABEL_W + GROUP_GAP`, refresh at that plus the tools group
-/// width and the inter-group gap.
+/// sit under its button without measuring. Strip order: 工具 → 模型 → 刷新
+/// (data filters first, the cadence setting last).
 const CHROME_LEFT: f64 = 24.0;
 const LABEL_W: f64 = 28.0;
 const GROUP_GAP: f64 = 8.0;
 const PICKER_GAP: f64 = 20.0;
 const TOOLS_BTN_W: f64 = 104.0;
+const MODELS_BTN_W: f64 = 104.0;
 const REFRESH_BTN_W: f64 = 120.0;
 const TOOLS_PANEL_X: f64 = CHROME_LEFT + LABEL_W + GROUP_GAP;
-const REFRESH_PANEL_X: f64 =
+const MODELS_PANEL_X: f64 =
     TOOLS_PANEL_X + TOOLS_BTN_W + PICKER_GAP + LABEL_W + GROUP_GAP;
+const REFRESH_PANEL_X: f64 =
+    MODELS_PANEL_X + MODELS_BTN_W + PICKER_GAP + LABEL_W + GROUP_GAP;
 
-/// Filter strip shared by overview + detail: tool-scope dropdown then the
-/// refresh-cadence picker, kept on one row that cannot overflow. Buttons
-/// toggle an in-content overlay (`dropdown_overlay`) instead of a system
-/// Flyout — see `Shell::open_menu`.
+/// Filter-strip state bundle — keeps `filter_chrome`/`dropdown_overlay`
+/// signatures tidy as more pickers join.
+pub struct ChromeState<'a> {
+    pub apps: &'a Option<Vec<String>>,
+    pub models: &'a Option<Vec<String>>,
+    pub refresh_secs: u64,
+    pub open: Option<MenuKind>,
+}
+
+/// Pill summary for a multi-select checklist: `None` = all, `Some([])` =
+/// deliberately empty, `Some(f)` = partial coverage.
+fn check_summary(filter: &Option<Vec<String>>, total: usize) -> String {
+    match filter {
+        None => "全部".to_string(),
+        Some(f) if f.is_empty() => "未选".into(),
+        Some(f) => format!("已选 {}/{total}", f.len()),
+    }
+}
+
+/// Filter strip shared by overview + detail: tool-scope, model-scope, and
+/// refresh-cadence pickers on one row that cannot overflow. Buttons toggle an
+/// in-content overlay (`dropdown_overlay`) instead of a system Flyout — see
+/// `Shell::open_menu`.
 pub fn filter_chrome(
     s: &Snapshot,
     theme: &Theme,
-    filter: &Option<Vec<String>>,
-    refresh_secs: u64,
-    open: Option<MenuKind>,
+    state: &ChromeState,
     ctx: &mut ViewContext<Shell>,
 ) -> View {
-    let total = s.vm.apps.len();
-    let summary = match filter {
-        None => "全部".to_string(),
-        Some(f) if f.is_empty() => "未选".into(),
-        Some(f) => format!("已选 {f_len}/{total}", f_len = f.len()),
-    };
     StackPanel::new()
         .orientation(Orientation::Horizontal)
         .spacing(PICKER_GAP)
@@ -412,17 +425,25 @@ pub fn filter_chrome(
         .children((
             picker_button(
                 theme,
-                summary,
+                check_summary(state.apps, s.vm.apps.len()),
                 TOOLS_BTN_W,
-                open == Some(MenuKind::Tools),
+                state.open == Some(MenuKind::Tools),
                 MenuKind::Tools,
                 ctx,
             ),
             picker_button(
                 theme,
-                refresh_label(refresh_secs).to_string(),
+                check_summary(state.models, s.vm.models.len()),
+                MODELS_BTN_W,
+                state.open == Some(MenuKind::Models),
+                MenuKind::Models,
+                ctx,
+            ),
+            picker_button(
+                theme,
+                refresh_label(state.refresh_secs).to_string(),
                 REFRESH_BTN_W,
-                open == Some(MenuKind::Refresh),
+                state.open == Some(MenuKind::Refresh),
                 MenuKind::Refresh,
                 ctx,
             ),
@@ -441,6 +462,7 @@ fn picker_button(
 ) -> View {
     let (label, a11y) = match kind {
         MenuKind::Tools => ("工具", "工具筛选"),
+        MenuKind::Models => ("模型", "模型筛选"),
         MenuKind::Refresh => ("刷新", "刷新频率"),
     };
     StackPanel::new()
@@ -525,6 +547,63 @@ fn tools_menu_items(
     col
 }
 
+/// Model-checkbox rows plus the select-all / clear footer. The list is
+/// capped + scrollable — dozens of distinct models land here and a fixed
+/// height keeps the card from running off the window. `s.vm.models` is
+/// already scoped by the tool filter (cascade), not by the model filter.
+fn models_menu_items(
+    s: &Snapshot,
+    theme: &Theme,
+    filter: &Option<Vec<String>>,
+    ctx: &mut ViewContext<Shell>,
+) -> Vec<View> {
+    let mut checks: Vec<View> = Vec::with_capacity(s.vm.models.len());
+    for name in &s.vm.models {
+        let checked = filter.as_ref().is_none_or(|f| f.contains(name));
+        let n = name.clone();
+        checks.push(
+            CheckBox::new()
+                .is_checked(checked)
+                .on_is_checked_changed(ctx.callback(move |on: bool| {
+                    Msg::ToggleModel(n.clone(), on)
+                }))
+                .content(
+                    TextBlock::new()
+                        .text(truncate(name, 36))
+                        .font_size(theme.body_size)
+                        .tooltip(name.clone()),
+                ),
+        );
+    }
+    vec![
+        ScrollViewer::new()
+            .max_height(300.0)
+            .vertical_scroll_bar_visibility(ScrollBarVisibility::Auto)
+            .content(
+                StackPanel::new()
+                    .orientation(Orientation::Vertical)
+                    .spacing(10.0)
+                    .keyed_children(keyed(checks)),
+            ),
+        Border::new()
+            .height(1.0)
+            .background(theme.divider)
+            .margin(Thickness::xy(0.0, 6.0))
+            .into(),
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(8.0)
+            .children((
+                Button::new()
+                    .on_click(ctx.callback(|_| Msg::SetModels(None)))
+                    .content("全选"),
+                Button::new()
+                    .on_click(ctx.callback(|_| Msg::SetModels(Some(Vec::new()))))
+                    .content("清空"),
+            )),
+    ]
+}
+
 /// Refresh-cadence radio rows — single-select, so a pick light-dismisses the
 /// panel (`SetRefreshSecs` clears `open_menu`). `0` seconds = file-watch only.
 fn refresh_menu_items(
@@ -564,14 +643,20 @@ fn refresh_menu_items(
 pub fn dropdown_overlay(
     s: &Snapshot,
     theme: &Theme,
-    filter: &Option<Vec<String>>,
-    secs: u64,
+    state: &ChromeState,
     open: MenuKind,
     ctx: &mut ViewContext<Shell>,
 ) -> View {
     let (x, items) = match open {
-        MenuKind::Tools => (TOOLS_PANEL_X, tools_menu_items(s, theme, filter, ctx)),
-        MenuKind::Refresh => (REFRESH_PANEL_X, refresh_menu_items(theme, secs, ctx)),
+        MenuKind::Tools => (TOOLS_PANEL_X, tools_menu_items(s, theme, state.apps, ctx)),
+        MenuKind::Models => (
+            MODELS_PANEL_X,
+            models_menu_items(s, theme, state.models, ctx),
+        ),
+        MenuKind::Refresh => (
+            REFRESH_PANEL_X,
+            refresh_menu_items(theme, state.refresh_secs, ctx),
+        ),
     };
     // Two-layer fill: `card_bg` is a *translucent* Fluent layer brush — over
     // page content it lets the rows beneath bleed through (reads as a broken

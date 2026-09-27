@@ -110,14 +110,15 @@ pub struct DailyRow {
 
 impl super::Store {
     /// Totals over `[from_ms, to_ms)`; `None,None` = all time.
-    /// `apps` restricts to the named tools; empty = no filter.
+    /// `apps`/`models` restrict scope; `Some(empty)` = honest empty result.
     pub fn totals(
         &self,
         from_ms: Option<i64>,
         to_ms: Option<i64>,
         apps: Option<&[String]>,
+        models: Option<&[String]>,
     ) -> Result<Totals> {
-        let (w, p) = scope_where(from_ms, to_ms, apps);
+        let (w, p) = scope_where(from_ms, to_ms, apps, models);
         self.conn()
             .query_row(
                 &format!(
@@ -151,8 +152,9 @@ impl super::Store {
         from_ms: Option<i64>,
         to_ms: Option<i64>,
         apps: Option<&[String]>,
+        models: Option<&[String]>,
     ) -> Result<Vec<AppSummary>> {
-        let (w, p) = scope_where(from_ms, to_ms, apps);
+        let (w, p) = scope_where(from_ms, to_ms, apps, models);
         let mut st = self.conn().prepare(&format!(
             "SELECT app, COUNT(*),
                     COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
@@ -185,6 +187,7 @@ impl super::Store {
         to_ms: Option<i64>,
         utc_offset: &str,
         apps: Option<&[String]>,
+        models: Option<&[String]>,
     ) -> Result<Vec<DailyRow>> {
         let b = utc_offset.as_bytes();
         anyhow::ensure!(
@@ -194,7 +197,7 @@ impl super::Store {
                 && [1, 2, 4, 5].iter().all(|&i| b[i].is_ascii_digit()),
             "invalid utc_offset: {utc_offset}"
         );
-        let (w, p) = scope_where(from_ms, to_ms, apps);
+        let (w, p) = scope_where(from_ms, to_ms, apps, models);
         let mut st = self.conn().prepare(&format!(
             "SELECT strftime('%Y-%m-%d', ts_start/1000, 'unixepoch', '{utc_offset}') AS d, app,
                     COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
@@ -229,6 +232,7 @@ impl super::Store {
         from_ms: i64,
         utc_offset: &str,
         apps: Option<&[String]>,
+        models: Option<&[String]>,
     ) -> Result<Vec<DailyRow>> {
         let b = utc_offset.as_bytes();
         anyhow::ensure!(
@@ -238,7 +242,7 @@ impl super::Store {
                 && [1, 2, 4, 5].iter().all(|&i| b[i].is_ascii_digit()),
             "invalid utc_offset: {utc_offset}"
         );
-        let (w, p) = scope_where(Some(from_ms), None, apps);
+        let (w, p) = scope_where(Some(from_ms), None, apps, models);
         let mut st = self.conn().prepare(&format!(
             "SELECT strftime('%H:00', ts_start/1000, 'unixepoch', '{utc_offset}') AS h, app,
                     COUNT(*), COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
@@ -273,6 +277,7 @@ impl super::Store {
         hourly: bool,
         utc_offset: &str,
         apps: Option<&[String]>,
+        models: Option<&[String]>,
     ) -> Result<Vec<BucketModelRow>> {
         let b = utc_offset.as_bytes();
         anyhow::ensure!(
@@ -283,10 +288,10 @@ impl super::Store {
             "invalid utc_offset: {utc_offset}"
         );
         let fmt = if hourly { "%H:00" } else { "%Y-%m-%d" };
-        let (w, p) = scope_where(from_ms, None, apps);
+        let (w, p) = scope_where(from_ms, None, apps, models);
         let mut st = self.conn().prepare(&format!(
             "SELECT strftime('{fmt}', ts_start/1000, 'unixepoch', '{utc_offset}') AS k,
-                    COALESCE(NULLIF(model,''), NULLIF(request_model,''), NULLIF(pricing_model,''), '?'),
+                    {MODEL_EXPR},
                     COUNT(*),
                     COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens),0),
                     COALESCE(SUM(cost_usd),0)
@@ -445,15 +450,16 @@ impl super::Store {
         Ok(())
     }
 
-    /// Detail-page rows: newest events first. `apps` scopes to the checked
-    /// tools; empty = all.
+    /// Detail-page rows: newest events first. `apps`/`models` scope to the
+    /// checked sets; `None` = unfiltered.
     pub fn events_page(
         &self,
         limit: i64,
         offset: i64,
         apps: Option<&[String]>,
+        models: Option<&[String]>,
     ) -> Result<Vec<EventRow>> {
-        let (w, mut p) = scope_where(None, None, apps);
+        let (w, mut p) = scope_where(None, None, apps, models);
         let (li, oi) = (p.len() + 1, p.len() + 2);
         p.push(limit.into());
         p.push(offset.into());
@@ -499,8 +505,12 @@ impl super::Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
-    pub fn event_count(&self, apps: Option<&[String]>) -> Result<u64> {
-        let (w, p) = scope_where(None, None, apps);
+    pub fn event_count(
+        &self,
+        apps: Option<&[String]>,
+        models: Option<&[String]>,
+    ) -> Result<u64> {
+        let (w, p) = scope_where(None, None, apps, models);
         Ok(self.conn().query_row(
             &format!("SELECT COUNT(*) FROM usage_events {w}"),
             rusqlite::params_from_iter(p.iter()),
@@ -514,6 +524,20 @@ impl super::Store {
             .conn()
             .prepare("SELECT DISTINCT app FROM usage_events ORDER BY app")?;
         let rows = st.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Distinct display-model names (`MODEL_EXPR`), scoped by `apps` only —
+    /// the model checklist cascades from the tool selection but never hides
+    /// models because of the model filter itself.
+    pub fn model_names(&self, apps: Option<&[String]>) -> Result<Vec<String>> {
+        let (w, p) = scope_where(None, None, apps, None);
+        let mut st = self.conn().prepare(&format!(
+            "SELECT DISTINCT {MODEL_EXPR} FROM usage_events {w} ORDER BY 1"
+        ))?;
+        let rows = st.query_map(rusqlite::params_from_iter(p.iter()), |r| {
+            r.get::<_, String>(0)
+        })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 }
@@ -606,16 +630,25 @@ impl super::Store {
 /// Positional `?1/?2/…` params bound in order — never mix with other
 /// parameter styles in one statement.
 fn time_where(from_ms: Option<i64>, to_ms: Option<i64>) -> (String, Vec<rusqlite::types::Value>) {
-    scope_where(from_ms, to_ms, None)
+    scope_where(from_ms, to_ms, None, None)
 }
 
-/// Time range + app-set filter in one WHERE. `apps` `None` → no app clause;
-/// `Some(list)` → `app IN (?,?,…)` bound as params; `Some(empty)` (user
-/// unchecked every tool) → `WHERE 0`, an honest empty result.
+/// The display-model identity: first non-empty of model → request_model →
+/// pricing_model, else "?". The model dropdown lists these names and filters
+/// on the same expression, so checkbox labels, detail rows, and WHERE clauses
+/// all agree on what "the model" is.
+pub const MODEL_EXPR: &str =
+    "COALESCE(NULLIF(model,''), NULLIF(request_model,''), NULLIF(pricing_model,''), '?')";
+
+/// Time range + app-set + model-set filter in one WHERE. `apps`/`models`
+/// `None` → no clause; `Some(list)` → `IN (?,?,…)` bound as params;
+/// `Some(empty)` (user unchecked everything) → `WHERE 0`, an honest empty
+/// result.
 fn scope_where(
     from_ms: Option<i64>,
     to_ms: Option<i64>,
     apps: Option<&[String]>,
+    models: Option<&[String]>,
 ) -> (String, Vec<rusqlite::types::Value>) {
     let mut conds: Vec<String> = Vec::new();
     let mut params: Vec<rusqlite::types::Value> = Vec::new();
@@ -636,6 +669,17 @@ fn scope_where(
                 .collect();
             conds.push(format!("app IN ({})", marks.join(",")));
             params.extend(list.iter().map(|a| a.clone().into()));
+        }
+    }
+    if let Some(list) = models {
+        if list.is_empty() {
+            conds.push("0".into());
+        } else {
+            let marks: Vec<String> = (0..list.len())
+                .map(|i| format!("?{}", params.len() + i + 1))
+                .collect();
+            conds.push(format!("{MODEL_EXPR} IN ({})", marks.join(",")));
+            params.extend(list.iter().map(|m| m.clone().into()));
         }
     }
     if conds.is_empty() {

@@ -348,3 +348,16 @@
   2. `Canvas` 绝对定位 → 弃用，普通 Grid + `Margin` 即可定位，少一层容器。
   3. **Border 指针事件在 reactor 里实际不发**——全透明/半透明 dismiss 层铺满内容区（红底可视化验证覆盖无误）但 `on_pointer_pressed`/`on_pointer_moved` 均不派发；同框架趋势图 hover 也是同一死路（SendInput 真实点击能驱动 CheckBox/Button，唯独 Border 的 Pointer* 路由事件不触发）。放弃点击空白收起，以"操作即收起"替代。
 - **验证（UIA + SendInput 端到端）**：工具/刷新两面板均为不透明暗卡片、无亮边；勾选 zcode 实测翻转 + 面板停留多选；radio 选"10 秒"→ 自动收起 + 按钮标签更新 + `ui.json` 落 `refresh_secs:10`；明细页同样正常；放大截图确认四边仅自绘暗描边。clippy 0、24/24 测试。
+
+## S27 模型筛选下拉 ✅
+
+- **需求**：筛选行加第三个选择器——按模型过滤统计与明细。
+- **修法**：
+  - `scope_where` 加 `models` 维度——WHERE 表达式复用 `MODEL_EXPR`（`COALESCE(NULLIF(model,''),NULLIF(request_model,''),NULLIF(pricing_model,''),'?')`），与趋势桶/明细行的模型口径三处一致；`?` 桶是诚实的"无模型"条目，可勾选。
+  - `model_names(apps)`：**模型列表按当前工具筛选级联收窄**，但不被模型筛选自身隐藏（与工具列表同一条 checkbox 不变式）。
+  - 查询链路 `totals`/`by_app`/`daily`/`hourly`/`bucket_models`/`events_page`/`event_count` 全部加 `models` 参数；`overview`/`detail` 透传；CLI 传 `None`。
+  - UI：`MenuKind::Models` + `Msg::ToggleModel`/`SetModels`（与工具同语义：`None`=全部、`Some([])`=诚实空选、全覆盖塌缩回 `None`）；`config.models` 持久化 `ui.json`；`Loaded` 时 reconcile（剔除消失模型 + 塌缩）。
+  - 面板：CheckBox 列表包 `ScrollViewer` `max_height(300)`（真实库 ~40 模型），全选/清空页脚固定不滚；条目 tooltip 放全名、显示截断 36 字符。
+  - `ChromeState` 打包 filter 状态传参（`filter_chrome`/`dropdown_overlay` 签名不随选择器数量膨胀）。
+- **验证（UIA 端到端）**：面板不透明无亮边、滚动列表生效；取消 `claude-opus-5` → `已选 39/40`、总 tokens 12.4B→8.66B、claude 行 11404→2988 事件；取消 claude 工具 → 模型列表级联剔除全部 `claude-*`、reconcile 后模型筛选塌缩回"全部"；`ui.json` 正确落 `apps`/`models:null`。
+- **测试**：新增 `model_filter_scopes_queries`——覆盖 `?` 桶、命名模型、`Some([])`、app×model 相交、`model_names` 级联、detail 行过滤。25/25 通过，clippy 0。

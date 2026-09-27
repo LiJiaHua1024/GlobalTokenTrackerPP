@@ -91,6 +91,9 @@ pub struct OverviewVm {
     /// All tool names present in the ledger — the app-filter checkbox list
     /// must show tools even when the filter excludes them.
     pub apps: Vec<String>,
+    /// Distinct display-model names scoped by the app filter — the model
+    /// checklist. Same invariant: never hidden by the model filter itself.
+    pub models: Vec<String>,
     pub quotas: Vec<QuotaRow>,
     pub unpriced: Vec<(String, u64)>,
     /// Local UTC offset "+HH:MM" for display.
@@ -119,7 +122,12 @@ fn day_start_ms(days_ago: i64) -> i64 {
 }
 
 impl Store {
-    pub fn overview(&self, range: Range, apps: Option<&[String]>) -> Result<OverviewVm> {
+    pub fn overview(
+        &self,
+        range: Range,
+        apps: Option<&[String]>,
+        models: Option<&[String]>,
+    ) -> Result<OverviewVm> {
         let t0 = day_start_ms(0);
         let start = range.start_ms();
         let tz = local_utc_offset();
@@ -127,7 +135,7 @@ impl Store {
         // tooltip payload (events + top-3 models by tokens).
         let mut buckets: std::collections::BTreeMap<String, TrendBucket> =
             std::collections::BTreeMap::new();
-        for r in self.bucket_models(start, range == Range::Today, &tz, apps)? {
+        for r in self.bucket_models(start, range == Range::Today, &tz, apps, models)? {
             let key = r.bucket.clone();
             let b = buckets.entry(key.clone()).or_insert_with(|| TrendBucket {
                 date: key,
@@ -149,15 +157,16 @@ impl Store {
                 b
             })
             .collect();
-        let span = self.totals(start, None, apps)?;
+        let span = self.totals(start, None, apps, models)?;
         Ok(OverviewVm {
-            today: self.totals(Some(t0), None, apps)?,
+            today: self.totals(Some(t0), None, apps, models)?,
             span,
-            all: self.totals(None, None, apps)?,
+            all: self.totals(None, None, apps, models)?,
             range,
-            by_app: self.by_app(start, None, apps)?,
+            by_app: self.by_app(start, None, apps, models)?,
             daily,
             apps: self.app_names()?,
+            models: self.model_names(apps)?,
             quotas: self.latest_quotas()?,
             unpriced: self.unpriced_models()?,
             tz_offset: tz,
@@ -169,10 +178,11 @@ impl Store {
         page: i64,
         page_size: i64,
         apps: Option<&[String]>,
+        models: Option<&[String]>,
     ) -> Result<DetailVm> {
         Ok(DetailVm {
-            rows: self.events_page(page_size, page * page_size, apps)?,
-            total_events: self.event_count(apps)?,
+            rows: self.events_page(page_size, page * page_size, apps, models)?,
+            total_events: self.event_count(apps, models)?,
         })
     }
 }
