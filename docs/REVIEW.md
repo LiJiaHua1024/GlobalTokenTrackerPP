@@ -281,3 +281,12 @@
 - **修法**：`#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]`——release 走 GUI 子系统无黑窗；debug 保留 console（`cargo run`/`diag!` 开发期输出不丢）。
 - **诊断保留**：`diag_console()`——`GTT_DEBUG=1` 时先 `AttachConsole(ATTACH_PARENT_PROCESS)`（终端里跑输出回父控制台），失败则 `AllocConsole`（双击也能调出日志窗），再 `CreateFileW("CONOUT$")`+`SetStdHandle` 把 stdout/stderr 接进真控制台。无 `GTT_DEBUG` 时完全静默。`eprintln!` 对无效句柄只丢错不 panic，安全。
 - **验证**：release 构建启动后 `Get-CimInstance` 确认**无 conhost 子进程**，窗口渲染完整（截图核对）；子进程零 spawn（core/ui 无 Command 调用），黑窗来源仅此一处。
+
+## S21 Cursor + Qoder 活动级适配器 ✅
+
+- **实地核查结论**：Cursor 服务端计量——`state.vscdb` 的 `cursorDiskKV` 里 7,761 条 `bubbleId:*` 记录的 `tokenCount` 全为 0/0，`requestId` 仅用户气泡携带；`aiCodeTracking.dailyStats.*` 是行数不是 token。Qoder 全程 `--no-session-persistence`，transcript 不落盘，日志只有运行时元数据。**两边都没有本地 token 数据，一律不虚构**——按 Metadata 级适配器接入。
+- **Cursor（Sqlite）**：`cursorDiskKV` 中 `type==1` 的用户气泡=一次提问（64 条），assistant 气泡（type 2，7,697 条）是响应块、灌进来会把事件数放大 ~120× 且无数据——只收用户气泡。`requestId`（空则回退 key 尾段 bubbleId）去重，key 中段提 `composerId` 作 session_id，`modelInfo.modelName`、`createdAt`。水位=`rowid`（key 是 `UNIQUE ON CONFLICT REPLACE`，改写产生新 rowid，更新天然被重扫并被 dedup 收敛）。value 为 BLOB 列，`CAST(value AS BLOB)` 取回 Rust 解析（`json_extract` 对 blob 会报 malformed）。
+- **Qoder（Jsonl）**：`~/.qoder/logs/sessions/<group>/<uuid>/segments/*.jsonl`（collect_files 深度 4——三个中间目录层）。每个 segment 文件恰好一行 `session.config.loaded`（86/86 验证）→一个会话事件：`project_root`/`model`/`interactive` 取出行内字段，`duration_ms`=文件首末行 ts 跨度（session 根 phase 不落盘），dedup=`qoder:{file_stem}`（stem 自带 ts+rand+pid 天然唯一），session_id=父目录 uuid。
+- **引擎门槛**：`is_billable` 之外为 `Capability::Metadata` 适配器放行 `ts_start` 非空的零计量事件——活动观测本身就是信息；Precise 适配器的严格计费门槛不变。
+- **验证**：真机扫描 cursor=64（与 type=1 气泡数一致）、qoder=86（86 文件一一对应）；重扫 +0 零重复；UI 勾选行出现两者，按工具表显示 `cursor · 64 事件 · 0 tok · $0.0000`；24/24 测试、clippy 0。
+- **如实声明**：两工具事件为**会话/提问级活动记录**，token 恒 0、成本归 unpriced/estimated，趋势图按 token 绘柱所以不产生柱形——这是数据真相，不是缺陷。若未来 Cursor/Qoder 本地写出真实 token 字段，适配器可直接扩展映射。

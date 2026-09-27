@@ -158,7 +158,13 @@ impl Engine {
         for (item, from, res) in parsed {
             match res {
                 Ok(outcome) => {
-                    self.ingest(adapter.id(), outcome.events, outcome.quotas, &mut report);
+                    self.ingest(
+                        adapter.id(),
+                        adapter.capability(),
+                        outcome.events,
+                        outcome.quotas,
+                        &mut report,
+                    );
                     report.events_skipped += outcome.skipped;
                     report.files_scanned += 1;
                     let end = from + outcome.consumed;
@@ -185,7 +191,13 @@ impl Engine {
         for item in sqlite {
             match adapter.scan_sqlite(item, &self.store) {
                 Ok(outcome) => {
-                    self.ingest(adapter.id(), outcome.events, outcome.quotas, &mut report);
+                    self.ingest(
+                        adapter.id(),
+                        adapter.capability(),
+                        outcome.events,
+                        outcome.quotas,
+                        &mut report,
+                    );
                     report.events_skipped += outcome.skipped;
                     report.files_scanned += 1;
                 }
@@ -200,12 +212,20 @@ impl Engine {
     fn ingest(
         &self,
         adapter_id: &str,
+        capability: crate::adapters::Capability,
         events: Vec<crate::model::UsageEvent>,
         quotas: Vec<crate::model::QuotaSnapshot>,
         report: &mut ScanReport,
     ) {
         for mut ev in events {
-            if !ev.is_billable() {
+            // Metadata-tier adapters (Cursor/Qoder) deliberately emit
+            // zero-token activity records — the observed session IS the
+            // information. Admit them when they carry a timestamp; precise
+            // adapters keep the strict billable gate to filter noise.
+            let tracked = ev.is_billable()
+                || (capability == crate::adapters::Capability::Metadata
+                    && ev.ts_start.is_some());
+            if !tracked {
                 report.events_skipped += 1;
                 continue;
             }

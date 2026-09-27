@@ -15,9 +15,11 @@ use std::path::PathBuf;
 
 pub mod claude;
 pub mod codex;
+pub mod cursor;
 pub mod devin;
 pub mod grok;
 pub mod opencode;
+pub mod qoder;
 pub mod workbuddy;
 pub mod zcode;
 
@@ -102,6 +104,8 @@ pub fn registry() -> Vec<Box<dyn SourceAdapter>> {
         Box::new(claude::Claude),
         Box::new(codex::Codex),
         Box::new(devin::Devin),
+        Box::new(cursor::Cursor),
+        Box::new(qoder::Qoder),
         Box::new(opencode::OpenCode),
         Box::new(zcode::ZCode),
         Box::new(grok::Grok),
