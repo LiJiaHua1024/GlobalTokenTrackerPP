@@ -214,12 +214,14 @@ pub fn trend_strip(
         .content(windows_canvas::canvas_invalidated(
             &trend.inv,
             move |ctx| {
+            use windows_canvas::{ColorF, Rect, TextAlignment, TextFormat, Vector2};
+            // Clear before the early return — an empty `days` must still wipe
+            // the previous frame, otherwise stale bars linger after filters.
+            ctx.clear(ColorF::TRANSPARENT);
             let (w, h) = (ctx.width, ctx.height);
             if w < 16.0 || h < 24.0 || days.is_empty() {
                 return Ok(());
             }
-            use windows_canvas::{ColorF, Rect, TextAlignment, TextFormat, Vector2};
-            ctx.clear(ColorF::TRANSPARENT);
 
             let tf = TextFormat::new(&family, label_pt)?;
             let tf_r = tf.clone().with_alignment(TextAlignment::Trailing);

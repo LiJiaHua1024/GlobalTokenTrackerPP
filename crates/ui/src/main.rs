@@ -95,6 +95,9 @@ pub enum Msg {
     SetRange(String),
     /// Tool checkbox toggled (app name, new checked state).
     ToggleApp(String, bool),
+    /// Bulk tool-scope set from the filter flyout — `None` = all tools,
+    /// `Some(vec![])` = deliberately empty view.
+    SetApps(Option<Vec<String>>),
     /// Background quota poll finished (rows written, channel errors).
     QuotaDone(usize, Vec<String>),
 }
@@ -381,6 +384,13 @@ impl Component for Shell {
                 } else {
                     Some(set.into_iter().collect())
                 };
+                self.config.apps = self.app_filter.clone();
+                self.config.save();
+                self.scanning = false;
+                self.start_scan(context);
+            }
+            Msg::SetApps(filter) => {
+                self.app_filter = filter;
                 self.config.apps = self.app_filter.clone();
                 self.config.save();
                 self.scanning = false;

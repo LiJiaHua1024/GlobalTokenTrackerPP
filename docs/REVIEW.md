@@ -300,3 +300,19 @@
   2. `BS_AUTOCHECKBOX | BS_OWNERDRAW` 样式位冲突——`0x03|0x0B=0x0B`，AUTO 语义被吞，勾选态 Windows 不维护（BM_GETCHECK 恒 0）→ 复选框改纯 `BS_OWNERDRAW` + Gui 自持 bool，WM_COMMAND 点击翻转 + InvalidateRect 重绘。
   3. `GdiPlus::*` glob 导入的 `Status` 常量 `Ok` 遮蔽 `Result::Ok`——改显式导入列表。
 - **验证**：截图逐项核对（标题间距/勾选态 accent+对勾/按钮圆角无毛刺/编辑框描边/进度条圆角药丸）；BM_CLICK 点击复选框实测翻转；真实发布包端到端安装→完成态（进度条补满 100%）→"启动并关闭"。clippy 0、24/24 测试。
+
+## S23 总览工具筛选改下拉浮出菜单 ✅
+
+- **问题**：`app_checks` 把 9 个工具的 CheckBox 平铺在筛选行，窗口内放不下，右侧超出边界。
+- **修法**：行内平铺 → `Button` + `Flyout`（`FlyoutPlacement::BottomEdgeAlignedLeft`）。按钮常态只显示摘要：`全部`（filter=None）/ `未选`（Some([])）/ `已选 N/9`；浮层内为逐工具 CheckBox + 分隔线 + `全选`/`清空` 快捷键。新增 `Msg::SetApps(Option<Vec<String>>)` 批量设值（None=全选、Some(vec![])=诚实空选），与既有 `Msg::ToggleApp` 走同一条 `app_filter → config.apps 持久化 → start_scan` 路径。按钮加 `automation_name("工具筛选")`（无障碍 + UIA 可测）。
+- **过程中抓到并修掉的真实 bug**：`trend_strip` 的 D2D 绘制闭包在 `days.is_empty()` 时**先于 `ctx.clear` 提前返回**——demand canvas 不重画时旧交换链帧残留，清空筛选后卡片归零但柱形图"幽灵"般还在。改为先 clear 再判空，实测空筛选下图表正确清空。
+- **验证（UIA InvokePattern/TogglePattern 端到端，截图逐项核对）**：
+  - 关闭态为紧凑药丸 `全部 ▾`（64×29），筛选行不再有右溢出；
+  - 浮层弹出含 9 个工具 CheckBox + 分隔线 + 全选/清空，勾选态与 filter 一致；
+  - 清空 → `未选` + 全部卡片 0 + 按工具"暂无数据" + **图表清空**（修复后验证）；
+  - 单勾 claude → `已选 1/9` + 仅 claude 数据（85.9M tok / $31.11）；
+  - 从全选取消 claude → `已选 8/9` + 非 claude 数据；
+  - 勾回 → 塌缩回 `全部`（`app_filter` 回 None，配置不落冗余项）；
+  - 空选跨重启持久化（Some([]) 复原为诚实空视图）；
+  - Flyout 在勾选后保持打开，可连续多选。
+- clippy 0 警告、24/24 测试。

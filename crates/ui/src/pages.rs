@@ -373,38 +373,95 @@ fn overview_widget(
     }
 }
 
-/// Tool-scope checkboxes — every app in the ledger gets a box; `filter`
-/// `None` = all checked. Unchecking everything yields an honest empty view.
+/// Tool-scope picker — a dropdown button opening a checkbox flyout so the
+/// strip never overflows the header. `filter` `None` = all checked;
+/// `Some(vec![])` = deliberately empty view.
 fn app_checks(
     s: &Snapshot,
     theme: &Theme,
     filter: &Option<Vec<String>>,
     ctx: &mut ViewContext<Shell>,
 ) -> View {
-    let mut row: Vec<View> = vec![TextBlock::new()
-        .text("工具")
-        .font_size(theme.label_size)
-        .foreground(theme.subtle)
-        .vertical_alignment(VerticalAlignment::Center)
-        .into()];
+    let total = s.vm.apps.len();
+    let summary = match filter {
+        None => "全部".to_string(),
+        Some(f) if f.is_empty() => "未选".into(),
+        Some(f) => format!("已选 {f_len}/{total}", f_len = f.len()),
+    };
+    let mut col: Vec<View> = Vec::with_capacity(total + 2);
     for name in &s.vm.apps {
         let checked = filter.as_ref().is_none_or(|f| f.contains(name));
         let n = name.clone();
-        row.push(CheckBox::new()
-            .is_checked(checked)
-            .on_is_checked_changed(ctx.callback(move |on: bool| {
-                Msg::ToggleApp(n.clone(), on)
-            }))
-            .content(
-                TextBlock::new()
-                    .text(name.clone())
-                    .font_size(theme.body_size),
-            ));
+        col.push(
+            CheckBox::new()
+                .is_checked(checked)
+                .on_is_checked_changed(ctx.callback(move |on: bool| {
+                    Msg::ToggleApp(n.clone(), on)
+                }))
+                .content(
+                    TextBlock::new()
+                        .text(name.clone())
+                        .font_size(theme.body_size),
+                ),
+        );
     }
+    col.push(
+        Border::new()
+            .height(1.0)
+            .background(theme.divider)
+            .margin(Thickness::xy(0.0, 6.0))
+            .into(),
+    );
+    col.push(
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(8.0)
+            .children((
+                Button::new()
+                    .on_click(ctx.callback(|_| Msg::SetApps(None)))
+                    .content("全选"),
+                Button::new()
+                    .on_click(ctx.callback(|_| Msg::SetApps(Some(Vec::new()))))
+                    .content("清空"),
+            )),
+    );
     StackPanel::new()
         .orientation(Orientation::Horizontal)
-        .spacing(12.0)
-        .keyed_children(keyed(row))
+        .spacing(8.0)
+        .children((
+            TextBlock::new()
+                .text("工具")
+                .font_size(theme.label_size)
+                .foreground(theme.subtle)
+                .vertical_alignment(VerticalAlignment::Center),
+            Button::new()
+                .automation_name("工具筛选")
+                .content(
+                    StackPanel::new()
+                        .orientation(Orientation::Horizontal)
+                        .spacing(6.0)
+                        .children((
+                            TextBlock::new()
+                                .text(summary)
+                                .font_size(theme.body_size)
+                                .vertical_alignment(VerticalAlignment::Center),
+                            TextBlock::new()
+                                .text("▾")
+                                .font_size(theme.label_size)
+                                .foreground(theme.subtle)
+                                .vertical_alignment(VerticalAlignment::Center),
+                        )),
+                )
+                .flyout_with(
+                    Flyout::rich(
+                        StackPanel::new()
+                            .orientation(Orientation::Vertical)
+                            .spacing(10.0)
+                            .keyed_children(keyed(col)),
+                    )
+                    .placement(FlyoutPlacement::BottomEdgeAlignedLeft),
+                ),
+        ))
 }
 
 /// Bundle for the overview page — keeps the signature under the arg limit
