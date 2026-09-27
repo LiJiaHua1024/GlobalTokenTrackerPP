@@ -1,0 +1,44 @@
+{
+  "product_name": "GlobalTokenTracker",
+  "product_context": "WinUI 3 桌面应用，聚合本机各 AI 编码工具的用量统计（token 计数、按价目表估算的美元成本、订阅配额余量、延迟与模型分布）。只读扫描各工具本地日志入库，界面有总览/明细/配额/数据源/价格五页、工具与模型筛选、托盘常驻；配套单文件安装器支持静默安装与原位升级。",
+  "user_text_paths": [],
+  "highlight_paths": [],
+  "source_prefixes": [
+    "crates/"
+  ],
+  "path_strip_prefixes": [
+    "crates/"
+  ],
+  "ignored_path_patterns": [
+    "*/target/*",
+    "dist/*",
+    "*.png",
+    "*.ico",
+    "*.svg",
+    "docs/*",
+    ".github/*",
+    "Cargo.lock",
+    "*/payload/*"
+  ],
+  "forbidden_terms": [
+    "cargo",
+    "clippy",
+    "CI",
+    "workflow",
+    "工作流",
+    "单元测试",
+    "门禁",
+    "rusqlite",
+    "rayon",
+    ".rs",
+    "Cargo.toml"
+  ],
+  "style_notes": [
+    "界面页面统一称：总览、明细、配额、数据源、价格；按钮与设置项沿用界面原文。",
+    "AI 工具名保持原文大小写（Claude Code、Codex、CodeBuddy、WorkBuddy 等），不要翻译或改写。",
+    "安装器相关描述用『安装程序』，不要出现 exe/二进制等内部说法。"
+  ],
+  "summary_style_example": "本版本新增对多款 AI 编码工具的用量统计支持，优化了扫描性能与启动速度；安装程序现支持原位升级，更新时保留全部统计数据。",
+  "max_items": 18,
+  "max_context_chars": 60000
+}

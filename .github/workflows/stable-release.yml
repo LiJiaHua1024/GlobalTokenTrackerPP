@@ -1,0 +1,350 @@
+name: Build and publish Stable
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_stable:
+        description: Publish a GitHub Stable release after all checks pass
+        required: true
+        type: boolean
+        default: false
+      release_tag:
+        description: Stable tag; must equal workspace version, for example v0.2.0
+        required: true
+        type: string
+      release_summary:
+        description: Concise user-facing overview rendered near the top of the release notes
+        required: false
+        type: string
+
+concurrency:
+  group: stable-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Build, test, clippy and package-check
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    outputs:
+      release_tag: ${{ steps.identity.outputs.release_tag }}
+      base_version: ${{ steps.identity.outputs.base_version }}
+      version_name: ${{ steps.identity.outputs.version_name }}
+      asset_filename: ${{ steps.identity.outputs.asset_filename }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Require the latest main source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "Stable builds must be triggered from main; selected ref is $GITHUB_REF"
+            exit 1
+          fi
+
+          checked_out_sha="$(git rev-parse HEAD)"
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          remote_main_sha="$(git rev-parse refs/remotes/origin/main)"
+          if [[ "$checked_out_sha" != "$GITHUB_SHA" ]]; then
+            echo "Checked-out commit $checked_out_sha does not match event commit $GITHUB_SHA"
+            exit 1
+          fi
+          if [[ "$remote_main_sha" != "$GITHUB_SHA" ]]; then
+            echo "Refusing stale build: event commit is $GITHUB_SHA but remote main is $remote_main_sha"
+            echo "Push the intended source and trigger the latest main commit again."
+            exit 1
+          fi
+
+          {
+            echo "### Build source"
+            echo "- Ref: \`$GITHUB_REF\`"
+            echo "- Commit: \`$GITHUB_SHA\`"
+            echo "- Subject: $(git log -1 --format=%s)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+
+      - name: Validate release-note tooling
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          python -m unittest discover \
+            -s .github/release-templates \
+            -p 'test_*.py'
+          test_dir="$RUNNER_TEMP/stable-release-template-test"
+          mkdir -p "$test_dir"
+          python .github/release-templates/generate_release_notes.py \
+            --channel stable \
+            --no-llm \
+            --repo-root . \
+            --repository-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --release-tag "$RELEASE_TAG" \
+            --commit "$GITHUB_SHA" \
+            --changelog-output "$test_dir/STABLE_CHANGELOG.md"
+          python .github/release-templates/render_release_template.py \
+            --template .github/release-templates/stable.md \
+            --output "$test_dir/RELEASE_NOTES.md" \
+            --version "$RELEASE_TAG" \
+            --commit "$GITHUB_SHA" \
+            --release-date "$(TZ=Asia/Shanghai date +%F)" \
+            --sha256 0000000000000000000000000000000000000000000000000000000000000000 \
+            --asset-filename "GlobalTokenTracker-Setup-${RELEASE_TAG}-win-x64.exe" \
+            --release-summary 'Stable release-note tooling verification summary.' \
+            --changelog-file "$test_dir/STABLE_CHANGELOG.md"
+          if grep -Eq '\{\{[A-Z0-9_]+\}\}' "$test_dir/RELEASE_NOTES.md"; then
+            echo 'Stable release-note tooling left unresolved template tokens'
+            exit 1
+          fi
+
+      - name: Resolve source-controlled build identity
+        id: identity
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          python .github/release-templates/validate_build.py \
+            --cargo-toml Cargo.toml \
+            --channel stable \
+            --release-tag "$RELEASE_TAG" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build workspace (debug)
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --workspace --all-targets
+
+      - name: Unit tests
+        id: unit_tests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --workspace
+
+      - name: Clippy (deny warnings)
+        id: clippy
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Release build
+        id: release
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --workspace
+
+      - name: Validate installer packaging
+        id: package
+        if: ${{ !cancelled() && steps.release.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          installer\package.ps1
+          $exe = Get-Item "dist\GlobalTokenTracker-Setup-${{ steps.identity.outputs.version_name }}-win-x64.exe"
+          if ($exe.Length -lt 1MB) { throw "installer suspiciously small: $($exe.Length)" }
+          "installer_size=$($exe.Length)" >> "$env:GITHUB_STEP_SUMMARY"
+
+      - name: Upload test reports
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: verify-reports
+          path: target/debug/deps/*.d
+          if-no-files-found: ignore
+          retention-days: 7
+
+  publish:
+    name: Publish Stable release
+    needs: verify
+    if: ${{ inputs.publish_stable == true }}
+    runs-on: windows-latest
+    environment:
+      name: stable-release
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out source and release template
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Require verified source remains latest main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          remote_main_sha="$(git rev-parse refs/remotes/origin/main)"
+          if [[ "$remote_main_sha" != "$GITHUB_SHA" ]]; then
+            echo "Refusing stale publish: verified commit is $GITHUB_SHA but remote main is $remote_main_sha"
+            echo "Run the workflow again from the latest main commit."
+            exit 1
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build installer package
+        shell: pwsh
+        env:
+          # 可选签名：仓库 Secret 配了哪个走哪个；都没配则产出未签名包。
+          GTT_SIGN_SHA1: ${{ secrets.GTT_SIGN_SHA1 }}
+          GTT_SIGN_PFX: ${{ secrets.GTT_SIGN_PFX }}
+          GTT_SIGN_PFX_PASS: ${{ secrets.GTT_SIGN_PFX_PASS }}
+        run: |
+          installer\package.ps1
+
+      - name: Verify installer asset and generate provenance
+        id: asset
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          EXPECTED_VERSION: ${{ needs.verify.outputs.version_name }}
+          GTT_SIGN_SHA1: ${{ secrets.GTT_SIGN_SHA1 }}
+          GTT_SIGN_PFX: ${{ secrets.GTT_SIGN_PFX }}
+        run: |
+          set -euo pipefail
+          setup="dist/GlobalTokenTracker-Setup-${EXPECTED_VERSION}-win-x64.exe"
+          test -s "$setup"
+          asset_filename="GlobalTokenTracker-Setup-${RELEASE_TAG}-win-x64.exe"
+          mkdir -p release-asset
+          cp "$setup" "release-asset/$asset_filename"
+          asset_sha256="$(sha256sum "release-asset/$asset_filename" | awk '{print $1}')"
+          asset_signed=false
+          if [[ -n "${GTT_SIGN_SHA1:-}" || -n "${GTT_SIGN_PFX:-}" ]]; then
+            asset_signed=true
+          fi
+          {
+            printf 'release_channel=stable\n'
+            printf 'release_tag=%s\n' "$RELEASE_TAG"
+            printf 'source_ref=%s\n' "$GITHUB_REF"
+            printf 'source_commit=%s\n' "$GITHUB_SHA"
+            printf 'project_version=%s\n' "$EXPECTED_VERSION"
+            printf 'asset_filename=%s\n' "$asset_filename"
+            printf 'asset_sha256=%s\n' "$asset_sha256"
+            printf 'asset_signed=%s\n' "$asset_signed"
+          } > release-asset/BUILD_INFO.txt
+          (
+            cd release-asset
+            sha256sum "$asset_filename" BUILD_INFO.txt > SHA256SUMS.txt
+            sha256sum -c SHA256SUMS.txt
+          )
+          echo "asset_filename=$asset_filename" >> "$GITHUB_OUTPUT"
+          echo "asset_sha256=$asset_sha256" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Verified installer asset"
+            echo "- File: \`$asset_filename\`"
+            echo "- version: \`$EXPECTED_VERSION\`"
+            echo "- SHA-256: \`$asset_sha256\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload verified Stable asset
+        uses: actions/upload-artifact@v6
+        with:
+          name: stable-release-asset-${{ github.sha }}
+          path: release-asset
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Render standardized Stable release notes
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_SUMMARY: ${{ inputs.release_summary }}
+          ASSET_FILENAME: ${{ steps.asset.outputs.asset_filename }}
+          ASSET_SHA256: ${{ steps.asset.outputs.asset_sha256 }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_NOTES_LLM_1_API_KEY: ${{ secrets.RELEASE_NOTES_LLM_1_API_KEY }}
+          RELEASE_NOTES_LLM_1_PROTOCOL: ${{ vars.RELEASE_NOTES_LLM_1_PROTOCOL }}
+          RELEASE_NOTES_LLM_1_BASE_URL: ${{ secrets.RELEASE_NOTES_LLM_1_BASE_URL || vars.RELEASE_NOTES_LLM_1_BASE_URL }}
+          RELEASE_NOTES_LLM_1_MODEL: ${{ vars.RELEASE_NOTES_LLM_1_MODEL }}
+          RELEASE_NOTES_LLM_2_API_KEY: ${{ secrets.RELEASE_NOTES_LLM_2_API_KEY }}
+          RELEASE_NOTES_LLM_2_PROTOCOL: ${{ vars.RELEASE_NOTES_LLM_2_PROTOCOL }}
+          RELEASE_NOTES_LLM_2_BASE_URL: ${{ secrets.RELEASE_NOTES_LLM_2_BASE_URL || vars.RELEASE_NOTES_LLM_2_BASE_URL }}
+          RELEASE_NOTES_LLM_2_MODEL: ${{ vars.RELEASE_NOTES_LLM_2_MODEL }}
+        run: |
+          set -euo pipefail
+
+          changelog_file="release-asset/STABLE_CHANGELOG.md"
+          python .github/release-templates/generate_release_notes.py \
+            --channel stable \
+            --repo-root . \
+            --repository-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --release-tag "$RELEASE_TAG" \
+            --commit "$GITHUB_SHA" \
+            --changelog-output "$changelog_file" \
+            --summary-output release-asset/RELEASE_SUMMARY.md \
+            --report-output "$GITHUB_STEP_SUMMARY"
+
+          summary_args=()
+          if [[ -n "${RELEASE_SUMMARY// }" ]]; then
+            summary_args=(--release-summary "$RELEASE_SUMMARY")
+          elif [[ -s release-asset/RELEASE_SUMMARY.md ]]; then
+            summary_args=(--release-summary "$(cat release-asset/RELEASE_SUMMARY.md)")
+          fi
+
+          python .github/release-templates/render_release_template.py \
+            --template .github/release-templates/stable.md \
+            --output release-asset/RELEASE_NOTES.md \
+            --version "$RELEASE_TAG" \
+            --commit "$GITHUB_SHA" \
+            --release-date "$(TZ=Asia/Shanghai date +%F)" \
+            --sha256 "$ASSET_SHA256" \
+            --asset-filename "$ASSET_FILENAME" \
+            "${summary_args[@]}" \
+            --changelog-file "$changelog_file"
+
+          if grep -Eq '\{\{[A-Z0-9_]+\}\}' release-asset/RELEASE_NOTES.md; then
+            echo 'Rendered Stable release notes still contain template tokens'
+            exit 1
+          fi
+
+      - name: Create GitHub Stable Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          ASSET_FILENAME: ${{ steps.asset.outputs.asset_filename }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            "release-asset/$ASSET_FILENAME" \
+            release-asset/BUILD_INFO.txt \
+            release-asset/SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$RELEASE_TAG" \
+            --notes-file release-asset/RELEASE_NOTES.md
