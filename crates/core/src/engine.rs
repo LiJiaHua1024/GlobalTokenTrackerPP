@@ -49,6 +49,11 @@ impl Engine {
             merge(&mut report, r?);
         }
         self.refresh_rollups(&report);
+        // Safety-net snapshot — time-throttled inside, so this costs one
+        // KV read per pass and a VACUUM INTO once a day. Never fails a scan.
+        if let Err(e) = self.store.maybe_backup() {
+            tracing::warn!("ledger backup failed: {e}");
+        }
         Ok(report)
     }
 

@@ -28,29 +28,127 @@ pub fn default_db_path() -> std::path::PathBuf {
     dir.join("ledger.db")
 }
 
+/// Bounded ledger snapshot: `backups/ledger.db` plus one previous
+/// generation — the only single point of failure left (adapter source
+/// data is append-only ingested, so losing a tool's local logs never
+/// loses history; losing this db would).
+pub const BACKUP_INTERVAL_MS: i64 = 86_400_000;
+
 pub struct Store {
     conn: Connection,
+    /// `Some` for file-backed ledgers — drives backup/restore. `None` for
+    /// in-memory test stores, which skip persistence work entirely.
+    path: Option<std::path::PathBuf>,
 }
 
 impl Store {
     /// Open (and migrate) the ledger at `path`. Use `:memory:` in tests.
+    /// When the file is missing or fails to open/migrate, the newest
+    /// snapshot under `backups/` is restored first — a tool wiping its
+    /// data dir must not take the ledger with it.
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("create db dir {}", dir.display()))?;
         }
+        if path.exists()
+            && let Ok(s) = Self::try_open(path)
+        {
+            return Ok(s);
+        }
+        if Self::restore_backup(path).unwrap_or(false) {
+            return Self::try_open(path);
+        }
+        Self::try_open(path)
+    }
+
+    fn try_open(path: &Path) -> Result<Self> {
         let conn =
             Connection::open(path).with_context(|| format!("open ledger {}", path.display()))?;
-        let store = Self { conn };
+        let store = Self {
+            conn,
+            path: Some(path.to_path_buf()),
+        };
         store.migrate()?;
         Ok(store)
     }
 
     pub fn open_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
-        let store = Self { conn };
+        let store = Self { conn, path: None };
         store.migrate()?;
         Ok(store)
+    }
+
+    /// Copy `backups/ledger.db` (or the previous generation) over a
+    /// missing/broken ledger. Stale `-wal`/`-shm` sidecars are removed
+    /// first — SQLite would otherwise replay them onto the restored file
+    /// and report corruption again. Returns true when a snapshot landed.
+    fn restore_backup(path: &Path) -> Result<bool> {
+        let dir = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("backups");
+        for cand in [dir.join("ledger.db"), dir.join("ledger.prev.db")] {
+            if !cand.exists() {
+                continue;
+            }
+            if path.exists() {
+                // Keep the broken file for forensics — never silently drop.
+                let aside = path.with_extension("db.corrupt");
+                let _ = std::fs::remove_file(&aside);
+                let _ = std::fs::rename(path, &aside);
+            }
+            let _ = std::fs::remove_file(path.with_extension("db-wal"));
+            let _ = std::fs::remove_file(path.with_extension("db-shm"));
+            std::fs::copy(&cand, path)?;
+            if Self::try_open(path).is_ok() {
+                return Ok(true);
+            }
+            let _ = std::fs::remove_file(path);
+        }
+        Ok(false)
+    }
+
+    /// Throttled snapshot — cheap to call every scan (one KV read).
+    pub fn maybe_backup(&self) -> Result<bool> {
+        if self.path.is_none() {
+            return Ok(false);
+        }
+        let last: i64 = self
+            .get_state("backup_last_at")?
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        if now_ms() - last < BACKUP_INTERVAL_MS {
+            return Ok(false);
+        }
+        self.backup_now()?;
+        self.set_state("backup_last_at", &now_ms().to_string())?;
+        Ok(true)
+    }
+
+    /// `VACUUM INTO` yields a compacted, fully-checkpointed copy in one
+    /// C-level pass; tmp+rename means a crash mid-copy leaves the old
+    /// snapshot intact rather than a torn file.
+    pub fn backup_now(&self) -> Result<()> {
+        let Some(path) = &self.path else { return Ok(()) };
+        let dir = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("backups");
+        std::fs::create_dir_all(&dir)?;
+        let cur = dir.join("ledger.db");
+        let prev = dir.join("ledger.prev.db");
+        let tmp = dir.join("ledger.tmp");
+        let _ = std::fs::remove_file(&tmp);
+        self.conn
+            .execute("VACUUM INTO ?1", params![tmp.to_string_lossy().as_ref()])?;
+        if cur.exists() {
+            let _ = std::fs::remove_file(&prev);
+            std::fs::rename(&cur, &prev)?;
+        }
+        std::fs::rename(&tmp, &cur)?;
+        Ok(())
     }
 
     fn migrate(&self) -> Result<()> {
@@ -485,6 +583,82 @@ mod tests {
             resets_at: None,
             raw_json: None,
         }
+    }
+
+    fn tmp_db(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("gtt-backup-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("ledger.db")
+    }
+
+    #[test]
+    fn backup_restores_missing_ledger() {
+        let db = tmp_db("missing");
+        {
+            let s = Store::open(&db).unwrap();
+            s.upsert_event(&ev("keep", 7, Some(0.01))).unwrap();
+            s.backup_now().unwrap();
+            assert!(db.parent().unwrap().join("backups/ledger.db").exists());
+        } // drop the open connection before deleting the file
+        std::fs::remove_file(&db).unwrap();
+        let s = Store::open(&db).unwrap();
+        let n: i64 = s
+            .conn()
+            .query_row(
+                "SELECT output_tokens FROM usage_events WHERE dedup_key='keep'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 7);
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn backup_restores_corrupt_ledger() {
+        let db = tmp_db("corrupt");
+        {
+            let s = Store::open(&db).unwrap();
+            s.upsert_event(&ev("safe", 9, None)).unwrap();
+            s.backup_now().unwrap();
+        }
+        std::fs::write(&db, b"not a sqlite file at all").unwrap();
+        let s = Store::open(&db).unwrap();
+        let n: i64 = s
+            .conn()
+            .query_row(
+                "SELECT output_tokens FROM usage_events WHERE dedup_key='safe'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 9);
+        // The broken original is kept aside for forensics, not deleted.
+        assert!(db.with_extension("db.corrupt").exists());
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
+    }
+
+    #[test]
+    fn backup_rotates_two_generations_and_throttles() {
+        let db = tmp_db("rotate");
+        let s = Store::open(&db).unwrap();
+        s.upsert_event(&ev("g1", 1, None)).unwrap();
+        s.backup_now().unwrap();
+        s.upsert_event(&ev("g2", 2, None)).unwrap();
+        s.backup_now().unwrap();
+        let dir = db.parent().unwrap().join("backups");
+        assert!(dir.join("ledger.db").exists());
+        assert!(dir.join("ledger.prev.db").exists());
+        // Newest snapshot carries the second event.
+        let prev = Store::open(&dir.join("ledger.prev.db")).unwrap();
+        assert_eq!(prev.event_count(None, None).unwrap(), 1);
+        // maybe_backup honors the 24h throttle stamp.
+        s.set_state("backup_last_at", &now_ms().to_string()).unwrap();
+        assert!(!s.maybe_backup().unwrap());
+        // In-memory stores never attempt file work.
+        assert!(!Store::open_memory().unwrap().maybe_backup().unwrap());
+        let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 
     #[test]

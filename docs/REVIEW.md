@@ -475,3 +475,16 @@
 - **根因**：`TitleBar.Content` 槽的居中区域**不含右侧系统按钮（min/max/close）占位宽**——导航在"去掉按钮区"的空间内居中，相对全窗偏左。
 - **修复**：导航与品牌位同一模式——挪出 Content 槽，作为 row 0 浮层 `HorizontalAlignment::Center + VerticalAlignment::Center` 跨全窗宽居中；TitleBar 退化为纯拖拽区/系统按钮宿主。UIA 实测窗口中心 918 = 导航中心 918（像素级正中）；点击价格项切换+懒加载正常。
 - **验证**：46/46 测试、clippy `-D warnings` 0、release 干净。
+
+## S40 账本快照备份 + 损坏自愈 ✅
+
+- **需求**：统计层建一个"大小合适"的缓存——工具本地计数数据被清空后不丢历史统计；要求高效 + 安全。
+- **前提确认**：事件一旦入账即独立存活，工具删源数据本就不影响已存统计——真正的单点故障是 `ledger.db` 自身丢失/损坏（46MB、60K 事件）。备份即补这块。
+- **实现**（`store/mod.rs`）：
+  - `backup_now`：`VACUUM INTO backups/ledger.tmp` → 轮换 `ledger.db`→`ledger.prev.db` → tmp 原子落位。VACUUM 产出**压缩 + 完全 checkpoint 的独立 db**（journal_mode=delete），实测 46MB→44MB，单趟 C 级拷贝 ~几十 ms；tmp+rename 保证崩溃不留半文件，旧代始终可用。
+  - `maybe_backup`：`app_state.backup_last_at` 节流 24h，engine 每轮扫描尾部调用——平时成本=一次 KV 读；首次扫描立即建首份快照。备份失败只 warn 不挂扫描。
+  - `Store::open` 自愈：db 缺失或打不开/迁移失败 → `restore_backup` 按 `ledger.db`→`ledger.prev.db` 顺序尝试；替换前**先删 `-wal`/`-shm`**（残留 WAL 会重放到恢复副本上再次报错）；损坏原件改名 `.db.corrupt` 保留取证，不静默丢。
+  - `Store` 新增 `path: Option<PathBuf>`——`:memory:` 测试库跳过全部文件逻辑。
+  - 体积上界 = 2 代 × 压缩后大小（当前 ~44MB × 2 ≈ 88MB）。
+- **验证**：新增 3 测试（删库自愈+数据完整、损坏库自愈+`.corrupt` 留存、两代轮换+节流+memory 跳过）。CLI `scan` 实测生成 `backups/ledger.db`：`PRAGMA quick_check` ok、60,179 事件、独立 delete-journal 文件。**49/49 测试、clippy `-D warnings` 0**。
+- **取舍**：restore 只覆盖"文件缺失/打开失败"路径；打开正常但页级深损的场景不做启动时 `quick_check`（46MB 全扫每次打开太贵），VACUUM 失败会以错误暴露并在备份目录留下完好旧代——恢复窗口仍由 prev 代兜底。
