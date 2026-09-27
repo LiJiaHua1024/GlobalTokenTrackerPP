@@ -274,3 +274,10 @@
   7. `--help` 原本什么都不印直接进安装流程；`--dir` 吃掉下一个 flag 的问题一并修。
 - **实测（发布包，非桩）**：GUI 安装→3 文件+快捷方式+注册项→完成态→"启动并关闭"拉起真 UI；GUI 卸载→杀运行中 UI→完成态→关窗→**整目录含自身自删干净**；`--quiet` install/uninstall 闭环（自删目录消失）；空载荷桩正确报错并恢复按钮可重试。
 - **已知限制**：MinTTY/Git-Bash 等无真控制台环境下 `--quiet`/`--help` 静默无输出（windows 子系统 exe 初始无 std 句柄，AttachConsole 无处可挂——功能正常仅无输出，cmd/PowerShell 控制台中正常）；建议真机手动过目一次窗口。
+
+## S20 UI 去除控制台黑窗 ✅
+
+- **现象**：`globaltokentracker-ui.exe` 是 console 子系统，启动后常驻一个黑色控制台窗口。
+- **修法**：`#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]`——release 走 GUI 子系统无黑窗；debug 保留 console（`cargo run`/`diag!` 开发期输出不丢）。
+- **诊断保留**：`diag_console()`——`GTT_DEBUG=1` 时先 `AttachConsole(ATTACH_PARENT_PROCESS)`（终端里跑输出回父控制台），失败则 `AllocConsole`（双击也能调出日志窗），再 `CreateFileW("CONOUT$")`+`SetStdHandle` 把 stdout/stderr 接进真控制台。无 `GTT_DEBUG` 时完全静默。`eprintln!` 对无效句柄只丢错不 panic，安全。
+- **验证**：release 构建启动后 `Get-CimInstance` 确认**无 conhost 子进程**，窗口渲染完整（截图核对）；子进程零 spawn（core/ui 无 Command 调用），黑窗来源仅此一处。

@@ -1,6 +1,11 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 //! globaltokentracker-ui — WinUI 3 shell via windows-reactor.
 //! Dumb renderer over core ViewModels; theme + layout are data (`ui.json`
 //! next to ledger.db), so skins / widget ordering survive without recompiles.
+//!
+//! Release builds are GUI-subsystem — no stray console window. Diagnostics
+//! (`diag!`, panic stderr) only exist when GTT_DEBUG=1; then we attach to the
+//! parent console, or allocate one for a double-clicked debug launch.
 
 mod config;
 mod pages;
@@ -112,6 +117,44 @@ macro_rules! diag {
     };
 }
 pub(crate) use diag;
+
+/// Give `eprintln!`/`diag!` somewhere to land in a GUI-subsystem build:
+/// attach to the invoker's console when present, else allocate a fresh one
+/// (GTT_DEBUG double-click debugging). No-op when the console handle is
+/// already valid (console-subsystem dev build).
+#[cfg(windows)]
+fn diag_console() {
+    use std::ptr;
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Console::{
+        AllocConsole, AttachConsole, GetStdHandle, SetStdHandle,
+        ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
+    };
+    unsafe {
+        if !GetStdHandle(STD_ERROR_HANDLE).is_null() {
+            return; // already have a console (dev build / console launch)
+        }
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 && AllocConsole() == 0 {
+            return; // no console anywhere and can't allocate — stay silent
+        }
+        let mut name: Vec<u16> = "CONOUT$".encode_utf16().chain(Some(0)).collect();
+        let h = CreateFileW(
+            name.as_mut_ptr(),
+            0x8000_0000 | 0x4000_0000, // GENERIC_READ | GENERIC_WRITE
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            ptr::null(),
+            OPEN_EXISTING,
+            0,
+            ptr::null_mut(),
+        );
+        if !h.is_null() && h != -1isize as _ {
+            let _ = SetStdHandle(STD_OUTPUT_HANDLE, h);
+            let _ = SetStdHandle(STD_ERROR_HANDLE, h);
+        }
+    }
+}
 
 fn db_path() -> PathBuf {
     default_db_path()
@@ -578,6 +621,10 @@ impl Shell {
 }
 
 fn main() {
+    #[cfg(windows)]
+    if diag_enabled() {
+        diag_console();
+    }
     // Stowed WinRT exceptions produce zero stderr; a Rust panic (e.g. inside a
     // spawn_background closure) lands in this hook instead.
     std::panic::set_hook(Box::new(|info| {
