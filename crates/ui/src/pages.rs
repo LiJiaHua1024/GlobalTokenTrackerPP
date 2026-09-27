@@ -1314,7 +1314,7 @@ fn price_head(theme: &Theme) -> View {
         .content(Grid::new().columns(PRICE_COLS).children(cells))
 }
 
-fn price_row(theme: &Theme, p: &globaltokentracker_core::store::PriceRow) -> View {
+fn price_row(theme: &Theme, p: &globaltokentracker_core::store::PriceRow, zebra: bool) -> View {
     let tone = if p.source == "seed" {
         w::BadgeTone::Muted
     } else {
@@ -1350,11 +1350,19 @@ fn price_row(theme: &Theme, p: &globaltokentracker_core::store::PriceRow) -> Vie
                 .content(w::badge(theme, p.source.clone(), tone)),
         ),
     ];
-    Border::new()
-        .padding(Thickness::xy(10.0, 7.0))
-        .border_brush(theme.divider)
-        .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0))
-        .content(Grid::new().columns(PRICE_COLS).children(cells))
+    // Same chrome as detail rows: separators gated by theme, alternating
+    // ~4% zebra, full model id on hover.
+    let mut row = Border::new().padding(Thickness::xy(10.0, 5.0));
+    if theme.line_separators {
+        row = row
+            .border_brush(theme.divider)
+            .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0));
+    }
+    if zebra {
+        row = row.background(Brush::Solid(Color::argb(10, 128, 128, 128)));
+    }
+    row.content(Grid::new().columns(PRICE_COLS).children(cells))
+        .tooltip(p.model.clone())
 }
 
 pub fn prices_page(snap: Option<&Snapshot>, theme: &Theme) -> View {
@@ -1364,10 +1372,14 @@ pub fn prices_page(snap: Option<&Snapshot>, theme: &Theme) -> View {
     let Some(rows) = s.prices.as_ref() else {
         return loading(theme, true);
     };
-    let mut list: Vec<View> = vec![price_head(theme)];
-    for p in rows.iter().take(400) {
-        list.push(price_row(theme, p));
-    }
+    let list: Vec<View> = std::iter::once(price_head(theme))
+        .chain(
+            rows.iter()
+                .take(400)
+                .enumerate()
+                .map(|(i, p)| price_row(theme, p, i % 2 == 1)),
+        )
+        .collect();
     page_frame(
         theme,
         vstack(
@@ -1389,7 +1401,8 @@ pub fn prices_page(snap: Option<&Snapshot>, theme: &Theme) -> View {
                     .font_size(theme.body_size)
                     .foreground(theme.subtle)
                     .into(),
-                vstack(0.0, list),
+                // Card chrome around the table — same as the detail page.
+                w::card(theme, vstack(0.0, list)),
             ],
         ),
     )
