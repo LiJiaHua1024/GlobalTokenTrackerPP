@@ -327,3 +327,10 @@
   - `arm_refresh(ctx, secs)`：`0` 时不排定时器（文件 watcher 仍活刷新）；从 0 切回 >0 且不在扫描时立即补臂一个定时器，让新节奏立刻生效而不是等下一次扫描结束。`Msg::SetRefreshSecs(label)` 经 `refresh_secs_of` 反解标签→秒。
 - **验证**：UIA 打开菜单（5 项齐全）→ 点 `1 分钟` → 按钮标签即时变 `1 分钟`、菜单自动收起、`ui.json` 落 `refresh_secs:60`；重扫后周期定时器按新值臂。clippy 0、24/24 测试。
 - **说明**：`仅文件变更` 诚实语义——关掉的是周期性轮询，watcher 仍会在源文件变化时刷新；要彻底手动则用"刷新"按钮单次触发。
+
+## S25 品牌+导航进自定义标题栏 ✅
+
+- **需求**：系统标题栏的默认图标+"GlobalTokenTracker"文字与内容区的品牌行重复，要求把自绘 logo 挪进标题栏。
+- **修法**：用 WinUI `TitleBar` 控件（WinAppSDK 1.7+；安装器引导的是 1.8 runtime，兼容）。框架层把 `TitleBar` 节点自动映射为 `ExtendsContentIntoTitleBar(true)`+`SetTitleBar`，`preferred_height(Tall)`。`Content` 槽放 `[ViewAll 四格图标 + GlobalTokenTracker 字标 + SelectorBar 导航页签]`——品牌与一级导航整体进标题栏，省掉原 header 一整行；内容区顶边补 1px divider 衔接。
+- **选型笔记**：曾尝试给 `SymbolIcon` 上 accent 色——本框架的 `SymbolIcon`/`FontIcon` 未暴露 `foreground`/`font_size` setter（生成的绑定只有 `symbol`/`glyph`），保持默认白 glyph，与 Fluent 简约一致。
+- **验证**：截图核对标题栏 = 图标+字标+居中导航，caption 按钮（min/max/close）正常；UIA 点标题栏内"明细"→ 选中态与页面切换正常；`window_title("GlobalTokenTracker")` 保留（任务栏标题不受影响）。clippy 0、24/24 测试。

@@ -572,32 +572,40 @@ impl Component for Shell {
                     KeyedView::new("prices", item("价格", Page::Prices)),
                 ],
             );
+        // Custom title bar: the WinUI TitleBar control claims the caption
+        // area (the reactor maps it to ExtendsContentIntoTitleBar+SetTitleBar)
+        // — brand glyph + wordmark + nav live inside it, so the content
+        // starts right below. Empty stretches stay draggable.
+        let brand_nav = StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(14.0)
+            .vertical_alignment(VerticalAlignment::Center)
+            .children((
+                SymbolIcon::new()
+                    .symbol(Symbol::ViewAll)
+                    .vertical_alignment(VerticalAlignment::Center),
+                TextBlock::new()
+                    .text("GlobalTokenTracker")
+                    .font_size(13.0)
+                    .font_weight(FontWeight::SEMI_BOLD)
+                    .vertical_alignment(VerticalAlignment::Center),
+                nav,
+            ));
         // Root must be a Grid: a vertical StackPanel offers children infinite
         // height, which makes the page ScrollViewer measure at full content
         // size and never scroll. Star row bounds the scroll area.
         Grid::new()
             .rows([GridLength::Auto, GridLength::STAR])
             .children((
-                Border::new()
+                TitleBar::new()
+                    .preferred_height(WindowTitleBarHeight::Tall)
                     .grid_row(0)
-                    .padding(Thickness::xy(20.0, 8.0))
+                    .slot(TitleBarSlot::Content, brand_nav),
+                Border::new()
+                    .grid_row(1)
                     .border_brush(theme.divider)
-                    .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0))
-                    .content(
-                        StackPanel::new()
-                            .orientation(Orientation::Horizontal)
-                            .spacing(16.0)
-                            .children((
-                                SymbolIcon::new().symbol(Symbol::ViewAll),
-                                TextBlock::new()
-                                    .text("GlobalTokenTracker")
-                                    .font_size(14.0)
-                                    .font_weight(FontWeight::SEMI_BOLD)
-                                    .vertical_alignment(VerticalAlignment::Center),
-                                nav,
-                            )),
-                    ),
-                Border::new().grid_row(1).content(content),
+                    .border_thickness(Thickness::new(0.0, 1.0, 0.0, 0.0))
+                    .content(content),
             ))
     }
 }
