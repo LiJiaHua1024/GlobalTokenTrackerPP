@@ -13,6 +13,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, warn};
 
+/// Cap on raw segment bytes held between read and ingest. A single file
+/// larger than this still loads whole (cursors need contiguous bytes) —
+/// the bound is on the batch, not on any one source.
+const SEGMENT_BUDGET: u64 = 256 << 20;
+
 pub struct Engine {
     pub store: Store,
     pub prices: PriceBook,
@@ -114,8 +119,11 @@ impl Engine {
             .collect();
 
         // Phase 1: decide actions & read byte segments (sequential, cheap).
+        // In-flight segment bytes are budgeted — a fresh install facing
+        // GBs of accumulated logs must not try to hold them all at once.
         let pinned = AtomicU64::new(0);
         let mut segments: Vec<(&SourceItem, u64, Option<String>, Vec<u8>)> = Vec::new();
+        let mut in_flight: u64 = 0;
         for item in &jsonl {
             let meta = match std::fs::metadata(&item.path) {
                 Ok(m) => m,
@@ -140,6 +148,11 @@ impl Engine {
                 }
                 CursorAction::Full => {
                     if let Some(seg) = read_segment(&item.path, 0, meta.len(), &mut report.errors) {
+                        if !segments.is_empty() && in_flight + seg.len() as u64 > SEGMENT_BUDGET {
+                            self.flush_segments(adapter, std::mem::take(&mut segments), &mut report)?;
+                            in_flight = 0;
+                        }
+                        in_flight += seg.len() as u64;
                         segments.push((item, 0, None, seg));
                     }
                 }
@@ -148,56 +161,19 @@ impl Engine {
                         read_segment(&item.path, from, meta.len(), &mut report.errors)
                     {
                         let state = self.store.load_cursor(&item.key)?.state;
+                        if !segments.is_empty() && in_flight + seg.len() as u64 > SEGMENT_BUDGET {
+                            self.flush_segments(adapter, std::mem::take(&mut segments), &mut report)?;
+                            in_flight = 0;
+                        }
+                        in_flight += seg.len() as u64;
                         segments.push((item, from, state, seg));
                     }
                 }
             }
         }
         report.files_pinned = pinned.load(Ordering::Relaxed);
-
-        // Phase 2: parse segments in parallel (the hot path for GB-scale logs).
-        let parsed: Vec<(&SourceItem, u64, Result<ScanOutcome>)> = segments
-            .into_par_iter()
-            .map(|(item, from, state, data)| {
-                (
-                    item,
-                    from,
-                    adapter.parse_jsonl(item, from, &data, state.as_deref()),
-                )
-            })
-            .collect();
-
-        // Phase 3: single-writer ingestion.
-        for (item, from, res) in parsed {
-            match res {
-                Ok(outcome) => {
-                    self.ingest(
-                        adapter.id(),
-                        adapter.capability(),
-                        outcome.events,
-                        outcome.quotas,
-                        &mut report,
-                    );
-                    report.events_skipped += outcome.skipped;
-                    report.files_scanned += 1;
-                    let end = from + outcome.consumed;
-                    let mtime = std::fs::metadata(&item.path)
-                        .ok()
-                        .map(|m| file_mtime_ms(&m))
-                        .unwrap_or(0);
-                    self.store.save_cursor(
-                        adapter.id(),
-                        &item.key,
-                        &item.path,
-                        end,
-                        mtime,
-                        outcome.new_state.as_deref(),
-                    )?;
-                }
-                Err(e) => report
-                    .errors
-                    .push(format!("{}: {e:#}", item.path.display())),
-            }
+        if !segments.is_empty() {
+            self.flush_segments(adapter, segments, &mut report)?;
         }
 
         // SQLite sources (adapter-managed watermarks).
@@ -220,6 +196,59 @@ impl Engine {
             }
         }
         Ok(report)
+    }
+
+    /// Phase 2+3: parallel parse then single-writer ingest for one batch
+    /// of segments. Batched by `SEGMENT_BUDGET` so in-flight bytes stay
+    /// bounded regardless of how much log data accumulated on disk.
+    fn flush_segments(
+        &self,
+        adapter: &dyn SourceAdapter,
+        segments: Vec<(&SourceItem, u64, Option<String>, Vec<u8>)>,
+        report: &mut ScanReport,
+    ) -> Result<()> {
+        let parsed: Vec<(&SourceItem, u64, Result<ScanOutcome>)> = segments
+            .into_par_iter()
+            .map(|(item, from, state, data)| {
+                (
+                    item,
+                    from,
+                    adapter.parse_jsonl(item, from, &data, state.as_deref()),
+                )
+            })
+            .collect();
+        for (item, from, res) in parsed {
+            match res {
+                Ok(outcome) => {
+                    self.ingest(
+                        adapter.id(),
+                        adapter.capability(),
+                        outcome.events,
+                        outcome.quotas,
+                        report,
+                    );
+                    report.events_skipped += outcome.skipped;
+                    report.files_scanned += 1;
+                    let end = from + outcome.consumed;
+                    let mtime = std::fs::metadata(&item.path)
+                        .ok()
+                        .map(|m| file_mtime_ms(&m))
+                        .unwrap_or(0);
+                    self.store.save_cursor(
+                        adapter.id(),
+                        &item.key,
+                        &item.path,
+                        end,
+                        mtime,
+                        outcome.new_state.as_deref(),
+                    )?;
+                }
+                Err(e) => report
+                    .errors
+                    .push(format!("{}: {e:#}", item.path.display())),
+            }
+        }
+        Ok(())
     }
 
     fn ingest(

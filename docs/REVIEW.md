@@ -535,3 +535,18 @@
 - **实测（UIA/Win32 驱动真实窗口）**：点击即返回不阻塞；对话框随后正常弹出；对话框开着时取消 → `pick_pending` 复位、按钮恢复；点"选择文件夹"确认 → 选中路径 `C:\Users\<user>\Documents` 正确写入安装路径框、按钮恢复。自动化踩坑：文件名框是 `ComboBoxEx32` 内嵌 Edit，UIA 的 Edit 枚举首项是列表项重命名框（误触"重命名"错误框，未造成实际改名）。
 - **验证**：50/50 测试、clippy `-D warnings` 0、release 干净；安装包重打（sha `6e28f3a2…`）。
 - **未做**：不会主动修复用户的失联网络映射——那是系统环境问题，安装器只需不卡死（已满足）；无超时强制关对话框（用户的选择权优先，挂起只损失一个 helper 线程）。
+
+## S45 内存/资源泄漏审计 ✅
+
+- **范围**：`Box::into_raw`/`forget`/`leak`、GDI/GDI+ 句柄配对、后台任务槽堆积、无界缓存、Rc 环、线程/连接生命周期——全仓扫 + 逐处读码。
+- **修复的唯一真实问题（engine.rs）**：JSONL 扫描把**全部**变更文件的未读字节一次性装进 `segments` Vec 再做并行解析——无总量上界。新装机面对数 GB 累积日志会先 `Vec::with_capacity` 预占同等内存再读，可能 OOM/卡死。重构：phase-2/3 抽为 `flush_segments`，新增 `SEGMENT_BUDGET = 256MB` 在飞字节预算——批次超限先冲刷再续读；单文件 >256MB 仍整读（游标要求连续字节，已在注释标明）。预算管的是批次不是单源。
+- **验证为干净的**：
+  - GDI/GDI+：setup 绘制路径所有 `CreatePen/SolidBrush/Font/Bitmap/Path/Graphics` 均就近 Delete（画刷 356-394、字体 502-534、GDI+ 156-160/171-179 逐一配对）
+  - 任务槽：reactor `BACKGROUND_TASK_CAPACITY=64`，常驻阻塞任务（watcher/tray）都是"上一个返回才再武装"各稳占 1 槽；定时器经 `Loaded/Failed` 单一武装点自我收敛回 1
+  - `Rc<TrendShared>` 单向（Shell→视图闭包），无回指不成环
+  - `otel::spawn` 返回 `JoinHandle`——`let _otel` drop 仅 detach 不杀接收线程（正确用法）
+  - watcher `watcher` 对象函数内建函数内毁，退出即释放 ReadDirectoryChanges 句柄
+  - codebuddy `session_dirs` 缓存存活期=Engine 实例=一次扫描调用，有界
+  - SQLite `Store` 每 `load_all` 开一次 drop 关一次；`PriceBook::load` 全量 8K 行生命周期单次调用
+- **如实记录的既有取舍（不改）**：`Box::into_raw(Gui)`/安装器 WM_APP_PICKED lparam 盒——进程级生存期/窗口已关时最多漏 24B；setup 控件 `WM_SETFONT` 的 ~8 个 HFONT 进程级不删（短生命周期安装器）；悬停柱的 450ms 驻留计时每次换柱 spawn 一次（上限 64 槽，自限）；`read_segment` 对超大单文件仍整读——改流式解析才解，值不值留待真有 GB 级源再说。
+- **验证**：50/50 测试、clippy `-D warnings` 0。
