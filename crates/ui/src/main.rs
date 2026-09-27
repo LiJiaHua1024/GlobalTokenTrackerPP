@@ -714,6 +714,7 @@ impl Component for Shell {
         };
         let nav = SelectorBar::new()
             .on_selected_text_changed(context.callback(Msg::Nav))
+            .horizontal_alignment(HorizontalAlignment::Center)
             .collection_slot(
                 SelectorBarSlot::Items,
                 [
@@ -724,18 +725,20 @@ impl Component for Shell {
                     KeyedView::new("prices", item("价格", Page::Prices)),
                 ],
             );
-        // Custom title bar: the WinUI TitleBar control claims the caption
-        // area (the reactor maps it to ExtendsContentIntoTitleBar+SetTitleBar)
-        // — brand glyph + wordmark + nav live inside it, so the content
-        // starts right below. Empty stretches stay draggable.
-        let brand_nav = StackPanel::new()
+        // Brand mark pinned to the caption area's left edge. It renders in
+        // the root Grid's row 0, on top of the TitleBar (TitleBar.Content is
+        // centered by design and LeftHeader is not bound in this framework
+        // version — so the nav keeps the Content slot and the brand floats).
+        let brand = StackPanel::new()
             .orientation(Orientation::Horizontal)
-            .spacing(14.0)
+            .spacing(10.0)
             .vertical_alignment(VerticalAlignment::Center)
+            .horizontal_alignment(HorizontalAlignment::Left)
+            .margin(Thickness::new(12.0, 0.0, 0.0, 0.0))
+            .grid_row(0)
             .children((
-                // Brand mark — the embedded PNG (assets/icon-64.png) keeps the
-                // titlebar logo identical to the window/tray icon with zero
-                // asset files at runtime.
+                // Embedded PNG (assets/icon-64.png) keeps the titlebar logo
+                // identical to the window/tray icon with zero runtime files.
                 ImageIcon::new()
                     .source_data(EncodedImage::from_static(include_bytes!(
                         "../../../assets/icon-64.png"
@@ -747,7 +750,6 @@ impl Component for Shell {
                     .font_size(13.0)
                     .font_weight(FontWeight::SEMI_BOLD)
                     .vertical_alignment(VerticalAlignment::Center),
-                nav,
             ));
         // Filter chrome is a pinned strip between title bar and scrolling
         // page on the data pages (overview/detail); it collapses elsewhere.
@@ -782,7 +784,8 @@ impl Component for Shell {
                 TitleBar::new()
                     .preferred_height(WindowTitleBarHeight::Tall)
                     .grid_row(0)
-                    .slot(TitleBarSlot::Content, brand_nav),
+                    .slot(TitleBarSlot::Content, nav),
+                brand,
                 chrome,
                 Border::new()
                     .grid_row(2)

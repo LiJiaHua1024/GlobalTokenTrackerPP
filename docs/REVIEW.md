@@ -406,3 +406,11 @@
   - **每次启动必刷一次**：首次 `load_all(range, apps, models, force_prices=true)`（后台线程，不阻塞首帧），与 12h 周期检查解耦；运行期内每次扫描复核 12h TTL。
 - **验证**：CLI `prices --update` 实抓：models.dev 7750 + litellm 3637 + llmpricing 1774 upsert（落库 1741 distinct 归一键）；`app_state.prices_last_attempt` 落戳；glm-5.3 解析得 1.4/4.4（官方价）。新增测试：reference/cheapest 取舍、空报价跳过、key 碰撞优先级、override 仍最高、12h 节流 3 例——**32/32 通过，clippy 0，release 干净**。
 - **归属**：CC BY 4.0 数据，源标注 `llmpricing`；`meta.syncedAt` 为上游构建时间，本库 `fetched_at` 记本地抓取时刻，两者语义分开。
+
+## S32 标题栏品牌位固定左上角 ✅
+
+- **需求**：icon + 标题应固定在左上角，不与导航分类项放在一起。
+- **现状**：`TitleBar.Content` 槽居中且收缩到内容宽（实测：品牌+导航整条被居中），`LeftHeader` 槽在本版 windows-reactor 未绑定——无法走原生三段布局。
+- **修法**：导航独占 `Content` 槽（保持居中）；品牌 `StackPanel`（icon+字标）独立放根 Grid 第 0 行，`horizontal_alignment(Left) + margin(12)` 叠在 TitleBar 上方——后挂载即高层级。
+- **取舍**：品牌区覆盖的标题栏像素不响应拖拽（同系统标题栏图标惯例），空白区拖拽不受影响；`collection_slot` 返回裸 `View` 无 `grid_column`——改用 `Border` 包列（此版只居中了 SelectorBar 本体，最终方案不需要）。
+- **验证**：截图确认品牌固定左上、导航居中、窗口按钮区正常；clippy 0、32/32 测试。
