@@ -296,7 +296,11 @@ impl Component for Shell {
             Ok(s) => Msg::Loaded(Box::new(s)),
             Err(e) => Msg::Failed(e),
         });
-        arm_watcher(context);
+        // The watcher is the refresh source only in 仅文件变更 mode; in
+        // timer mode per-file writes would defeat the configured cadence.
+        if config.refresh_secs == 0 {
+            arm_watcher(context);
+        }
         let tray = tray::install();
         if tray.is_some() {
             arm_tray(context);
@@ -492,9 +496,13 @@ impl Component for Shell {
                     let was_off = self.config.refresh_secs == 0;
                     self.config.refresh_secs = secs;
                     self.config.save();
-                    // The chain is armed after each scan; kick one now when
-                    // leaving file-watch-only mode so the cadence starts.
-                    if was_off && secs > 0 && !self.scanning {
+                    if secs == 0 {
+                        // Entering 仅文件变更: the watcher (which lapses in
+                        // timer mode) becomes the refresh source again.
+                        arm_watcher(context);
+                    } else if was_off && !self.scanning {
+                        // Leaving it: kick one timer now so the new cadence
+                        // starts without waiting for the next scan to end.
                         arm_refresh(context, secs);
                     }
                 }
@@ -511,11 +519,16 @@ impl Component for Shell {
             Msg::Noop => {}
             Msg::WatchFired => {
                 diag!("[watch] fired, scanning={}", self.scanning);
-                arm_watcher(context);
-                if self.scanning {
-                    self.pending_rescan = true;
-                } else {
-                    self.start_scan(context);
+                // Only 仅文件变更 mode scans on file events — in timer mode
+                // the next Tick picks up everything, and this one in-flight
+                // watcher lapses (not re-armed).
+                if self.config.refresh_secs == 0 {
+                    arm_watcher(context);
+                    if self.scanning {
+                        self.pending_rescan = true;
+                    } else {
+                        self.start_scan(context);
+                    }
                 }
             }
             Msg::Tray(action) => {

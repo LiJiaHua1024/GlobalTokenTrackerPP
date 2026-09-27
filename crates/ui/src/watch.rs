@@ -1,7 +1,8 @@
 //! Live source watching: `notify` recursive watch over adapter `watch_roots`,
-//! debounced so a burst of log writes collapses into one rescan. The 30 s
-//! timer in `main` stays as the fallback for events missed while a scan is
-//! in flight.
+//! debounced so a burst of log writes collapses into one rescan. Armed only
+//! in 仅文件变更 mode (`refresh_secs == 0`) — in timer mode per-file writes
+//! must not defeat the configured cadence, so the periodic Tick is the sole
+//! refresh source there.
 
 use notify::{RecursiveMode, Watcher};
 use std::path::PathBuf;

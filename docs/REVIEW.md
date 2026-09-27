@@ -361,3 +361,13 @@
   - `ChromeState` 打包 filter 状态传参（`filter_chrome`/`dropdown_overlay` 签名不随选择器数量膨胀）。
 - **验证（UIA 端到端）**：面板不透明无亮边、滚动列表生效；取消 `claude-opus-5` → `已选 39/40`、总 tokens 12.4B→8.66B、claude 行 11404→2988 事件；取消 claude 工具 → 模型列表级联剔除全部 `claude-*`、reconcile 后模型筛选塌缩回"全部"；`ui.json` 正确落 `apps`/`models:null`。
 - **测试**：新增 `model_filter_scopes_queries`——覆盖 `?` 桶、命名模型、`Some([])`、app×model 相交、`model_names` 级联、detail 行过滤。25/25 通过，clippy 0。
+
+## S28 刷新频率真正接管采集节奏 ✅
+
+- **问题**：用户选了刷新间隔后数据仍近乎实时更新——文件 watcher 绕过 `refresh_secs`，任何源文件写入都触发 `WatchFired → start_scan`，定时周期形同虚设。
+- **修法**：watcher 与定时器职责彻底分离——
+  - `refresh_secs > 0`（定时模式）：**watcher 完全不起臂**（`create()` 里条件起臂），周期 `Tick` 是唯一刷新源，下一次 tick 做全量 `scan_once`（游标增量解析，不漏数据）；切换瞬间留在飞的 watcher 最多再触发一次，被 `refresh_secs == 0` 门拦住、不续臂，自然消亡。
+  - `refresh_secs == 0`（仅文件变更）：watcher 是唯一刷新源，文件事件照常驱动扫描；`SetRefreshSecs(0)` 切换时补臂。
+- **收益**：定时模式下活跃的 AI 工具高频写日志不再导致 UI 线程持续被唤醒（每个 WatchFired 都过 update/view），节奏真正由配置值决定；语义自洽——"仅文件变更"字面生效。
+- **验证（GTT_DEBUG stderr 实证）**：10s 模式下 touch 受监视文件 → 日志零 watcher 活动，仅周期 `start→loaded`；切"仅文件变更" → `[watch] armed on 10 roots` 补臂 → touch → `fired → scan start → loaded`。
+- clippy 0、25/25 测试。
