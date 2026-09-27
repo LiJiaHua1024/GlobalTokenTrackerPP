@@ -39,6 +39,7 @@ def run_git(repo_root: Path, *args: str, check: bool = True) -> subprocess.Compl
         stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
+        errors="replace",
     )
 
 

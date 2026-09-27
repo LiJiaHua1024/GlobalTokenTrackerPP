@@ -55,7 +55,7 @@ def main() -> None:
             raise SystemExit(f"stable tag {tag!r} must look like vX.Y.Z")
         if tag != f"v{version}":
             raise SystemExit(
-                f"stable tag {tag} does not match workspace version v{version} — "
+                f"stable tag {tag} does not match workspace version v{version} - "
                 "bump Cargo.toml first, then release"
             )
         outputs["release_tag"] = tag

@@ -32,6 +32,7 @@ def run_validate(*args: str) -> subprocess.CompletedProcess[str]:
         stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
+        errors="replace",
     )
 
 
