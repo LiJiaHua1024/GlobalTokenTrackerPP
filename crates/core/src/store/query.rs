@@ -381,19 +381,32 @@ impl super::Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
-    /// Price book rows for the prices page.
+    /// Effective price book rows for the prices page: one row per model_id —
+    /// the row that `PriceBook::load` precedence would actually resolve
+    /// (seed < litellm < models.dev < llmpricing; ties → newest fetched_at).
     pub fn price_rows(&self, limit: i64) -> Result<Vec<PriceRow>> {
         let mut st = self.conn().prepare(
-            "SELECT model_id, input, output, cache_read, cache_write, source
-             FROM prices ORDER BY model_id LIMIT ?1",
+            "SELECT model_id, input, output, cache_read, cache_write, source FROM (
+                 SELECT model_id, input, output, cache_read, cache_write, source,
+                        ROW_NUMBER() OVER (
+                          PARTITION BY model_id
+                          ORDER BY CASE source
+                              WHEN 'seed' THEN 0 WHEN 'litellm' THEN 1
+                              WHEN 'models.dev' THEN 2 ELSE 3 END DESC,
+                              fetched_at DESC
+                        ) AS rn
+                 FROM prices
+             ) WHERE rn = 1
+             ORDER BY model_id LIMIT ?1",
         )?;
         let rows = st.query_map(params![limit], |r| {
+            // Columns are nullable — llmpricing rows carry NULL cache_write.
             Ok(PriceRow {
                 model: r.get(0)?,
-                input: r.get(1)?,
-                output: r.get(2)?,
-                cache_read: r.get(3)?,
-                cache_write: r.get(4)?,
+                input: r.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
+                output: r.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
+                cache_read: r.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
+                cache_write: r.get::<_, Option<f64>>(4)?.unwrap_or(0.0),
                 source: r.get(5)?,
             })
         })?;

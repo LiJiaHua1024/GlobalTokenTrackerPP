@@ -1168,11 +1168,11 @@ pub fn quota_page(
 // ---------------------------------------------------------------- sources
 
 pub fn sources_page(snap: Option<&Snapshot>, theme: &Theme) -> View {
-    let Some(s) = snap else {
+    let Some(list_src) = snap.and_then(|s| s.sources.as_ref()) else {
         return loading(theme, true);
     };
     let mut list: Vec<View> = Vec::new();
-    for h in &s.sources {
+    for h in list_src {
         let state = h
             .last_error
             .as_ref()
@@ -1246,30 +1246,102 @@ pub fn sources_page(snap: Option<&Snapshot>, theme: &Theme) -> View {
 
 // ---------------------------------------------------------------- prices
 
+// -------------------------------------------------------------- prices
+// Column grid: model | input | output | cache-read | cache-write | source.
+const PRICE_COLS: [GridLength; 6] = [
+    GridLength::STAR,
+    GridLength::Pixel(96.0),
+    GridLength::Pixel(96.0),
+    GridLength::Pixel(96.0),
+    GridLength::Pixel(96.0),
+    GridLength::Pixel(110.0),
+];
+/// $/1M values vary from 0.0001 to thousands — trim, don't pad.
+fn price_num(v: f64) -> String {
+    let s = format!("{v:.4}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s.is_empty() { "0".into() } else { s.to_string() }
+}
+
+fn price_head(theme: &Theme) -> View {
+    let head_cell = |i: i32, h: &str| {
+        dcell(
+            i,
+            dtext(theme, h.into(), i > 0)
+                .font_size(theme.label_size)
+                .font_weight(FontWeight::SEMI_BOLD)
+                .foreground(theme.subtle)
+                .into(),
+        )
+    };
+    let cells: [View; 6] = [
+        head_cell(0, "模型"),
+        head_cell(1, "输入"),
+        head_cell(2, "输出"),
+        head_cell(3, "缓存读"),
+        head_cell(4, "缓存写"),
+        head_cell(5, "来源"),
+    ];
+    Border::new()
+        .padding(Thickness::xy(10.0, 6.0))
+        .border_brush(theme.divider)
+        .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0))
+        .content(Grid::new().columns(PRICE_COLS).children(cells))
+}
+
+fn price_row(theme: &Theme, p: &globaltokentracker_core::store::PriceRow) -> View {
+    let tone = if p.source == "seed" {
+        w::BadgeTone::Muted
+    } else {
+        w::BadgeTone::Accent
+    };
+    let cells: [View; 6] = [
+        dcell(
+            0,
+            TextBlock::new()
+                .text(truncate(&p.model, 56))
+                .font_size(theme.body_size)
+                .vertical_alignment(VerticalAlignment::Center)
+                .into(),
+        ),
+        dcell(1, dtext(theme, price_num(p.input), true).into()),
+        dcell(2, dtext(theme, price_num(p.output), true).into()),
+        dcell(
+            3,
+            dtext(theme, price_num(p.cache_read), true)
+                .foreground(theme.subtle)
+                .into(),
+        ),
+        dcell(
+            4,
+            dtext(theme, price_num(p.cache_write), true)
+                .foreground(theme.subtle)
+                .into(),
+        ),
+        dcell(
+            5,
+            Border::new()
+                .horizontal_alignment(HorizontalAlignment::Right)
+                .content(w::badge(theme, p.source.clone(), tone)),
+        ),
+    ];
+    Border::new()
+        .padding(Thickness::xy(10.0, 7.0))
+        .border_brush(theme.divider)
+        .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0))
+        .content(Grid::new().columns(PRICE_COLS).children(cells))
+}
+
 pub fn prices_page(snap: Option<&Snapshot>, theme: &Theme) -> View {
     let Some(s) = snap else {
         return loading(theme, true);
     };
-    let mut list: Vec<View> = Vec::new();
-    for p in s.prices.iter().take(400) {
-        list.push(
-            Border::new()
-                .padding(Thickness::xy(10.0, 4.0))
-                .border_brush(theme.divider)
-                .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0))
-                .content(
-                    TextBlock::new().text(format!(
-                        "{:<42} in {:>7.2}  out {:>7.2}  cr {:>7.3}  cw {:>7.3}   {}",
-                        truncate(&p.model, 42),
-                        p.input,
-                        p.output,
-                        p.cache_read,
-                        p.cache_write,
-                        p.source
-                    ))
-                    .font_size(theme.body_size),
-                ),
-        );
+    let Some(rows) = s.prices.as_ref() else {
+        return loading(theme, true);
+    };
+    let mut list: Vec<View> = vec![price_head(theme)];
+    for p in rows.iter().take(400) {
+        list.push(price_row(theme, p));
     }
     page_frame(
         theme,
@@ -1280,7 +1352,7 @@ pub fn prices_page(snap: Option<&Snapshot>, theme: &Theme) -> View {
                 TextBlock::new()
                     .text(format!(
                         "{} 个模型 · 前 400 条 · {}",
-                        s.prices.len(),
+                        rows.len(),
                         match s.prices_synced_at {
                             Some(t) => format!(
                                 "联网同步于 {} 小时前",

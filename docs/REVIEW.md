@@ -414,3 +414,11 @@
 - **修法**：导航独占 `Content` 槽（保持居中）；品牌 `StackPanel`（icon+字标）独立放根 Grid 第 0 行，`horizontal_alignment(Left) + margin(12)` 叠在 TitleBar 上方——后挂载即高层级。
 - **取舍**：品牌区覆盖的标题栏像素不响应拖拽（同系统标题栏图标惯例），空白区拖拽不受影响；`collection_slot` 返回裸 `View` 无 `grid_column`——改用 `Border` 包列（此版只居中了 SelectorBar 本体，最终方案不需要）。
 - **验证**：截图确认品牌固定左上、导航居中、窗口按钮区正常；clippy 0、32/32 测试。
+
+## S33 加载性能重构 + 价格页表格化 ✅
+
+- **启动**：`pricing::refresh` 从 `load_all` 拆出为独立后台任务——联网价目（~2.4s）不再串行卡在首帧数据前。`load_all` 只回传 `price_due` 标记（首启强制 + 12h TTL 检查），`Msg::Loaded` 后置地 spawn 抓取任务，`prices_refreshing` 门防重入；`repriced>0` 时补一次扫描让新价落进 USD 列。
+- **刷新/切页**：`Snapshot.sources`/`prices` 改 `Option` 页面域加载——`price_rows(5000)`（最重查询）此前每个 tick 都跑，现在只在价格页打开时取；数据源页同理。`Nav` 到缺数据的页自动补拉一次。明细页保持常载（分页 LIMIT 本就便宜）。
+- **价格页**：定宽文本拼接 → 真表格。列：模型(STAR) | 输入 | 输出 | 缓存读 | 缓存写(各 96px 右对齐) | 来源(110px 徽章)；表头行 + 行底细分割线；数字去尾零（0.1/3/0.0038）；source 徽章 seed=Muted、live=Accent。
+- **顺手修的 bug**：`price_rows` 用 `f64` 读可空列——llmpricing 行 `cache_write=NULL` 会让整个查询报错。改 `Option<f64>`。另把价格页改成显示**生效价**：`ROW_NUMBER` 按 `PriceBook` 同款优先级每 model_id 取唯一赢行（seed<litellm<models.dev<llmpricing），5000 行原始库存 → 3445 个有效模型，不再三行同名。
+- **验证**：截图确认六列表格+来源徽章渲染（UIA 实测 llmpricing 徽章在位）；32/32 测试、clippy 0。

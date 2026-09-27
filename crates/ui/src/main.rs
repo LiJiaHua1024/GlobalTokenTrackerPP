@@ -26,13 +26,18 @@ use theme::Theme;
 use windows_reactor::*;
 
 /// One background refresh produces this bundle (all Send-safe plain data).
+/// `sources`/`prices` are page-scoped: fetched only while that page is open —
+/// the 5k-row price table was otherwise rebuilt on every refresh tick.
 pub struct Snapshot {
     pub vm: OverviewVm,
     pub detail: DetailBundle,
-    pub sources: Vec<SourceHealth>,
-    pub prices: Vec<PriceRow>,
+    pub sources: Option<Vec<SourceHealth>>,
+    pub prices: Option<Vec<PriceRow>>,
     /// `prices` live-source sync timestamp (ms); `None` = seed only.
     pub prices_synced_at: Option<i64>,
+    /// A price refresh is due (startup force or >12h stale) — run it as its
+    /// own background task so network latency never gates the first paint.
+    pub price_due: bool,
     pub scan_ms: u128,
 }
 
@@ -78,6 +83,9 @@ pub struct Shell {
     open_menu: Option<MenuKind>,
     /// Quota page: app groups the user folded away (default all expanded).
     quota_collapsed: std::collections::BTreeSet<String>,
+    /// A background price fetch is in flight — prevents overlapping pulls
+    /// when consecutive scans all report `price_due`.
+    prices_refreshing: bool,
 }
 
 /// Which filter-strip picker is open — `Tools`/`Models` are multi-select
@@ -129,6 +137,9 @@ pub enum Msg {
     Noop,
     /// Background quota poll finished (rows written, channel errors).
     QuotaDone(usize, Vec<String>),
+    /// Background price-source fetch finished — repriced>0 triggers one
+    /// follow-up scan so newly-priced events show their USD.
+    PricesDone(Result<globaltokentracker_core::pricing::RefreshReport, String>),
 }
 
 const DETAIL_PAGE_SIZE: i64 = 200;
@@ -217,28 +228,19 @@ fn load_all(
     apps: Option<Vec<String>>,
     models: Option<Vec<String>>,
     force_prices: bool,
+    page: Page,
 ) -> Result<Snapshot, String> {
     let store = Store::open(&db_path()).map_err(|e| e.to_string())?;
     let engine = Engine::new(store).map_err(|e| e.to_string())?;
     let t = std::time::Instant::now();
     let _ = engine.scan_once().map_err(|e| e.to_string());
     let scan_ms = t.elapsed().as_millis();
-    // Price book: fetch once per launch (force_prices on the first load) and
-    // re-check every scan — stale >12h pulls models.dev + LiteLLM +
-    // llmpricing.dev, then reprices unpriced events. Attempts are throttled
-    // via prices_last_attempt so a dead network never hammers the CDNs;
-    // failure keeps the current book untouched.
-    if force_prices
-        || globaltokentracker_core::pricing::prices_stale(&engine.store).unwrap_or(false)
-    {
-        match globaltokentracker_core::pricing::refresh(&engine.store) {
-            Ok(r) => diag!(
-                "[prices] synced: dev={} litellm={} llmpricing={} repriced={}",
-                r.models_dev, r.litellm, r.llmpricing, r.repriced
-            ),
-            Err(e) => diag!("[prices] refresh failed: {e}"),
-        }
-    }
+    // Price refresh runs as its own background task (see PricesDone) so a
+    // slow network never gates first paint or a refresh tick. `price_due`
+    // fires once per launch (force_prices) and whenever >12h stale; the
+    // app_state attempt stamp throttles failures to the same TTL.
+    let price_due = force_prices
+        || globaltokentracker_core::pricing::prices_stale(&engine.store).unwrap_or(false);
     let vm = engine
         .store
         .overview(range, apps.as_deref(), models.as_deref())
@@ -247,8 +249,15 @@ fn load_all(
         .store
         .detail(0, DETAIL_PAGE_SIZE, apps.as_deref(), models.as_deref())
         .map_err(|e| e.to_string())?;
-    let sources = engine.store.source_health().map_err(|e| e.to_string())?;
-    let prices = engine.store.price_rows(5000).map_err(|e| e.to_string())?;
+    // Page-scoped reads: the heavy tables only exist while their page is open.
+    let sources = (page == Page::Sources)
+        .then(|| engine.store.source_health())
+        .transpose()
+        .map_err(|e| e.to_string())?;
+    let prices = (page == Page::Prices)
+        .then(|| engine.store.price_rows(5000))
+        .transpose()
+        .map_err(|e| e.to_string())?;
     let prices_synced_at =
         globaltokentracker_core::pricing::last_live_sync(&engine.store).unwrap_or(None);
     Ok(Snapshot {
@@ -261,6 +270,7 @@ fn load_all(
         sources,
         prices,
         prices_synced_at,
+        price_due,
         scan_ms,
     })
 }
@@ -323,12 +333,21 @@ impl Component for Shell {
         let range = Range::from_key(&config.range);
         let app_filter = config.apps.clone();
         let model_filter = config.models.clone();
+        let page = match std::env::var("GTT_PAGE").as_deref() {
+            Ok("detail") => Page::Detail,
+            Ok("quota") => Page::Quota,
+            Ok("sources") => Page::Sources,
+            Ok("prices") => Page::Prices,
+            _ => Page::Overview,
+        };
         // force_prices=true: one refresh attempt on every launch (per spec:
         // 每次打开软件自动获取一次), off the UI thread. Subsequent scans only
         // refresh when >12h stale.
-        context.spawn_background(move |_| match load_all(range, app_filter, model_filter, true) {
-            Ok(s) => Msg::Loaded(Box::new(s)),
-            Err(e) => Msg::Failed(e),
+        context.spawn_background(move |_| {
+            match load_all(range, app_filter, model_filter, true, page) {
+                Ok(s) => Msg::Loaded(Box::new(s)),
+                Err(e) => Msg::Failed(e),
+            }
         });
         // The watcher is the refresh source only in 仅文件变更 mode; in
         // timer mode per-file writes would defeat the configured cadence.
@@ -343,13 +362,6 @@ impl Component for Shell {
         // OTLP receiver: dedicated blocking thread (never the reactor pool).
         // Port busy or GTT_NO_OTEL → file-based sources only.
         let _otel = globaltokentracker_core::otel::spawn(db_path());
-        let page = match std::env::var("GTT_PAGE").as_deref() {
-            Ok("detail") => Page::Detail,
-            Ok("quota") => Page::Quota,
-            Ok("sources") => Page::Sources,
-            Ok("prices") => Page::Prices,
-            _ => Page::Overview,
-        };
         Self {
             snap: None,
             page,
@@ -367,6 +379,7 @@ impl Component for Shell {
             quota_at: None,
             open_menu: None,
             quota_collapsed: std::collections::BTreeSet::new(),
+            prices_refreshing: false,
         }
     }
 
@@ -399,6 +412,7 @@ impl Component for Shell {
                         self.config.save();
                     }
                 }
+                let price_due = s.price_due;
                 self.snap = Some(*s);
                 self.last_error = None;
                 if let Some(tray) = &self.tray {
@@ -414,6 +428,20 @@ impl Component for Shell {
                 }
                 self.scanning = false;
                 self.poll_quota_if_stale(context);
+                // Detached price-source fetch: triggered here (post-load) so
+                // network latency never delays the snapshot we just painted.
+                if price_due && !self.prices_refreshing {
+                    self.prices_refreshing = true;
+                    context.spawn_background(|_| {
+                        Msg::PricesDone(
+                            Store::open(&db_path())
+                                .and_then(|s| {
+                                    globaltokentracker_core::pricing::refresh(&s)
+                                })
+                                .map_err(|e| e.to_string()),
+                        )
+                    });
+                }
                 if self.pending_rescan {
                     self.pending_rescan = false;
                     self.start_scan(context);
@@ -597,6 +625,22 @@ impl Component for Shell {
                     Some("价格") | Some("prices") => Page::Prices,
                     _ => Page::Overview,
                 };
+                // Page-scoped data is lazy: first visit to Sources/Prices
+                // triggers one load; ticks keep it fresh while open.
+                let missing = match self.page {
+                    Page::Sources => self
+                        .snap
+                        .as_ref()
+                        .is_none_or(|s| s.sources.is_none()),
+                    Page::Prices => self
+                        .snap
+                        .as_ref()
+                        .is_none_or(|s| s.prices.is_none()),
+                    _ => false,
+                };
+                if missing {
+                    self.start_scan(context);
+                }
             }
             Msg::DetailPage(page) => {
                 self.open_menu = None;
@@ -671,6 +715,22 @@ impl Component for Shell {
                 diag!("[quota] {} rows, {} errors", n, errs.len());
                 for e in errs {
                     diag!("[quota] {e}");
+                }
+            }
+            Msg::PricesDone(res) => {
+                self.prices_refreshing = false;
+                match res {
+                    Ok(r) => {
+                        diag!(
+                            "[prices] synced: dev={} litellm={} llmpricing={} repriced={}",
+                            r.models_dev, r.litellm, r.llmpricing, r.repriced
+                        );
+                        // Newly-priced events change visible USD — rescan once.
+                        if r.repriced > 0 {
+                            self.start_scan(context);
+                        }
+                    }
+                    Err(e) => diag!("[prices] refresh failed: {e}"),
                 }
             }
         }
@@ -838,7 +898,8 @@ impl Shell {
             let range = self.range;
             let apps = self.app_filter.clone();
             let models = self.model_filter.clone();
-            context.spawn_background(move |_| match load_all(range, apps, models, false) {
+            let page = self.page;
+            context.spawn_background(move |_| match load_all(range, apps, models, false, page) {
                 Ok(s) => Msg::Loaded(Box::new(s)),
                 Err(e) => Msg::Failed(e),
             });
