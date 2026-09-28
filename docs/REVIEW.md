@@ -824,3 +824,18 @@
 - **淡出尾巴缩短的风险权衡**：原 500ms 尾巴是给新页未覆盖区域"垫底"防 Mica 透桌面；312ms 时新页已覆盖 ~95%+，左侧残余窄条内旧页残影很淡（实测中段帧无可见桌面透出、无重影文字）。
 - **实测**：`GTT_NAVTEST` 交替切页帧数统计 44–49 帧/700ms ≈ 66–70fps（debug 构建）——帧率不变、飞行时长 −26%；中段截图确认进层盖入、内容不透明。
 - **验证**：66 测试全过、clippy `-D warnings` 0、改动区 fmt 干净。主观节奏仍以实机点击为准——再嫌慢调 `enter_layer` 的 ω（13.5↑）或 `DONE_MS`。
+
+## S67 完整效率模式适配：EcoQoS + IDLE 优先级 + 定时器降权 + 低内存优先级 ✅
+
+- **诉求**：对齐 Windows 任务管理器「效率模式」的完整语义（此前 S65 只做了 EcoQoS 一项）。
+- **`efficiency_process` 扩展为四件套**（托盘隐藏全量开启、前台恢复全量关闭）：
+  1. `ProcessPowerThrottling` EXECUTION_SPEED——调度偏好能效核（原有）
+  2. **`IGNORE_TIMER_RESOLUTION`**（ControlMask|=4）——隐藏态进程不得把系统定时器钉在高分辨率（电池消耗源）；前台恢复默认值保证动画 tick 可请求紧节奏
+  3. **`SetPriorityClass(IDLE_PRIORITY_CLASS)`**——所有线程基优先级降 idle，隐藏态任何后台扫描/监视都让位给系统前台工作；恢复 NORMAL
+  4. **`MEMORY_PRIORITY_LOW`**（ProcessMemoryPriority=2）——内存压力下我们的页先被回收；刻意不用 `EmptyWorkingSet`（强制换页会让恢复瞬间付硬缺页代价）
+- **实测证据**：
+  - 单测 `efficiency_mode_toggles_priority_class`：`GetPriorityClass` 可读回——`efficiency_process(true)` 后断言 = `IDLE_PRIORITY_CLASS`、`(false)` 后 = `NORMAL_PRIORITY_CLASS` ✓（效率模式四件套中唯一程序化可读回的一条腿，验证了整个调用链真实执行）
+  - `--nocapture` 全量跑：零 `[power]` 失败日志 → 组合掩码 EXEC|IGNORE_TIMER_RES(=5)、`SetPriorityClass`、`ProcessMemoryPriority` 三个新调用全部被本机 Win11 26200 接受
+  - **外部可见**：`Get-Process` 读运行实例——`--minimized` 隐藏态 `PriorityClass=Idle`（与任务管理器显示一致）
+- **设计说明**：IDLE 基优先级 + EcoQoS 下托盘驻留的扫描/拉取变慢是特性不是缺陷——正是效率模式语义；`gtt-tray` 空闲优先级线程在用户点击时照常唤醒（idle≠挂起）。线程级 `efficiency_thread` 保持仅 EXECUTION_SPEED（线程类无 IGNORE_TIMER_RES 常量）。
+- **验证**：67 测试全过（+1）、clippy 0、fmt 干净。

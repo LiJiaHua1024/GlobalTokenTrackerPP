@@ -31,7 +31,9 @@ pub struct MiniMaxCode;
 /// `~/.mavis*` dirs only when no `.minimax*` exists (post-migration `.mavis`
 /// is a junction into `.minimax` → same file, would double-count).
 fn data_roots() -> Vec<PathBuf> {
-    let Some(home) = dirs::home_dir() else { return vec![] };
+    let Some(home) = dirs::home_dir() else {
+        return vec![];
+    };
     let read = |prefix: &str| -> Vec<PathBuf> {
         std::fs::read_dir(&home)
             .map(|rd| {
@@ -197,9 +199,7 @@ impl SourceAdapter for MiniMaxCode {
                 raw_ref: Some(format!(
                     "{}#token_usage.id={id}{}",
                     item.path.display(),
-                    agent
-                        .map(|a| format!(" agent={a}"))
-                        .unwrap_or_default()
+                    agent.map(|a| format!(" agent={a}")).unwrap_or_default()
                 )),
                 ..Default::default()
             });

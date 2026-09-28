@@ -47,10 +47,12 @@ impl SourceAdapter for Devin {
     }
 
     fn watch_roots(&self) -> Vec<PathBuf> {
-        vec![db_path()
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_default()]
+        vec![
+            db_path()
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_default(),
+        ]
     }
 
     fn discover(&self) -> Result<Vec<SourceItem>> {

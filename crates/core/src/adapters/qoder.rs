@@ -46,14 +46,16 @@ impl SourceAdapter for Qoder {
 
     fn discover(&self) -> Result<Vec<SourceItem>> {
         // <group>/<session-uuid>/segments/<file>.jsonl → depth 4.
-        Ok(crate::sync::collect_files(&crate::sync::home(ROOT), "jsonl", 4)
-            .into_iter()
-            .map(|p| SourceItem {
-                key: p.to_string_lossy().to_string(),
-                path: p,
-                kind: SourceKind::Jsonl,
-            })
-            .collect())
+        Ok(
+            crate::sync::collect_files(&crate::sync::home(ROOT), "jsonl", 4)
+                .into_iter()
+                .map(|p| SourceItem {
+                    key: p.to_string_lossy().to_string(),
+                    path: p,
+                    kind: SourceKind::Jsonl,
+                })
+                .collect(),
+        )
     }
 
     fn parse_jsonl(
@@ -125,12 +127,14 @@ impl SourceAdapter for Qoder {
                     (Some(a), Some(b)) if b > a => Some(b - a),
                     _ => None,
                 },
-                status: Some(if data["interactive"].as_bool().unwrap_or(false) {
-                    "interactive"
-                } else {
-                    "headless"
-                }
-                .into()),
+                status: Some(
+                    if data["interactive"].as_bool().unwrap_or(false) {
+                        "interactive"
+                    } else {
+                        "headless"
+                    }
+                    .into(),
+                ),
                 provenance: Provenance::LocalJsonl,
                 raw_ref: Some(format!("{}@{off}", item.path.display())),
                 ..Default::default()
@@ -177,7 +181,8 @@ not json at all
     #[test]
     fn no_config_line_no_event() {
         let p = "/s/grp/uuid/segments/f.jsonl";
-        let data = br#"{"ts":"2026-09-26T09:41:50.592+08:00","type":"session.phase.started","data":{}}
+        let data =
+            br#"{"ts":"2026-09-26T09:41:50.592+08:00","type":"session.phase.started","data":{}}
 "#;
         let out = Qoder.parse_jsonl(&item(p), 0, data, None).unwrap();
         assert!(out.events.is_empty());

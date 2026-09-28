@@ -419,9 +419,11 @@ pub fn reprice_unpriced(store: &Store, book: &PriceBook) -> Result<u64> {
             "UPDATE usage_events SET cost_usd=?1, cost_source=?2, pricing_model=?3 WHERE rowid=?4",
         )?;
         for (rowid, ev) in &rows {
-            if let Resolution::Priced(key, via, p) =
-                book.resolve(ev.model.as_deref().unwrap_or(""), ev.request_model.as_deref(), ev.provider_id.as_deref())
-            {
+            if let Resolution::Priced(key, via, p) = book.resolve(
+                ev.model.as_deref().unwrap_or(""),
+                ev.request_model.as_deref(),
+                ev.provider_id.as_deref(),
+            ) {
                 up.execute(rusqlite::params![
                     compute(ev, &p),
                     if via == "prefix" || ev.model.as_deref() == Some("auto") {
@@ -549,10 +551,7 @@ mod tests {
 
     #[test]
     fn normalize_examples() {
-        assert_eq!(
-            normalize_key("stealth/custom-alpha"),
-            "custom-alpha"
-        );
+        assert_eq!(normalize_key("stealth/custom-alpha"), "custom-alpha");
         assert_eq!(
             normalize_key("anthropic/claude-opus-5:free"),
             "claude-opus-5"
@@ -613,7 +612,8 @@ mod tests {
     #[test]
     fn reprice_backfills_unpriced_events() {
         let s = Store::open_memory().unwrap();
-        s.upsert_event(&unpriced_ev("u1", "brand-new-model")).unwrap();
+        s.upsert_event(&unpriced_ev("u1", "brand-new-model"))
+            .unwrap();
         s.upsert_event(&unpriced_ev("u2", "still-unknown")).unwrap();
         // A new live price arrives for u1 only.
         put_price(&s, "models.dev", "brand-new-model", 2.0, 10.0);
@@ -757,7 +757,8 @@ mod tests {
     fn stale_gate_uses_attempt_stamp_12h_ttl() {
         let s = Store::open_memory().unwrap();
         // Fresh attempt (e.g. a failed fetch) → not stale for the next 12h.
-        s.set_state(LAST_ATTEMPT_KEY, &now_ms().to_string()).unwrap();
+        s.set_state(LAST_ATTEMPT_KEY, &now_ms().to_string())
+            .unwrap();
         assert!(!prices_stale(&s).unwrap());
         // Older than 12h → stale again.
         let old = now_ms() - (PRICE_TTL_SECS + 60) * 1000;

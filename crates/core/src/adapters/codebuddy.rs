@@ -71,9 +71,16 @@ fn subdirs(p: &Path) -> Vec<PathBuf> {
 /// (`<config>/<Product>/codebuddy-sessions.vscdb` next to globalStorage).
 fn session_dirs() -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
-    let Some(cfg) = dirs::config_dir() else { return map };
-    let Ok(products) = std::fs::read_dir(cfg) else { return map };
-    for db in products.flatten().map(|e| e.path().join("codebuddy-sessions.vscdb")) {
+    let Some(cfg) = dirs::config_dir() else {
+        return map;
+    };
+    let Ok(products) = std::fs::read_dir(cfg) else {
+        return map;
+    };
+    for db in products
+        .flatten()
+        .map(|e| e.path().join("codebuddy-sessions.vscdb"))
+    {
         let Ok(conn) = rusqlite::Connection::open_with_flags(
             format!("file:{}?mode=ro", db.to_string_lossy().replace('\\', "/")),
             rusqlite::OpenFlags::SQLITE_OPEN_URI | rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -83,13 +90,13 @@ fn session_dirs() -> BTreeMap<String, String> {
         let Ok(mut st) = conn.prepare("SELECT key, value FROM ItemTable") else {
             continue;
         };
-        let rows = st.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        });
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)));
         if let Ok(rows) = rows {
             for row in rows.flatten() {
                 let (key, val) = row;
-                let Some(id) = key.strip_prefix("session:") else { continue };
+                let Some(id) = key.strip_prefix("session:") else {
+                    continue;
+                };
                 if let Ok(v) = serde_json::from_str::<Value>(&val)
                     && let Some(cwd) = text(&v["cwd"])
                 {
@@ -166,10 +173,12 @@ impl SourceAdapter for CodeBuddyIde {
     }
 
     fn watch_roots(&self) -> Vec<PathBuf> {
-        vec![data_root()
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(data_root)]
+        vec![
+            data_root()
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(data_root),
+        ]
     }
 
     fn discover(&self) -> Result<Vec<SourceItem>> {
@@ -221,25 +230,26 @@ impl SourceAdapter for CodeBuddyIde {
         // New message files, oldest first so deltas walk the timeline forward.
         // Each candidate is read exactly once; unparseable files are still
         // marked seen (a corrupt stub shouldn't wedge the watermark).
-        let mut files: Vec<(i64, String, PathBuf, Value)> = std::fs::read_dir(item.path.join("messages"))
-            .map(|rd| {
-                rd.flatten()
-                    .filter_map(|e| {
-                        let p = e.path();
-                        if p.extension().is_none_or(|x| x != "json") {
-                            return None;
-                        }
-                        let stem = p.file_stem()?.to_string_lossy().to_string();
-                        if state.seen.contains(&stem) {
-                            return None;
-                        }
-                        let v: Value =
-                            serde_json::from_str(&std::fs::read_to_string(&p).ok()?).ok()?;
-                        Some((epoch_ms(&v["createdAt"]).unwrap_or(0), stem, p, v))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut files: Vec<(i64, String, PathBuf, Value)> =
+            std::fs::read_dir(item.path.join("messages"))
+                .map(|rd| {
+                    rd.flatten()
+                        .filter_map(|e| {
+                            let p = e.path();
+                            if p.extension().is_none_or(|x| x != "json") {
+                                return None;
+                            }
+                            let stem = p.file_stem()?.to_string_lossy().to_string();
+                            if state.seen.contains(&stem) {
+                                return None;
+                            }
+                            let v: Value =
+                                serde_json::from_str(&std::fs::read_to_string(&p).ok()?).ok()?;
+                            Some((epoch_ms(&v["createdAt"]).unwrap_or(0), stem, p, v))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
         files.sort_by_key(|(ts, ..)| *ts);
         let had_new = !files.is_empty();
 
@@ -283,7 +293,11 @@ impl SourceAdapter for CodeBuddyIde {
                 project: project.clone(),
                 model: text(&extra["modelId"]).or_else(|| text(&extra["modelName"])),
                 ts_start: epoch_ms(&v["createdAt"]),
-                input_tokens: crate::normalize::input_excludes_cache(d.input, d.cached, d.cache_write),
+                input_tokens: crate::normalize::input_excludes_cache(
+                    d.input,
+                    d.cached,
+                    d.cache_write,
+                ),
                 output_tokens: d.output,
                 reasoning_tokens: d.thinking,
                 cache_read_tokens: d.cached,
@@ -300,9 +314,12 @@ impl SourceAdapter for CodeBuddyIde {
         // itself can't produce a tail fingerprint). Skip the write entirely
         // when nothing new was processed — otherwise every quiet tick issues
         // one adapter_state UPDATE per conversation.
-        let fp_file = [item.path.join("index.json"), item.path.join("..").join("index.json")]
-            .into_iter()
-            .find(|p| p.is_file());
+        let fp_file = [
+            item.path.join("index.json"),
+            item.path.join("..").join("index.json"),
+        ]
+        .into_iter()
+        .find(|p| p.is_file());
         if !had_new && cur.state.is_some() {
             return Ok(out);
         }
@@ -351,8 +368,20 @@ mod tests {
             })
         };
         msg(&msgs, "a", "user", "2026-09-03T10:00:00Z", None);
-        msg(&msgs, "b", "assistant", "2026-09-03T10:00:10Z", Some(snap(1000, 50, 800, 10, 1.5)));
-        msg(&msgs, "c", "assistant", "2026-09-03T10:01:00Z", Some(snap(3000, 120, 2000, 30, 2.0)));
+        msg(
+            &msgs,
+            "b",
+            "assistant",
+            "2026-09-03T10:00:10Z",
+            Some(snap(1000, 50, 800, 10, 1.5)),
+        );
+        msg(
+            &msgs,
+            "c",
+            "assistant",
+            "2026-09-03T10:01:00Z",
+            Some(snap(3000, 120, 2000, 30, 2.0)),
+        );
         msg(&msgs, "d", "assistant", "2026-09-03T10:02:00Z", None); // no snapshot
 
         let store = Store::open_memory().unwrap();

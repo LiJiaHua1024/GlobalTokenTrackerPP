@@ -556,17 +556,11 @@ impl super::Store {
             "SELECT CAST(strftime('%H', ts_start/1000, 'unixepoch', '{utc_offset}') AS INTEGER) h,
                     COUNT(*) FROM usage_events GROUP BY h ORDER BY h"
         ))?;
-        let rows = st.query_map([], |r| {
-            Ok((r.get::<_, u8>(0)?, r.get::<_, i64>(1)? as u64))
-        })?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, u8>(0)?, r.get::<_, i64>(1)? as u64)))?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
-    pub fn event_count(
-        &self,
-        apps: Option<&[String]>,
-        models: Option<&[String]>,
-    ) -> Result<u64> {
+    pub fn event_count(&self, apps: Option<&[String]>, models: Option<&[String]>) -> Result<u64> {
         let (w, p) = scope_where(None, None, apps, models);
         Ok(self.conn().query_row(
             &format!("SELECT COUNT(*) FROM usage_events {w}"),
@@ -736,15 +730,17 @@ impl super::Store {
     /// Drop raw events older than `before_ms`. Caller is expected to have run
     /// `rebuild_rollups` first so long-term aggregates survive the prune.
     pub fn prune_events(&self, before_ms: i64) -> Result<u64> {
-        let n = self
-            .conn()
-            .execute("DELETE FROM usage_events WHERE ts_start < ?1", params![before_ms])?;
+        let n = self.conn().execute(
+            "DELETE FROM usage_events WHERE ts_start < ?1",
+            params![before_ms],
+        )?;
         Ok(n as u64)
     }
 
     /// Reclaim pages after a prune (blocks; run from CLI, not the UI scan path).
     pub fn vacuum(&self) -> Result<()> {
-        self.conn().execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM")?;
+        self.conn()
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM")?;
         Ok(())
     }
 }

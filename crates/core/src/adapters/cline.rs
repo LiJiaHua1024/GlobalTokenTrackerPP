@@ -251,7 +251,8 @@ impl SourceAdapter for Cline {
         {
             Some(m) => m,
             None => {
-                out.notes.push(format!("{}: unparseable ui_messages", ui.display()));
+                out.notes
+                    .push(format!("{}: unparseable ui_messages", ui.display()));
                 return Ok(out);
             }
         };
@@ -259,50 +260,49 @@ impl SourceAdapter for Cline {
         // Greedy sequential pairing à la combineApiRequests: a metric-bearing
         // api_req_started is superseded by the next api_req_finished.
         let mut pending: Option<Pending> = None;
-        let emit = |out: &mut Vec<UsageEvent>,
-                        msg: &Value,
-                        info: &Value,
-                        _i: usize,
-                        suffix: &str| {
-            let ts = epoch_ms(&msg["ts"]);
-            let tokens_in = num(&info["tokensIn"]);
-            let tokens_out = num(&info["tokensOut"]);
-            let cache_reads = num(&info["cacheReads"]);
-            let cache_writes = num(&info["cacheWrites"]);
-            let cost = fnum(&info["cost"]);
-            if tokens_in + tokens_out + cache_reads + cache_writes == 0
-                && !cost.is_some_and(|c| c > 0.0)
-            {
-                return false;
-            }
-            let model_at = ts.and_then(|t| {
-                usage_models
-                    .iter()
-                    .rev()
-                    .find(|(m_ts, ..)| *m_ts <= t)
-                    .map(|(_, m, p)| (m.clone(), p.clone()))
-            });
-            out.push(UsageEvent {
-                dedup_key: format!("cline:{task_id}:{}{suffix}", ts.unwrap_or(0)),
-                app: apps::CLINE.into(),
-                session_id: Some(task_id.clone()),
-                project: project.clone(),
-                provider_id: provider.clone().or_else(|| model_at.clone().and_then(|x| x.1)),
-                model: model_at.map(|x| x.0),
-                ts_start: ts,
-                input_tokens: tokens_in,
-                output_tokens: tokens_out,
-                reasoning_tokens: num(&info["reasoningTokenCount"]),
-                cache_read_tokens: cache_reads,
-                cache_write_5m_tokens: cache_writes,
-                cost_usd: cost,
-                cost_source: cost.map(|_| CostSource::ProviderReported),
-                provenance: Provenance::LocalJsonl,
-                raw_ref: Some(format!("{}#ts={}", ui.display(), ts.unwrap_or(0))),
-                ..Default::default()
-            });
-            true
-        };
+        let emit =
+            |out: &mut Vec<UsageEvent>, msg: &Value, info: &Value, _i: usize, suffix: &str| {
+                let ts = epoch_ms(&msg["ts"]);
+                let tokens_in = num(&info["tokensIn"]);
+                let tokens_out = num(&info["tokensOut"]);
+                let cache_reads = num(&info["cacheReads"]);
+                let cache_writes = num(&info["cacheWrites"]);
+                let cost = fnum(&info["cost"]);
+                if tokens_in + tokens_out + cache_reads + cache_writes == 0
+                    && !cost.is_some_and(|c| c > 0.0)
+                {
+                    return false;
+                }
+                let model_at = ts.and_then(|t| {
+                    usage_models
+                        .iter()
+                        .rev()
+                        .find(|(m_ts, ..)| *m_ts <= t)
+                        .map(|(_, m, p)| (m.clone(), p.clone()))
+                });
+                out.push(UsageEvent {
+                    dedup_key: format!("cline:{task_id}:{}{suffix}", ts.unwrap_or(0)),
+                    app: apps::CLINE.into(),
+                    session_id: Some(task_id.clone()),
+                    project: project.clone(),
+                    provider_id: provider
+                        .clone()
+                        .or_else(|| model_at.clone().and_then(|x| x.1)),
+                    model: model_at.map(|x| x.0),
+                    ts_start: ts,
+                    input_tokens: tokens_in,
+                    output_tokens: tokens_out,
+                    reasoning_tokens: num(&info["reasoningTokenCount"]),
+                    cache_read_tokens: cache_reads,
+                    cache_write_5m_tokens: cache_writes,
+                    cost_usd: cost,
+                    cost_source: cost.map(|_| CostSource::ProviderReported),
+                    provenance: Provenance::LocalJsonl,
+                    raw_ref: Some(format!("{}#ts={}", ui.display(), ts.unwrap_or(0))),
+                    ..Default::default()
+                });
+                true
+            };
 
         for (i, msg) in msgs.iter().enumerate() {
             if msg.get("type").and_then(Value::as_str) != Some("say") {
@@ -325,9 +325,14 @@ impl SourceAdapter for Cline {
                     if has_metrics {
                         // Replace any earlier pending metrics row (unpaired).
                         if let Some(p) = pending.take() {
-                            emit(&mut out.events, &msgs[p.idx], &serde_json::from_str(
-                                msgs[p.idx]["text"].as_str().unwrap_or("{}"),
-                            ).unwrap_or_default(), p.idx, ":started");
+                            emit(
+                                &mut out.events,
+                                &msgs[p.idx],
+                                &serde_json::from_str(msgs[p.idx]["text"].as_str().unwrap_or("{}"))
+                                    .unwrap_or_default(),
+                                p.idx,
+                                ":started",
+                            );
                         }
                         pending = Some(Pending { idx: i });
                     }
@@ -412,11 +417,31 @@ mod tests {
         let msgs = format!(
             "[{},{},{},{},{},{}]",
             say("api_req_started", 1779256800100, r#"{"request":"do x"}"#), // spinner
-            say("api_req_started", 1779256800101, r#"{"tokensIn":50,"tokensOut":10,"cacheReads":5,"cacheWrites":2,"cost":0.01,"reasoningTokenCount":3}"#), // paired legacy started (in-place updated)
-            say("api_req_finished", 1779256800102, r#"{"tokensIn":55,"tokensOut":12,"cacheReads":6,"cacheWrites":3,"cost":0.02}"#), // finished wins
-            say("api_req_started", 1779256800200, r#"{"tokensIn":70,"tokensOut":8,"cost":0.03}"#), // unpaired modern usage row
-            say("subagent_usage", 1779256800300, r#"{"source":"subagents","tokensIn":500,"tokensOut":40,"cacheWrites":0,"cacheReads":0,"cost":0.1}"#),
-            say("deleted_api_reqs", 1779256800400, r#"{"tokensIn":900,"tokensOut":60,"cost":0.5}"#),
+            say(
+                "api_req_started",
+                1779256800101,
+                r#"{"tokensIn":50,"tokensOut":10,"cacheReads":5,"cacheWrites":2,"cost":0.01,"reasoningTokenCount":3}"#
+            ), // paired legacy started (in-place updated)
+            say(
+                "api_req_finished",
+                1779256800102,
+                r#"{"tokensIn":55,"tokensOut":12,"cacheReads":6,"cacheWrites":3,"cost":0.02}"#
+            ), // finished wins
+            say(
+                "api_req_started",
+                1779256800200,
+                r#"{"tokensIn":70,"tokensOut":8,"cost":0.03}"#
+            ), // unpaired modern usage row
+            say(
+                "subagent_usage",
+                1779256800300,
+                r#"{"source":"subagents","tokensIn":500,"tokensOut":40,"cacheWrites":0,"cacheReads":0,"cost":0.1}"#
+            ),
+            say(
+                "deleted_api_reqs",
+                1779256800400,
+                r#"{"tokensIn":900,"tokensOut":60,"cost":0.5}"#
+            ),
         );
         std::fs::write(task.join("ui_messages.json"), msgs).unwrap();
         let item = SourceItem {
@@ -477,8 +502,16 @@ mod tests {
         // aggregate; the already-counted originals must not double.
         let msgs = format!(
             "[{},{}]",
-            say("api_req_started", 1779256800500, r#"{"tokensIn":10,"tokensOut":5,"cost":0.001}"#),
-            say("deleted_api_reqs", 1779256800600, r#"{"tokensIn":999,"tokensOut":9,"cost":9.0}"#),
+            say(
+                "api_req_started",
+                1779256800500,
+                r#"{"tokensIn":10,"tokensOut":5,"cost":0.001}"#
+            ),
+            say(
+                "deleted_api_reqs",
+                1779256800600,
+                r#"{"tokensIn":999,"tokensOut":9,"cost":9.0}"#
+            ),
         );
         std::fs::write(task.join("ui_messages.json"), msgs).unwrap();
         let out = Cline.scan_sqlite(&item, &store).unwrap();
@@ -491,8 +524,8 @@ mod tests {
         let (_root, task, _data) = task_fixture("sparse");
         let msgs = format!(
             "[{},{}]",
-            say("api_req_started", 1779256800001, r#"{"request":"x"}"#),      // spinner only
-            say("api_req_started", 1779256800002, r#"{"cost":0.0}"#),          // zero cost → skipped
+            say("api_req_started", 1779256800001, r#"{"request":"x"}"#), // spinner only
+            say("api_req_started", 1779256800002, r#"{"cost":0.0}"#),    // zero cost → skipped
         );
         std::fs::write(task.join("ui_messages.json"), msgs).unwrap();
         let store = Store::open_memory().unwrap();

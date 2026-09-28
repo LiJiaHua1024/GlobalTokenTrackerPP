@@ -165,7 +165,11 @@ impl Engine {
                 CursorAction::Full => {
                     if let Some(seg) = read_segment(&item.path, 0, meta.len(), &mut report.errors) {
                         if !segments.is_empty() && in_flight + seg.len() as u64 > SEGMENT_BUDGET {
-                            self.flush_segments(adapter, std::mem::take(&mut segments), &mut report)?;
+                            self.flush_segments(
+                                adapter,
+                                std::mem::take(&mut segments),
+                                &mut report,
+                            )?;
                             in_flight = 0;
                         }
                         in_flight += seg.len() as u64;
@@ -178,7 +182,11 @@ impl Engine {
                     {
                         let state = self.store.load_cursor(&item.key)?.state;
                         if !segments.is_empty() && in_flight + seg.len() as u64 > SEGMENT_BUDGET {
-                            self.flush_segments(adapter, std::mem::take(&mut segments), &mut report)?;
+                            self.flush_segments(
+                                adapter,
+                                std::mem::take(&mut segments),
+                                &mut report,
+                            )?;
                             in_flight = 0;
                         }
                         in_flight += seg.len() as u64;
@@ -286,8 +294,7 @@ impl Engine {
             // information. Admit them when they carry a timestamp; precise
             // adapters keep the strict billable gate to filter noise.
             let tracked = ev.is_billable()
-                || (capability == crate::adapters::Capability::Metadata
-                    && ev.ts_start.is_some());
+                || (capability == crate::adapters::Capability::Metadata && ev.ts_start.is_some());
             if !tracked {
                 report.events_skipped += 1;
                 continue;

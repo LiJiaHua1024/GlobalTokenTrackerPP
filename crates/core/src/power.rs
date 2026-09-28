@@ -6,10 +6,13 @@
 //!   (`ThreadPowerThrottling`). Used by every non-UI background worker
 //!   (scan/ingest, file watcher, tray event pump, network polls) so bursty
 //!   background load lands on E-cores and stays off the interactive P-cores.
-//! - [`efficiency_process`] — process-wide EcoQoS (`ProcessPowerThrottling`).
-//!   Toggled on when the window hides to the tray — a tray-only app should
-//!   idle on efficiency cores — and toggled off when it returns to the
-//!   foreground, where the default QoS naturally prefers P-cores.
+//! - [`efficiency_process`] — process-wide "Efficiency Mode" as Task Manager
+//!   applies it: `ProcessPowerThrottling` EcoQoS **plus** `IDLE_PRIORITY_CLASS`
+//!   **plus** the timer-resolution opt-out flag, and a low `ProcessMemoryPriority`
+//!   so our pages are reclaimed first under memory pressure. Toggled on when
+//!   the window hides to the tray — a tray-only app should idle like an
+//!   efficiency-mode process — and toggled off when it returns to the
+//!   foreground, where normal class + default QoS prefer P-cores.
 //! - [`worker`] — convenience: `SetThreadDescription` name + EcoQoS mark,
 //!   so background threads are also identifiable in Process Explorer/ETW.
 //!
@@ -70,27 +73,49 @@ pub fn efficiency_thread() {
     }
 }
 
-/// Process-wide EcoQoS switch — `true` when the window hides to the tray
-/// (whole process idles on efficiency cores), `false` on return to the
-/// foreground so the default QoS puts interactive threads back on P-cores.
+/// Process-wide Efficiency Mode switch — `true` when the window hides to the
+/// tray, `false` on return to the foreground. Mirrors what Task Manager's
+/// "Efficiency mode" applies to a process:
+/// 1. `ProcessPowerThrottling` EcoQoS — scheduler prefers efficiency cores.
+/// 2. `IDLE_PRIORITY_CLASS` — every thread drops to idle base priority so
+///    background scans/watches/timers yield to any foreground work on the
+///    machine. Back to `NORMAL_PRIORITY_CLASS` on restore.
+/// 3. `IGNORE_TIMER_RESOLUTION` — a hidden process must not keep the system
+///    timer at high resolution (that's a battery drain); foreground restores
+///    the default so animation ticks can still request tight cadence.
+/// 4. `MEMORY_PRIORITY_LOW` — our pages are reclaimed first under pressure;
+///    unlike `EmptyWorkingSet` this faults nothing out eagerly, so restore
+///    doesn't pay a page-in storm.
 pub fn efficiency_process(on: bool) {
     #[cfg(windows)]
     if !disabled() {
         use windows_sys::Win32::System::Threading::{
-            GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-            PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
-            ProcessPowerThrottling, SetProcessInformation,
+            GetCurrentProcess, IDLE_PRIORITY_CLASS, MEMORY_PRIORITY_INFORMATION,
+            MEMORY_PRIORITY_LOW, MEMORY_PRIORITY_NORMAL, NORMAL_PRIORITY_CLASS,
+            PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION, PROCESS_POWER_THROTTLING_STATE,
+            ProcessMemoryPriority, ProcessPowerThrottling, SetPriorityClass, SetProcessInformation,
         };
-        // Explicit control only: ControlMask=EXECUTION_SPEED with
-        // StateMask 1=on / 0=off — ControlMask=0 is INVALID_PARAMETER on
-        // Win11 (verified on 26200; see SetThreadInformation notes above).
+        let control = PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+            | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+        // Explicit control only: ControlMask names the aspects, StateMask the
+        // values — ControlMask=0 is INVALID_PARAMETER on Win11 (verified on
+        // 26200; see SetThreadInformation notes above).
         let state = PROCESS_POWER_THROTTLING_STATE {
             Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-            ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
-            StateMask: if on {
-                PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+            ControlMask: control,
+            StateMask: if on { control } else { 0 },
+        };
+        let prio = if on {
+            IDLE_PRIORITY_CLASS
+        } else {
+            NORMAL_PRIORITY_CLASS
+        };
+        let mem = MEMORY_PRIORITY_INFORMATION {
+            MemoryPriority: if on {
+                MEMORY_PRIORITY_LOW
             } else {
-                0
+                MEMORY_PRIORITY_NORMAL
             },
         };
         unsafe {
@@ -101,7 +126,19 @@ pub fn efficiency_process(on: bool) {
                 size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
             );
             if ok == 0 {
-                log_fail("SetProcessInformation");
+                log_fail("SetProcessInformation(PowerThrottling)");
+            }
+            if SetPriorityClass(GetCurrentProcess(), prio) == 0 {
+                log_fail("SetPriorityClass");
+            }
+            let ok = SetProcessInformation(
+                GetCurrentProcess(),
+                ProcessMemoryPriority,
+                &mem as *const _ as *const _,
+                size_of::<MEMORY_PRIORITY_INFORMATION>() as u32,
+            );
+            if ok == 0 {
+                log_fail("SetProcessInformation(MemoryPriority)");
             }
         }
     }
@@ -164,25 +201,26 @@ mod tests {
                 ),
                 0
             );
-            // restore the test process to non-eco
-            let off = PROCESS_POWER_THROTTLING_STATE {
-                Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-                ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
-                StateMask: 0,
-            };
-            assert_ne!(
-                SetProcessInformation(
-                    GetCurrentProcess(),
-                    ProcessPowerThrottling,
-                    &off as *const _ as *const _,
-                    size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
-                ),
-                0
-            );
         }
         // exercised paths must not panic
         efficiency_thread();
         efficiency_process(false);
+    }
+
+    #[test]
+    fn efficiency_mode_toggles_priority_class() {
+        // SetPriorityClass/GetPriorityClass IS readable back — the one leg of
+        // efficiency mode with a verifiable read path.
+        unsafe {
+            let base = GetPriorityClass(GetCurrentProcess());
+            efficiency_process(true);
+            assert_eq!(GetPriorityClass(GetCurrentProcess()), IDLE_PRIORITY_CLASS);
+            efficiency_process(false);
+            assert_eq!(GetPriorityClass(GetCurrentProcess()), NORMAL_PRIORITY_CLASS);
+            if base != NORMAL_PRIORITY_CLASS {
+                SetPriorityClass(GetCurrentProcess(), base);
+            }
+        }
     }
 
     #[test]

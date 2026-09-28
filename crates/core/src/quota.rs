@@ -60,7 +60,13 @@ fn agent() -> ureq::Agent {
         .new_agent()
 }
 
-fn snap(app: &str, kind: &str, used_pct: Option<f64>, resets_at: Option<i64>, raw: &str) -> QuotaSnapshot {
+fn snap(
+    app: &str,
+    kind: &str,
+    used_pct: Option<f64>,
+    resets_at: Option<i64>,
+    raw: &str,
+) -> QuotaSnapshot {
     QuotaSnapshot {
         app: app.into(),
         account: None,
@@ -166,10 +172,17 @@ fn poll_codex() -> Result<Vec<QuotaSnapshot>> {
         }
     };
     // ~5h session window vs weekly window — told apart by limit_window_seconds.
-    for (key, fallback) in [("primary_window", "5h_block"), ("secondary_window", "weekly")] {
+    for (key, fallback) in [
+        ("primary_window", "5h_block"),
+        ("secondary_window", "weekly"),
+    ] {
         let w = &v["rate_limit"][key];
         let secs = w["limit_window_seconds"].as_i64().unwrap_or(0);
-        let kind = if secs >= 6 * 24 * 3600 { "weekly" } else { fallback };
+        let kind = if secs >= 6 * 24 * 3600 {
+            "weekly"
+        } else {
+            fallback
+        };
         window(kind, w);
     }
     for extra in v["additional_rate_limits"].as_array().into_iter().flatten() {
@@ -213,7 +226,10 @@ fn cursor_db() -> Option<std::path::PathBuf> {
 fn cursor_token() -> Result<String> {
     let db_path = cursor_db().context("cursor state.vscdb not found")?;
     let conn = rusqlite::Connection::open_with_flags(
-        format!("file:{}?mode=ro", db_path.to_string_lossy().replace('\\', "/")),
+        format!(
+            "file:{}?mode=ro",
+            db_path.to_string_lossy().replace('\\', "/")
+        ),
         rusqlite::OpenFlags::SQLITE_OPEN_URI | rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )?;
     let tok: String = conn
@@ -265,7 +281,10 @@ fn poll_cursor() -> Result<Vec<QuotaSnapshot>> {
         q.limit_value = lenient_f64(&plan["limit"]).map(|c| c / 100.0);
         out.push(q);
     }
-    for (key, kind) in [("autoPercentUsed", "auto_pool"), ("apiPercentUsed", "api_pool")] {
+    for (key, kind) in [
+        ("autoPercentUsed", "auto_pool"),
+        ("apiPercentUsed", "api_pool"),
+    ] {
         if let Some(pct) = lenient_f64(&plan[key]) {
             out.push(snap("cursor", kind, Some(pct), resets, &body));
         }

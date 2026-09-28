@@ -104,30 +104,29 @@ impl SourceAdapter for WorkBuddy {
             ]
             .iter()
             .map(|k| num(&raw[k]))
-            .chain(std::iter::once(num(&raw["prompt_tokens_details"]["cached_tokens"])))
+            .chain(std::iter::once(num(
+                &raw["prompt_tokens_details"]["cached_tokens"],
+            )))
             .max()
             .unwrap_or(0);
-            let cache_write = [
-                "cache_creation_input_tokens",
-                "prompt_cache_write_tokens",
-            ]
-            .iter()
-            .map(|k| num(&raw[k]))
-            .max()
-            .unwrap_or(0);
+            let cache_write = ["cache_creation_input_tokens", "prompt_cache_write_tokens"]
+                .iter()
+                .map(|k| num(&raw[k]))
+                .max()
+                .unwrap_or(0);
             let prompt = num(&raw["prompt_tokens"]);
             let reasoning = num(&raw["completion_tokens_details"]["reasoning_tokens"])
                 .max(num(&raw["completion_thinking_tokens"]));
-            let response_id = text(&pd["messageId"]).unwrap_or_else(|| {
-                format!("{}@{}", item.key, line_start)
-            });
+            let response_id =
+                text(&pd["messageId"]).unwrap_or_else(|| format!("{}@{}", item.key, line_start));
             out.events.push(UsageEvent {
                 dedup_key: format!("workbuddy:{response_id}"),
                 app: apps::WORKBUDDY.into(),
                 session_id: Some(session_id.clone()),
                 project: project.clone(),
                 model: text(&pd["model"]),
-                request_model: text(&pd["requestModelId"]).or_else(|| text(&pd["requestModelName"])),
+                request_model: text(&pd["requestModelId"])
+                    .or_else(|| text(&pd["requestModelName"])),
                 ts_start: epoch_ms(&v["timestamp"]),
                 input_tokens: input_excludes_cache(prompt, cache_read, cache_write),
                 output_tokens: num(&raw["completion_tokens"]),

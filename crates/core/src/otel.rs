@@ -48,8 +48,8 @@ pub fn spawn(db: PathBuf) -> Option<std::thread::JoinHandle<()>> {
 
 /// Standalone (CLI `globaltokentracker otel`) blocking variant.
 pub fn serve(db: &Path) -> Result<()> {
-    let listener = TcpListener::bind(DEFAULT_ADDR)
-        .with_context(|| format!("otel: bind {DEFAULT_ADDR}"))?;
+    let listener =
+        TcpListener::bind(DEFAULT_ADDR).with_context(|| format!("otel: bind {DEFAULT_ADDR}"))?;
     tracing::info!("otel: serving on http://{DEFAULT_ADDR}/v1/metrics");
     for stream in listener.incoming().flatten() {
         let _ = handle(stream, db);
@@ -80,7 +80,10 @@ fn handle(stream: TcpStream, db: &Path) -> Result<()> {
     let mut parts = req.split_whitespace();
     let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
     let len: usize = lines
-        .find_map(|l| l.split_once(':').filter(|(k, _)| k.eq_ignore_ascii_case("content-length")))
+        .find_map(|l| {
+            l.split_once(':')
+                .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+        })
         .and_then(|(_, v)| v.trim().parse().ok())
         .unwrap_or(0);
     let len = len.min(MAX_BODY);
@@ -118,7 +121,9 @@ fn ingest_metrics(body: &[u8], db: &Path) -> Result<usize> {
     for rm in v["resourceMetrics"].as_array().into_iter().flatten() {
         for sm in rm["scopeMetrics"].as_array().into_iter().flatten() {
             for m in sm["metrics"].as_array().into_iter().flatten() {
-                let Some(name) = m["name"].as_str() else { continue };
+                let Some(name) = m["name"].as_str() else {
+                    continue;
+                };
                 let points = m["sum"]["dataPoints"]
                     .as_array()
                     .or_else(|| m["gauge"]["dataPoints"].as_array());
@@ -161,7 +166,14 @@ fn upsert_point(store: &Store, metric: &str, dp: &Value) -> Result<bool> {
         .map(|ns| ns / 1_000_000)
         .unwrap_or_else(now_ms);
     let attrs_json = dp["attributes"].to_string();
-    store.upsert_otel_metric(metric, &session, &sig_parts.join(","), value, ts_ms, &attrs_json)
+    store.upsert_otel_metric(
+        metric,
+        &session,
+        &sig_parts.join(","),
+        value,
+        ts_ms,
+        &attrs_json,
+    )
 }
 
 fn attr_value(v: &Value) -> Option<String> {
@@ -180,8 +192,7 @@ fn attr_value(v: &Value) -> Option<String> {
 pub fn install_claude_env() -> Result<PathBuf> {
     let path = crate::sync::home(".claude/settings.json");
     let mut doc: Value = if path.exists() {
-        serde_json::from_str(&std::fs::read_to_string(&path)?)
-            .context("settings.json parse")?
+        serde_json::from_str(&std::fs::read_to_string(&path)?).context("settings.json parse")?
     } else {
         serde_json::json!({})
     };
@@ -199,7 +210,10 @@ pub fn install_claude_env() -> Result<PathBuf> {
     let env = env.as_object_mut().unwrap();
     for (k, v) in [
         ("OTEL_METRICS_EXPORTER", serde_json::json!("otlp")),
-        ("OTEL_EXPORTER_OTLP_PROTOCOL", serde_json::json!("http/json")),
+        (
+            "OTEL_EXPORTER_OTLP_PROTOCOL",
+            serde_json::json!("http/json"),
+        ),
         (
             "OTEL_EXPORTER_OTLP_ENDPOINT",
             serde_json::json!(format!("http://{DEFAULT_ADDR}")),
@@ -235,11 +249,7 @@ mod tests {
         let db = dir.join("t.db");
         // Same point pushed twice with a higher value → one row, latest wins.
         let _ = ingest_metrics(PAYLOAD.as_bytes(), &db).unwrap();
-        let _ = ingest_metrics(
-            PAYLOAD.replace("1.5", "2.75").as_bytes(),
-            &db,
-        )
-        .unwrap();
+        let _ = ingest_metrics(PAYLOAD.replace("1.5", "2.75").as_bytes(), &db).unwrap();
         let s = Store::open(&db).unwrap();
         let (rows, val): (i64, f64) = s
             .conn()
