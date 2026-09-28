@@ -574,3 +574,22 @@
 - **实测（GUI 端到端）**：设置页渲染正常；语言切换实时全页生效（截图验证 zh→en）；ToggleSwitch 空格触发 → `want=true got=true` 注册表写入 `"exe" --minimized` → 再切 `want=false got=false` 值删除不回弹；`--minimized` 启动实例 4 个顶层窗口全 `visible=False` 托盘常驻。
 - **环境插曲**：测试期间 Run 键写入遭 AV 行为监控拦截（~31s 阻塞后失败）——代码无 bug，`set` 返回真实状态的设计恰好兜底；单测改到非监控暂存键验证注册表 plumbing。
 - **验证**：52/52 测试（core 50 + i18n/autostart 各 1）、clippy `-D warnings` 0、触碰文件 fmt 净。
+
+## S48 OpenCode 统计修正：会话级 → 消息级粒度 ✅
+
+- **问题**：用户报告 OpenCode 统计不准。实测对照源库发现三条同源根因——
+  1. **日分布压平**：`ses_fd13…` 会话跨 6 天（138.9h），38.6M input + $4.74 成本被整体记在创建日 8/23 一条事件上；真实消息分布在 8/23→8/29 七天。
+  2. **时长虚增 27×**：`duration = session.time_updated - time_created` 算的是会话存活期（598,530s），真实 API 计算耗时仅 22,271s。
+  3. **模型归属全错**：512 条 assistant 消息实际横跨 2 provider / 9 模型（含 106 条免费模型），session 行只记最后一个模型 `glm-5.3-flash`——deepseek/longcat/muse-spark/ox-alpha-free 的用量全被归到 glm 头上。
+- **核查链路**：`session.tokens_*`/`cost` 与 `message` 逐条求和 **Δ=0**（session 是忠实汇总，不是错数据，是错粒度）；ledger 与源库总量逐分不差；`storage/` JSON 旧格式为空目录无遗留数据。
+- **修法**：`scan_sqlite` 改读 `message JOIN session`，每 assistant 消息一个事件——
+  - `dedup_key`: `opencode:session:{id}` → `opencode:msg:{id}`
+  - `ts_start/ts_end/duration`：`data.time.created/completed`（真实调用耗时），回落 `m.time_created`/`m.time_updated` 列
+  - `model/provider_id`：`data.modelID`/`providerID`（每条消息真实模型）
+  - `cost>0` → `provider_reported`；`=0` → 价格簿兜底（免费模型如 `*-free` 保持 NULL 不编造）
+  - `tokens.total` 与分量做自校验，不一致记 `notes`
+  - 高水位沿用 `message.time_updated`（同毫秒刻度），1s 重叠幂等合并
+- **迁移**：`sync_cursors.adapter_state` 标记 `"msg-v2"`——首扫时 `DELETE FROM usage_events WHERE app='opencode'`（新增 `Store::delete_app_events`）+ 水位归零全量重灌；老库升级不重计、不残留，崩溃重跑幂等。
+- **schema 守卫**：`session`/`message` 缺一即报 `unsupported opencode schema`（计入数据源健康），不静默吞零。
+- **实机验证**：`scan opencode` → 488 事件入账（24 条零量中止调用被计量门槛正确跳过），总量守恒（in 38,925,612 / out 136,254 / cacheR 213,744,974 / $4.76 与源库逐分不差）；按日分布修正为 8/23–29 七天、按模型拆出 8 个 provider/model 组；旧 `opencode:session:*` 行清零，游标 `msg-v2`。
+- **验证**：54 core + 2 ui 测试全过（新增 4 个：消息级事件/迁移清除/更新重扫/schema 守卫），clippy `-D warnings` 0，触碰文件 fmt 净。

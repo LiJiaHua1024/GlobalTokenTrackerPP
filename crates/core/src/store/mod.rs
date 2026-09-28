@@ -8,9 +8,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
 pub use cursor::{CursorAction, FileCursor, tail_fingerprint};
-pub use query::{
-    AppSummary, DailyRow, EventRow, PriceRow, QuotaRow, SourceHealth, Totals,
-};
+pub use query::{AppSummary, DailyRow, EventRow, PriceRow, QuotaRow, SourceHealth, Totals};
 
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_VERSION: i64 = 1;
@@ -148,7 +146,9 @@ impl Store {
     /// C-level pass; tmp+rename means a crash mid-copy leaves the old
     /// snapshot intact rather than a torn file.
     pub fn backup_now(&self) -> Result<()> {
-        let Some(path) = &self.path else { return Ok(()) };
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
         let dir = path
             .parent()
             .unwrap_or_else(|| Path::new("."))
@@ -287,6 +287,16 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Delete every event owned by one adapter. Used when an adapter changes
+    /// its event granularity/dedup-key scheme — stale rows under the old
+    /// scheme would double-count against the new ones.
+    pub fn delete_app_events(&self, app: &str) -> Result<u64> {
+        let n = self
+            .conn
+            .execute("DELETE FROM usage_events WHERE app=?1", params![app])?;
+        Ok(n as u64)
+    }
+
     /// Insert a quota snapshot — skipped when identical in every user-visible
     /// field to the latest row for the same (app, account, window_kind), so
     /// unchanged subscription windows don't pile up duplicate history rows.
@@ -418,7 +428,8 @@ mod tests {
     fn rollups_respect_local_date_boundary() {
         let s = Store::open_memory().unwrap();
         s.upsert_event(&ev_ts("b1", BOUNDARY_MS)).unwrap();
-        s.upsert_event(&ev_ts("b2", BOUNDARY_MS + 3_600_000)).unwrap(); // 00:30Z
+        s.upsert_event(&ev_ts("b2", BOUNDARY_MS + 3_600_000))
+            .unwrap(); // 00:30Z
         s.rebuild_rollups("+00:00").unwrap();
         let (d15, d16): (i64, i64) = s
             .conn()
@@ -465,9 +476,7 @@ mod tests {
         s.upsert_event(&ev_ts("new", BOUNDARY_MS + 86_400_000 * 200))
             .unwrap();
         s.rebuild_rollups("+00:00").unwrap();
-        let pruned = s
-            .prune_events(BOUNDARY_MS + 86_400_000 * 90)
-            .unwrap();
+        let pruned = s.prune_events(BOUNDARY_MS + 86_400_000 * 90).unwrap();
         assert_eq!(pruned, 1);
         assert_eq!(s.event_count(None, None).unwrap(), 1);
         // Both rollup rows survive — the pruned day's aggregate included.
@@ -559,10 +568,7 @@ mod tests {
             s.event_count(None, Some(only("opus").as_slice())).unwrap(),
             1
         );
-        assert_eq!(
-            s.event_count(None, Some(only("?").as_slice())).unwrap(),
-            1
-        );
+        assert_eq!(s.event_count(None, Some(only("?").as_slice())).unwrap(), 1);
         assert_eq!(s.event_count(None, Some(&[])).unwrap(), 0);
         // Filters combine: app × model intersects honestly.
         let t = s
@@ -671,7 +677,8 @@ mod tests {
         let prev = Store::open(&dir.join("ledger.prev.db")).unwrap();
         assert_eq!(prev.event_count(None, None).unwrap(), 1);
         // maybe_backup honors the 24h throttle stamp.
-        s.set_state("backup_last_at", &now_ms().to_string()).unwrap();
+        s.set_state("backup_last_at", &now_ms().to_string())
+            .unwrap();
         assert!(!s.maybe_backup().unwrap());
         // In-memory stores never attempt file work.
         assert!(!Store::open_memory().unwrap().maybe_backup().unwrap());
@@ -727,10 +734,7 @@ mod tests {
             .unwrap();
         let rows = s.latest_quotas().unwrap();
         assert_eq!(rows.len(), 3); // exactly one per (app, kind)
-        assert_eq!(
-            rows.iter().filter(|r| r.app == "workbuddy").count(),
-            1
-        );
+        assert_eq!(rows.iter().filter(|r| r.app == "workbuddy").count(), 1);
     }
 
     #[test]
@@ -739,7 +743,12 @@ mod tests {
         let now = now_ms();
         let old = now - 40 * 86_400_000; // beyond the 30d retention window
         // Two stale rows + one fresh row for one key; a stale-only key too.
-        for (kind, ts) in [("session_ctx", old), ("session_ctx", old + 1), ("session_ctx", now), ("weekly", old)] {
+        for (kind, ts) in [
+            ("session_ctx", old),
+            ("session_ctx", old + 1),
+            ("session_ctx", now),
+            ("weekly", old),
+        ] {
             let mut q = quota_snap("wb", kind, Some(50.0), ts);
             q.raw_json = Some(format!("ts{ts}"));
             s.conn()
@@ -757,9 +766,11 @@ mod tests {
         // Fresh session_ctx + the kept-latest stale weekly both survive.
         assert_eq!(rows.len(), 2);
         assert_eq!(
-            rows.iter().find(|r| r.window_kind == "weekly").unwrap().captured_at,
+            rows.iter()
+                .find(|r| r.window_kind == "weekly")
+                .unwrap()
+                .captured_at,
             old
         );
     }
 }
-
