@@ -120,9 +120,7 @@ pub fn tr(zh: &str) -> &str {
         "暂无配额信号" => "No quota signals",
         "订阅配额" => "Subscription quota",
         "未计价模型" => "Unpriced models",
-        "{} — 请在价格页补充覆写（绝不猜价）" => {
-            "{} — add overrides on the Prices page (never guessed)"
-        }
+        "{} — 请在价格页补充覆写" => "{} — add overrides on the Prices page",
         "估算" => "Est.",
         "上移" => "Move up",
         "下移" => "Move down",

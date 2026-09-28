@@ -377,7 +377,7 @@ fn overview_widget(
                     .is_open(true)
                     .title(t!("未计价模型").to_string())
                     .message(tf!(
-                        "{} — 请在价格页补充覆写（绝不猜价）",
+                        "{} — 请在价格页补充覆写",
                         vm.unpriced
                             .iter()
                             .take(6)
