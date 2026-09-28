@@ -1696,6 +1696,11 @@ const ACCENT_OPTIONS: &[(&str, &str)] = &[
     ("#d84d5b", "红色"),
 ];
 const LANG_OPTIONS: &[(&str, &str)] = &[("zh", "中文"), ("en", "English")];
+const CLOSE_OPTIONS: &[(&str, &str)] = &[
+    ("", "每次询问"),
+    ("quit", "彻底退出"),
+    ("tray", "隐藏到托盘"),
+];
 
 /// Dropdown picker for one setting row. ComboBox reports the selected
 /// index — semantic value lookup is by position, no label matching.
@@ -1875,6 +1880,17 @@ pub fn settings_page(
             .on_toggled(ctx.callback(Msg::SetAutostart))
             .into(),
     );
+    let close_row = setting_row(
+        theme,
+        "点击关闭按钮时",
+        None,
+        setting_dropdown(
+            CLOSE_OPTIONS,
+            &config.close_action,
+            ctx,
+            Msg::SetCloseAction,
+        ),
+    );
 
     page_frame(
         theme,
@@ -1889,7 +1905,10 @@ pub fn settings_page(
                         vstack(theme.gap, vec![theme_row, accent_row, font_row, scale_row]),
                     ),
                     w::section_header(theme, Symbol::Setting, tr("通用")),
-                    w::card(theme, vstack(theme.gap, vec![lang_row, autostart_row])),
+                    w::card(
+                        theme,
+                        vstack(theme.gap, vec![lang_row, autostart_row, close_row]),
+                    ),
                 ],
                 anim,
             ),

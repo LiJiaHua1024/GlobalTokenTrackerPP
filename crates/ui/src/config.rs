@@ -57,6 +57,10 @@ pub struct UiConfig {
     /// Cached mirror of the Run-key state so the toggle renders instantly;
     /// `autostart::enabled()` is authoritative at startup.
     pub autostart: bool,
+    /// Title-bar close behavior: "" = ask every time, "quit" = exit,
+    /// "tray" = hide to the notification area.
+    #[serde(default)]
+    pub close_action: String,
     /// page name → layout
     pub pages: BTreeMap<String, PageLayout>,
 }
@@ -78,6 +82,7 @@ impl Default for UiConfig {
             lang: String::new(),
             window_theme: String::new(),
             autostart: false,
+            close_action: String::new(),
             pages: BTreeMap::new(),
         }
     }
@@ -103,7 +108,9 @@ impl UiConfig {
     pub fn load() -> Self {
         std::fs::read_to_string(config_path())
             .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
+            // Editors that write a UTF-8 BOM (Notepad on some versions,
+            // PowerShell Set-Content) must not silently drop the config.
+            .and_then(|s| serde_json::from_str(s.trim_start_matches('\u{feff}')).ok())
             .unwrap_or_default()
     }
 

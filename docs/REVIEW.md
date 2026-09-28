@@ -752,3 +752,22 @@
 - **测试钩子**：`GTT_NAVTEST=<label>@<ms>[@<alt>]` 首个快照后每 ms 交替切页 label↔alt——截图实测捕获飞行帧（注入输入到不了 WinUI3 content island，同 GTT_TIPTEST 先例）。
 - **实测**（60 帧连拍）：总览→明细中帧显示表格从右滑入盖在旧页上、旧页左移淡出；明细→配额同效反向。飞行全程 ~15 帧（~320ms 可见运动 + ~600ms 弹簧收尾），DONE_MS=950 收敛。
 - **验证**：64 测试全过、clippy `-D warnings` 0、改动区 fmt 干净（`useless_conversion` 三处 `.into()` 已清）。
+
+## S62 关闭拦截：退出/挂托盘询问 + 可记忆默认 ✅
+
+- **需求**：标题栏 X 不再直接退出——弹出询问「彻底退出 / 隐藏到托盘」，附「记住我的选择」与设置页默认项。
+- **拦截机制**：reactor 0.100 的 `IAppWindow` 绑定裁掉了 `Closing` 事件（vtable 无可用包装），走 Win32 正路——`close_hook.rs` 用 `SetWindowSubclass` 挂 `WM_CLOSE`：吞掉消息并发 `Msg::CloseRequested`；UI 线程 TLS 存 `LocalSender`（子类 proc 与 UI 同线程，TLS 天然安全）；`WM_NCDESTROY` 卸子类清 TLS。`allow_next_close()` 一次性放行——选「彻底退出」或托盘菜单 Quit 置位后再 `request_close()`，防止自己拦自己死循环；`INSTALLED`/`ensure_installed` 幂等，view() 每帧兜底挂载。
+- **对话框**：reactor `ContentDialog`（title + 说明 + `CheckBox` 记住选择；primary=彻底退出 / secondary=隐藏到托盘 / close=取消）。托盘缺失（GTT_NOTRAY 或安装失败）时 secondary `is_enabled=false` + 提示「托盘图标不可用」；已存 `close_action=tray` 但托盘缺席 → `CloseRequested` 落 `_` 分支弹框兜底，绝不静默丢进程。
+- **持久化**：`UiConfig.close_action`（`""`问/`"quit"`/`"tray"`）；勾选记忆后按所选按钮写入，未勾选不改动既有默认。设置页「通用」新增「点击关闭按钮时」下拉（每次询问/直接退出/隐藏到托盘），可随时改回。
+- **顺带修复**：`UiConfig::load` 容忍 UTF-8 BOM——实测 PowerShell/记事本手改 ui.json 会写入 BOM，serde_json 解析失败导致**全配置静默重置**；现 `trim_start_matches('\u{feff}')` 后再解析。
+- **实测**（SendMessage(WM_CLOSE) 触发，UIA 驱动按钮）：
+  - 默认 → 弹框（截图：标题/说明/CheckBox/三按钮，页面遮罩正常）
+  - 隐藏到托盘 → 进程存活窗口消失；FindWindowW+ShowWindow 恢复 ✓
+  - 取消 → 进程存活 ✓
+  - 记忆+彻底退出 → 进程退出、`close_action="quit"` 落盘 ✓
+  - 存 quit → WM_CLOSE 直接退出无弹框 ✓
+  - 存 tray → WM_CLOSE 直接隐藏无弹框（含 BOM 文件，验证 BOM 修复）✓
+  - GTT_NOTRAY → 弹框+「托盘图标不可用」+隐藏按钮置灰 ✓
+  - 存 tray + GTT_NOTRAY → 回落弹框 ✓
+- **取舍**：托盘菜单 Quit 走同一 `quit_now()`（已由对话框路径实测验证 allow-once 放行），未单独 E2E 托盘菜单点击（原生弹出菜单 UIA 不可达）。`DefSubclassProc` 调用包在 unsafe 块内（Rust 2024 unsafe-op-in-unsafe-fn）。
+- **验证**：64 测试全过、clippy `-D warnings` 0、改动区 fmt 干净。

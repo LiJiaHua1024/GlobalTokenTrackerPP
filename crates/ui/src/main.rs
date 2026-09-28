@@ -8,6 +8,7 @@
 //! parent console, or allocate one for a double-clicked debug launch.
 
 mod autostart;
+mod close_hook;
 mod config;
 mod fonts;
 mod i18n;
@@ -23,6 +24,7 @@ use globaltokentracker_core::store::{EventRow, PriceRow, SourceHealth, default_d
 use globaltokentracker_core::viewmodel::fmt;
 use globaltokentracker_core::viewmodel::{Range, day_start_ms};
 use globaltokentracker_core::{Engine, OverviewVm, Store};
+use i18n::tr;
 use pages::*;
 use std::path::PathBuf;
 use theme::Theme;
@@ -110,6 +112,11 @@ pub struct Shell {
     /// in horizontally (each with its own damping/velocity) while the old
     /// page slides out on a second layer. `None` when at rest.
     nav_anim: Option<widgets::NavAnim>,
+    /// Close prompt dialog open (title-bar X swallowed by close_hook).
+    close_prompt: bool,
+    /// "记住我的选择" checkbox inside the close prompt — persists whichever
+    /// button the user then picks into `config.close_action`.
+    close_remember: bool,
     /// 1-DIP full-width ruler panel on the overview page; its surface
     /// metrics report the real content width for adaptive grids.
     ruler: ElementRef<SwapChainPanel>,
@@ -188,6 +195,15 @@ pub enum Msg {
     SetLang(&'static str),
     /// Settings: Run-key launch-at-login toggle; arg is the switch's new state.
     SetAutostart(bool),
+    /// Settings: close-button behavior — "" = ask, "quit", "tray".
+    SetCloseAction(&'static str),
+    /// Title-bar X swallowed by the window subclass — open the ask dialog
+    /// (or apply the remembered action directly).
+    CloseRequested,
+    /// Close prompt dismissed — arg says which button ended it.
+    CloseDialogResult(ContentDialogResult),
+    /// "记住我的选择" checkbox toggled inside the close prompt.
+    CloseRemember(bool),
     /// Background quota poll finished (rows written, channel errors).
     QuotaDone(usize, Vec<String>),
     /// Background price-source fetch finished — repriced>0 triggers one
@@ -468,6 +484,8 @@ impl Component for Shell {
             views_stale: true,
             overview_cols: 4,
             nav_anim: None,
+            close_prompt: false,
+            close_remember: false,
             ruler: ElementRef::new(),
         }
     }
@@ -777,6 +795,42 @@ impl Component for Shell {
                 self.config.autostart = got;
                 self.config.save();
             }
+            Msg::CloseRequested => match self.config.close_action.as_str() {
+                "quit" => self.quit_now(context),
+                // "tray" remembered but the icon failed to install → hiding
+                // would strand the process with no way back; ask instead.
+                "tray" if self.tray.is_some() => tray::hide_main_window(),
+                _ => self.close_prompt = true,
+            },
+            Msg::CloseDialogResult(res) => {
+                self.close_prompt = false;
+                match res {
+                    ContentDialogResult::Primary => {
+                        if self.close_remember {
+                            self.config.close_action = "quit".into();
+                            self.config.save();
+                        }
+                        self.quit_now(context);
+                    }
+                    ContentDialogResult::Secondary => {
+                        if self.close_remember {
+                            self.config.close_action = "tray".into();
+                            self.config.save();
+                        }
+                        if self.tray.is_some() {
+                            tray::hide_main_window();
+                        } else {
+                            self.quit_now(context);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Msg::CloseRemember(on) => self.close_remember = on,
+            Msg::SetCloseAction(v) => {
+                self.config.close_action = v.to_string();
+                self.config.save();
+            }
             Msg::Noop => {}
             Msg::NavAnimTick => {
                 // One msg per frame — the view() rebuild re-evaluates each
@@ -816,7 +870,7 @@ impl Component for Shell {
                         tray::hide_main_window();
                     }
                     tray::TrayAction::Quit => {
-                        let _ = context.window().request_close();
+                        self.quit_now(context);
                     }
                     tray::TrayAction::None => {}
                 }
@@ -981,6 +1035,8 @@ impl Component for Shell {
     fn view(&self, _input: &(), context: &mut ViewContext<Self>) -> View {
         // Publish the render locale before any `tr`/`tf!` resolves text.
         i18n::set_lang(i18n::Lang::from_config(&self.config.lang));
+        // WM_CLOSE → Msg::CloseRequested (idempotent once the HWND exists).
+        close_hook::ensure_installed(&context.sender());
         context.window_title("GlobalTokenTracker");
         context.window_visuals(
             WindowVisuals::new()
@@ -1107,6 +1163,48 @@ impl Component for Shell {
             }
             _ => Border::new().grid_row(2).into(),
         };
+        // Close prompt: quit vs hide-to-tray, with a remember checkbox.
+        // The secondary button is disabled when no tray icon exists (hiding
+        // would strand the process with no way back).
+        let mut dlg_rows: Vec<View> = vec![
+            TextBlock::new()
+                .text(tr("要彻底退出，还是隐藏到托盘继续后台统计？"))
+                .font_size(theme.body_size)
+                .text_wrapping(windows_reactor::TextWrapping::Wrap)
+                .into(),
+        ];
+        if self.tray.is_none() {
+            dlg_rows.push(
+                TextBlock::new()
+                    .text(tr("托盘图标不可用"))
+                    .font_size(theme.label_size)
+                    .foreground(theme.subtle)
+                    .into(),
+            );
+        }
+        dlg_rows.push(
+            CheckBox::new()
+                .is_checked(self.close_remember)
+                .on_is_checked_changed(context.callback(Msg::CloseRemember))
+                .content(
+                    TextBlock::new()
+                        .text(tr("记住我的选择"))
+                        .font_size(theme.body_size),
+                ),
+        );
+        let close_dialog: View = ContentDialog::new()
+            .is_open(self.close_prompt)
+            .title(tr("关闭 GlobalTokenTracker"))
+            .primary_button_text(tr("彻底退出"))
+            .secondary_button_text(tr("隐藏到托盘"))
+            .is_secondary_button_enabled(self.tray.is_some())
+            .close_button_text(tr("取消"))
+            .on_closed(context.callback(Msg::CloseDialogResult))
+            .content(
+                StackPanel::new()
+                    .spacing(12.0)
+                    .keyed_children(keyed(dlg_rows)),
+            );
         // "pagehost" stays mounted across navs — the exit slide is driven by
         // the "leave" layer above, so this frame needs no transition chrome.
         // Root must be a Grid: a vertical StackPanel offers children infinite
@@ -1133,11 +1231,19 @@ impl Component for Shell {
                         .content(content),
                 ),
                 KeyedView::new("overlay", overlay),
+                KeyedView::new("closedlg", close_dialog),
             ])
     }
 }
 
 impl Shell {
+    /// Programmatic quit — `allow_next_close` lets the close we requested
+    /// pass our own WM_CLOSE swallow (without it the subclass eats it).
+    fn quit_now(&mut self, context: &ComponentContext<Self>) {
+        close_hook::allow_next_close();
+        let _ = context.window().request_close();
+    }
+
     /// Build one page's view for the stacked-layer host. `anim` is `Some`
     /// only on the entering layer — the leaving layer renders at rest (its
     /// whole-page offset comes from the layer wrapper, not block springs).

@@ -237,6 +237,9 @@ pub fn tr(zh: &str) -> &str {
         "登录 Windows 后自动启动（最小化到托盘）" => {
             "Start with Windows (minimized to tray)"
         }
+        "点击关闭按钮时" => "When closing",
+        "每次询问" => "Ask every time",
+        "彻底退出" => "Quit completely",
         "仅作用于图表文字；界面控件字体跟随系统" => {
             "Applies to chart text; controls follow the system font"
         }
@@ -250,6 +253,14 @@ pub fn tr(zh: &str) -> &str {
         "橙色" => "Orange",
         "红色" => "Red",
         "中文" => "中文",
+        // ---- close prompt dialog
+        "关闭 GlobalTokenTracker" => "Close GlobalTokenTracker",
+        "要彻底退出，还是隐藏到托盘继续后台统计？" => {
+            "Quit completely, or keep stats running in the system tray?"
+        }
+        "记住我的选择" => "Remember my choice",
+        "托盘图标不可用" => "Tray icon unavailable",
+        "取消" => "Cancel",
         _ => zh,
     }
 }

@@ -4,7 +4,7 @@
 
 use crate::i18n::tr;
 use crate::theme::Theme;
-use crate::{t, tf, Msg, Shell};
+use crate::{Msg, Shell, t, tf};
 use globaltokentracker_core::viewmodel::fmt;
 use std::cell::Cell;
 use std::rc::Rc;
