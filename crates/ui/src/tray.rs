@@ -114,6 +114,9 @@ pub fn focus_main_window() {
         AllowSetForegroundWindow(u32::MAX);
         let hwnd = main_hwnd();
         if !hwnd.is_null() {
+            // Foreground → lift the process-wide efficiency QoS so the UI
+            // thread is free to run on performance cores again.
+            globaltokentracker_core::power::efficiency_process(false);
             ShowWindow(hwnd, SW_RESTORE);
             SetForegroundWindow(hwnd);
         }
@@ -133,6 +136,9 @@ pub fn hide_main_window() {
         let hwnd = main_hwnd();
         if !hwnd.is_null() {
             ShowWindow(hwnd, SW_HIDE);
+            // Tray-only lifetime → the whole process idles on efficiency
+            // cores until `focus_main_window` lifts it.
+            globaltokentracker_core::power::efficiency_process(true);
         }
     }
 }
@@ -152,6 +158,7 @@ pub fn try_hide_main_window() -> bool {
             return false;
         }
         ShowWindow(hwnd, SW_HIDE);
+        globaltokentracker_core::power::efficiency_process(true);
     }
     true
 }

@@ -20,6 +20,7 @@ mod widgets;
 
 use config::{REFRESH_OPTIONS, UiConfig};
 use globaltokentracker_core::adapters;
+use globaltokentracker_core::power;
 use globaltokentracker_core::store::{EventRow, PriceRow, SourceHealth, default_db_path};
 use globaltokentracker_core::viewmodel::fmt;
 use globaltokentracker_core::viewmodel::{Range, day_start_ms};
@@ -363,6 +364,7 @@ fn arm_refresh(context: &ComponentContext<Shell>, secs: u64) {
         return;
     }
     context.spawn_background(move |_| {
+        power::worker("gtt-timer");
         std::thread::sleep(std::time::Duration::from_secs(secs));
         Msg::Tick
     });
@@ -388,6 +390,7 @@ fn arm_watcher(context: &ComponentContext<Shell>) {
         return;
     }
     context.spawn_background(move |token| {
+        power::worker("gtt-watch");
         diag!("[watch] armed on {} roots: {:?}", roots.len(), roots);
         if watch::wait_for_change(&roots, &token) {
             Msg::WatchFired
@@ -402,7 +405,10 @@ fn arm_watcher(context: &ComponentContext<Shell>) {
 
 /// One blocking tray-event poll per arm; re-armed on every message.
 fn arm_tray(context: &ComponentContext<Shell>) {
-    context.spawn_background(|_| Msg::Tray(tray::next_action()));
+    context.spawn_background(|_| {
+        power::worker("gtt-tray");
+        Msg::Tray(tray::next_action())
+    });
 }
 
 impl Component for Shell {
@@ -430,6 +436,7 @@ impl Component for Shell {
         // 每次打开软件自动获取一次), off the UI thread. Subsequent scans only
         // refresh when >12h stale.
         context.spawn_background(move |_| {
+            power::worker("gtt-scan");
             match load_all(range, app_filter, model_filter, true, page, true) {
                 Ok(s) => Msg::Loaded(s),
                 Err(e) => Msg::Failed(e),
@@ -448,6 +455,7 @@ impl Component for Shell {
             // No tray → stay visible; hidden without tray would be a zombie.
             if std::env::args().any(|a| a == "--minimized") {
                 context.spawn_background(|_| {
+                    power::worker("gtt-minhide");
                     for _ in 0..20 {
                         if tray::try_hide_main_window() {
                             break;
@@ -541,6 +549,7 @@ impl Component for Shell {
                                 for k in 0..8u64 {
                                     let to = if k % 2 == 0 { &label } else { &alt }.to_string();
                                     context.spawn_background(move |_| {
+                                        power::worker("gtt-navtest");
                                         std::thread::sleep(std::time::Duration::from_millis(
                                             ms * (k + 1),
                                         ));
@@ -583,6 +592,7 @@ impl Component for Shell {
                 if price_due && !self.prices_refreshing {
                     self.prices_refreshing = true;
                     context.spawn_background(|_| {
+                        power::worker("gtt-prices");
                         Msg::PricesDone(
                             Store::open(&db_path())
                                 .and_then(|s| globaltokentracker_core::pricing::refresh(&s))
@@ -858,8 +868,11 @@ impl Component for Shell {
                         a.frames.set(a.frames.get() + 1);
                     }
                     // 10ms sleep + ~4ms thin rebuild lands ~14ms cadence —
-                    // a fresh frame is ready for every 60Hz vsync.
+                    // a fresh frame is ready for every 60Hz vsync. Named but
+                    // deliberately NOT efficiency-marked: frame cadence is
+                    // latency-sensitive, stays on the P-core side.
                     context.spawn_background(|_| {
+                        power::name_thread("gtt-anim");
                         std::thread::sleep(std::time::Duration::from_millis(10));
                         Msg::NavAnimTick
                     });
@@ -929,6 +942,7 @@ impl Component for Shell {
                         frames: std::cell::Cell::new(0),
                     });
                     context.spawn_background(|_| {
+                        power::name_thread("gtt-anim");
                         std::thread::sleep(std::time::Duration::from_millis(16));
                         Msg::NavAnimTick
                     });
@@ -950,6 +964,7 @@ impl Component for Shell {
                 let apps = self.app_filter.clone();
                 let models = self.model_filter.clone();
                 context.spawn_background(move |_| {
+                    power::worker("gtt-detail");
                     match Store::open(&db_path()).and_then(|s| {
                         s.detail(page, DETAIL_PAGE_SIZE, apps.as_deref(), models.as_deref())
                     }) {
@@ -1366,6 +1381,7 @@ impl Shell {
         }
         self.quota_at = Some(std::time::Instant::now());
         context.spawn_background(|_| {
+            power::worker("gtt-quota");
             let mut n = 0usize;
             let mut errs = Vec::new();
             match Store::open(&db_path()) {
@@ -1415,6 +1431,7 @@ impl Shell {
             let models = self.model_filter.clone();
             let page = self.page;
             context.spawn_background(move |_| {
+                power::worker("gtt-scan");
                 match load_all(range, apps, models, false, page, force_views) {
                     Ok(s) => Msg::Loaded(s),
                     Err(e) => Msg::Failed(e),

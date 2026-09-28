@@ -223,16 +223,18 @@ impl Engine {
         segments: Vec<(&SourceItem, u64, Option<String>, Vec<u8>)>,
         report: &mut ScanReport,
     ) -> Result<()> {
-        let parsed: Vec<(&SourceItem, u64, Result<ScanOutcome>)> = segments
-            .into_par_iter()
-            .map(|(item, from, state, data)| {
-                (
-                    item,
-                    from,
-                    adapter.parse_jsonl(item, from, &data, state.as_deref()),
-                )
-            })
-            .collect();
+        let parsed: Vec<(&SourceItem, u64, Result<ScanOutcome>)> = eco_pool().install(|| {
+            segments
+                .into_par_iter()
+                .map(|(item, from, state, data)| {
+                    (
+                        item,
+                        from,
+                        adapter.parse_jsonl(item, from, &data, state.as_deref()),
+                    )
+                })
+                .collect()
+        });
         for (item, from, res) in parsed {
             match res {
                 Ok(outcome) => {
@@ -382,4 +384,32 @@ fn read_segment(path: &Path, from: u64, to: u64, errors: &mut Vec<String>) -> Op
             None
         }
     }
+}
+
+/// Parse pool pinned to efficiency cores. The default rayon pool threads
+/// can't be QoS-marked (spawned lazily, no handle access); `spawn_handler`
+/// lets every worker name + EcoQoS itself so ingest parse bursts stay off
+/// the interactive P-cores. Bounded to half the logical CPUs (min 2): the
+/// EcoQoS hint prefers E-cores, and a smaller pool avoids oversubscribing
+/// them and spilling back onto P-cores. On non-hybrid hosts the marks are
+/// no-ops and the cap just halves peak parse width — acceptable for a
+/// background ingest stage.
+fn eco_pool() -> &'static rayon::ThreadPool {
+    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let width = std::thread::available_parallelism()
+            .map(|n| (n.get() / 2).max(2))
+            .unwrap_or(4);
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(width)
+            .spawn_handler(|t| {
+                std::thread::Builder::new().spawn(move || {
+                    crate::power::worker("gtt-parse");
+                    t.run();
+                })?;
+                Ok(())
+            })
+            .build()
+            .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap())
+    })
 }

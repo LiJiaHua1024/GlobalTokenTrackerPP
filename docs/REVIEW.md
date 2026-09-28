@@ -797,3 +797,18 @@
 - **已知限制**（不本次修）：离场页 ScrollViewer 位置不可保留（reactor 无 scroll offset API）——旧页若已滚动，滑出时显示为顶部状态；S61 起即存在。`GTT_NAVTEST`/`GTT_DONUTTEST` 测试钩子保留在 release（env 触发、默认惰性）。`ensure_installed` 之前点击 X 会直关（启动头几帧窗口期，行为可接受）。
 - **实测**：WM_CLOSE→对话框→勾选记忆→取消→重开未勾选 ✓；close_action=tray 直隐 + `main_hwnd` 恢复 ✓（EnumWindows 路径）。
 - **验证**：64 测试全过、clippy `-D warnings` 0、改动区 fmt 干净。
+
+## S65 多核调度：EcoQoS 大小核分工 + 后台线程打标 ✅
+
+- **范围**：`crates/core/src/power.rs`（新模块）+ engine 解析池 + ui 全部后台任务 + 托盘显隐切换进程级 QoS。
+- **设计**（Win11 EcoQoS = 任务管理器"效率模式"同款机制，对异构 CPU 是调度**提示**而非硬亲和——不保证独占 E 核，但实测 API 接受且符合系统设计；硬亲和需要 CPU 拓扑枚举，收益不确定且损害可移植性，故不采用）：
+  - `power::worker(name)`：`SetThreadDescription` 命名 + `SetThreadInformation(ThreadPowerThrottling, ctrl=EXECUTION_SPEED, state=EXECUTION_SPEED)` 线程级能效标——每个后台任务闭包首行调用：`gtt-scan`(启动/手动扫描)、`gtt-watch`(文件监视)、`gtt-tray`(托盘事件泵)、`gtt-timer`(周期刷新)、`gtt-quota`/`gtt-prices`(网络拉取)、`gtt-detail`(明细分页)、`gtt-minhide`/`gtt-navtest`。
+  - `power::efficiency_process(on)`：进程级 `ProcessPowerThrottling`——`hide_main_window`/`try_hide_main_window` 置 on（整进程含 UI 线程入效率态，托盘驻留场景诉求正确），`focus_main_window` 置 off（前台恢复默认 QoS 让 UI 线程回性能核）。Quit 路径不必复位（进程即死）。
+  - `eco_pool()`（engine.rs）：rayon 全局池线程惰性创建拿不到句柄无法打标——改用 `ThreadPoolBuilder::spawn_handler` 自建池，`OnceLock` 单例、并发数 `max(2, 核数/2)` 限宽（EcoQoS 是偏好非独占，限宽防超发溢回 P 核），worker 首行 `power::worker("gtt-parse")`。JSONL 解析阶段是唯一重 CPU 后台负载，落在专用能效池；DB 摄入维持单写者不变。
+  - `gtt-anim`（NavAnimTick 链）：**只命名不打标**——10ms 帧节奏是延迟敏感负载，压 E 核会掉帧。
+- **API 语义实测纠错**（直接探针程序在 Win11 26200 上验证）：文档暗示的 `ControlMask=0`（系统自动管理）形态在本机返回 `ERROR_INVALID_PARAMETER(87)`；正确形态是显式 `ControlMask=EXECUTION_SPEED` + `StateMask=1`启用/`0`禁用——Set 返回 TRUE。`GetThreadInformation`/`GetProcessInformation` 读回这两类信息同样返回 87（写-only），故不做读回断言。`GetLastError` 在 Set 成功后会返回陈旧错误码（6），仅失败时读取。首次失败打 `[power] api rejected err=N` 一次性日志（进程级 AtomicBool）。
+- **跨进程实测**（Toolhelp32 线程枚举 + `GetThreadDescription`）：前台运行实例命名线程 `gtt-timer/gtt-tray/gtt-quota/gtt-prices`（watch 因无监视根目录未启动，非缺陷）；NAVTEST 动画期间抓到 `gtt-anim`×1 + `gtt-navtest`×7；`--minimized` 启动即隐藏路径：进程存活、`MainWindowHandle=0`、零 `[power]` 失败日志 → `efficiency_process(true)` 被 OS 接受。
+- **发现的设计约束**（如实记录）：`spawn_background` 投递到 **Windows 线程池**（`windows_threading::submit`），线程复用——命名是"任务最后执行者"语义，短暂任务结束后池线程保留旧名直到复用（诊断上可接受）；EcoQoS 线程标同理持久于池线程，但因生态化任务几乎占满池使用，方向一致无害。
+- **非 Windows**：全部 cfg 掉为 no-op；macOS 移植对应物是 GCD QoS class（`DISPATCH_QOS_CLASS_UTILITY`/`BACKGROUND`），注释已注明。
+- **逃生门**：`GTT_NO_ECO=1` 禁掉一切打标便于对照诊断。
+- **验证**：`cargo test --workspace` 66 过（含 2 个 Windows-only power 测试：Set 调用成功断言 + `GetThreadDescription` 读回命名）；clippy `-D warnings` 0；改动区 fmt 干净。EcoQoS 对实际核心落位的调度影响无法程序化读回（本机 Get*Information 不支持）——以 Set 成功 + 无失败日志为准，不声称已验证"真的跑在 E 核"。
