@@ -260,6 +260,21 @@ pub fn local_utc_offset() -> String {
     format!("{sign}{:02}:{:02}", a / 3600, (a % 3600) / 60)
 }
 
+/// `"+08:00"`/`"-05:30"` → signed milliseconds. `None` on malformed input —
+/// callers format `local_utc_offset()` output or validate before use.
+pub fn utc_offset_ms(s: &str) -> Option<i64> {
+    let b = s.as_bytes();
+    if b.len() != 6
+        || !matches!(b[0], b'+' | b'-')
+        || b[3] != b':'
+        || ![1, 2, 4, 5].iter().all(|&i| b[i].is_ascii_digit())
+    {
+        return None;
+    }
+    let ms = (s[1..3].parse::<i64>().ok()? * 60 + s[4..6].parse::<i64>().ok()?) * 60_000;
+    Some(if b[0] == b'-' { -ms } else { ms })
+}
+
 impl Store {
     pub fn overview(
         &self,

@@ -605,32 +605,97 @@ impl super::Store {
     /// offset change), local-date aligned via `utc_offset`.
     /// Returns rows written.
     pub fn rebuild_rollups(&self, utc_offset: &str) -> Result<u64> {
-        let b = utc_offset.as_bytes();
         anyhow::ensure!(
-            b.len() == 6
-                && matches!(b[0], b'+' | b'-')
-                && b[3] == b':'
-                && [1, 2, 4, 5].iter().all(|&i| b[i].is_ascii_digit()),
+            crate::viewmodel::utc_offset_ms(utc_offset).is_some(),
             "invalid utc_offset: {utc_offset}"
         );
         let tx = self.conn().unchecked_transaction()?;
         tx.execute("DELETE FROM daily_rollups", [])?;
-        let n = tx.execute(&format!(
-            "INSERT INTO daily_rollups
-             (date, app, provider, request_model, pricing_model, events,
-              input_tokens, output_tokens, reasoning_tokens, cache_read_tokens,
-              cache_write_5m, cache_write_1h, credits, cost_usd, active_ms)
-             SELECT strftime('%Y-%m-%d', ts_start/1000, 'unixepoch', '{utc_offset}'),
-                    app, COALESCE(provider_id,''), COALESCE(request_model,''),
-                    COALESCE(pricing_model,''), COUNT(*),
-                    COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
-                    COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cache_read_tokens),0),
-                    COALESCE(SUM(cache_write_5m_tokens),0),
-                    COALESCE(SUM(cache_write_1h_tokens),0),
-                    SUM(credits), SUM(cost_usd), COALESCE(SUM(active_ms),0)
-             FROM usage_events
-             GROUP BY 1,2,3,4,5"
-        ), [])?;
+        let n = tx.execute(
+            &format!(
+                "INSERT INTO daily_rollups
+                 (date, app, provider, request_model, pricing_model, events,
+                  input_tokens, output_tokens, reasoning_tokens, cache_read_tokens,
+                  cache_write_5m, cache_write_1h, credits, cost_usd, active_ms)
+                 SELECT strftime('%Y-%m-%d', ts_start/1000, 'unixepoch', '{utc_offset}'),
+                        app, COALESCE(provider_id,''), COALESCE(request_model,''),
+                        COALESCE(pricing_model,''), COUNT(*),
+                        COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+                        COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cache_read_tokens),0),
+                        COALESCE(SUM(cache_write_5m_tokens),0),
+                        COALESCE(SUM(cache_write_1h_tokens),0),
+                        SUM(credits), SUM(cost_usd), COALESCE(SUM(active_ms),0)
+                 FROM usage_events
+                 GROUP BY 1,2,3,4,5"
+            ),
+            [],
+        )?;
+        tx.commit()?;
+        Ok(n as u64)
+    }
+
+    /// Same delete+insert semantics as `rebuild_rollups`, scoped to the
+    /// listed day indices (`(ts + offset_ms).div_euclid(86_400_000)` — the
+    /// fixed-offset frame `rebuild_rollups` aligns to). A small ingest then
+    /// pays for only the days it touched instead of a full-table aggregate.
+    pub fn rebuild_rollup_days(
+        &self,
+        days: &std::collections::BTreeSet<i64>,
+        utc_offset: &str,
+    ) -> Result<u64> {
+        if days.is_empty() {
+            return Ok(0);
+        }
+        let off = crate::viewmodel::utc_offset_ms(utc_offset)
+            .ok_or_else(|| anyhow::anyhow!("invalid utc_offset: {utc_offset}"))?;
+        const DAY: i64 = 86_400_000;
+        let tx = self.conn().unchecked_transaction()?;
+        // DELETE by the same date strings the INSERT will compute — the UTC
+        // civil date of `d*DAY` in the epoch-ms domain is exactly what
+        // `strftime(..., 'unixepoch', utc_offset)` yields for ts in that day.
+        let dates: Vec<String> = days
+            .iter()
+            .filter_map(|&d| {
+                jiff::Timestamp::from_millisecond(d * DAY)
+                    .ok()
+                    .map(|t| t.to_zoned(jiff::tz::TimeZone::UTC).date().to_string())
+            })
+            .collect();
+        let marks = vec!["?"; dates.len()].join(",");
+        tx.execute(
+            &format!("DELETE FROM daily_rollups WHERE date IN ({marks})"),
+            rusqlite::params_from_iter(dates.iter()),
+        )?;
+        // Index-friendly ts ranges instead of a per-row strftime filter.
+        let ranges = days
+            .iter()
+            .map(|_| "(ts_start >= ? AND ts_start < ?)")
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let mut p: Vec<rusqlite::types::Value> = Vec::with_capacity(days.len() * 2);
+        for &d in days {
+            p.push((d * DAY - off).into());
+            p.push(((d + 1) * DAY - off).into());
+        }
+        let n = tx.execute(
+            &format!(
+                "INSERT INTO daily_rollups
+                 (date, app, provider, request_model, pricing_model, events,
+                  input_tokens, output_tokens, reasoning_tokens, cache_read_tokens,
+                  cache_write_5m, cache_write_1h, credits, cost_usd, active_ms)
+                 SELECT strftime('%Y-%m-%d', ts_start/1000, 'unixepoch', '{utc_offset}'),
+                        app, COALESCE(provider_id,''), COALESCE(request_model,''),
+                        COALESCE(pricing_model,''), COUNT(*),
+                        COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
+                        COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cache_read_tokens),0),
+                        COALESCE(SUM(cache_write_5m_tokens),0),
+                        COALESCE(SUM(cache_write_1h_tokens),0),
+                        SUM(credits), SUM(cost_usd), COALESCE(SUM(active_ms),0)
+                 FROM usage_events WHERE {ranges}
+                 GROUP BY 1,2,3,4,5"
+            ),
+            rusqlite::params_from_iter(p),
+        )?;
         tx.commit()?;
         Ok(n as u64)
     }

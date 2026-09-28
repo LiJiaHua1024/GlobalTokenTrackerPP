@@ -708,3 +708,16 @@
 - **实测**：总览↔明细↔配额 UIA 切换正常渲染（opacity 正确回 1，无卡壳）；环图对齐截图确认。
 - **取舍**：入场用的"挂载 0 → 下一帧置 1"两帧法——reactor 属性过渡只在已挂载元素间生效，挂载即终值不会自动播入场动画；PrintWindow 抓合成器最终态，动画帧需肉眼确认。
 - **验证**：62 测试全过、clippy `-D warnings` 0；改动区 fmt 干净。
+
+## S58 性能审查 + 增量 rollup 重建 ✅
+
+- **审查结论**（release 实测，62k+ 事件账本）：
+  - 闲置 UI：~2.7%/核（稳定后）、工作集 ~172MB — WinUI3 基线水位，无持续渲染循环泄漏
+  - 扫描路径：`scan_once` → 每摄入事件即触发 `rebuild_rollups` = **全表 DELETE + 全表 GROUP BY 重算**（实测单次 ~1309ms）——这是唯一真热点；其余（适配器文件枚举、按需查页、WAL/NORMAL、release LTO/strip）均合理
+- **修复**：摄取路径顺手记账——`ScanReport.rollup_days` 收集每个**实际写入行**（含 ON CONFLICT 升级，`upsert_event` 的 DO UPDATE 会改聚合字段）的本地日索引 `(ts + off_ms).div_euclid(86_400_000)`，与 rollup SQL 的 `strftime(...,utc_offset)` 同帧；`rollup_full` 兜底无 ts 行。
+  - `Store::rebuild_rollup_days`：DELETE 只删触及日的 date 串（UTC 民用日换算用 jiff，与 strftime 输出逐字节同义）；INSERT 用 `ts_start >= ? AND < ?` 区间 OR 走 `idx_events_time` 索引，避免逐行 strftime
+  - `refresh_rollups`：days 空不进；>400 天或 rollup_full → 回退全量重建（首装回填/时区变更场景）
+  - `utc_offset_ms` 校验/解析收敛到 viewmodel，两处复用
+- **实测**（release）：摄入事件的扫描内部耗时 **~117ms**（原：0 摄入 ~650ms、有摄入再 +1309ms rollup）；全量 `rollup` 后 `report all` 聚合不变（$7416.44 一致）
+- **取舍/边界**：ON CONFLICT 升级若把 ts_start 改到更早的日（理论边角，快照间 start 不变）旧日聚合会滞后，修复路径 = `rollup` CLI 全量重建；400+ 天首装回填仍走全量——一次性成本可接受
+- **验证**：新增 2 测试（局部重建=全量逐行一致 / +08:00 帧日界正确 / 空集 no-op）共 61 全过；clippy `-D warnings` 0；改动区 fmt 干净

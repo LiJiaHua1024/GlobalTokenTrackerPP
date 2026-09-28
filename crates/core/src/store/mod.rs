@@ -471,6 +471,88 @@ mod tests {
         assert_eq!(total, 1);
     }
 
+    /// Partial rebuild of only the touched days must yield byte-identical
+    /// `daily_rollups` rows to a full rebuild — the scan path relies on it.
+    #[test]
+    fn rollups_partial_rebuild_equals_full() {
+        let dump = |s: &Store| -> Vec<String> {
+            let mut st = s
+                .conn()
+                .prepare(
+                    "SELECT date||'|'||app||'|'||provider||'|'||request_model||'|'||
+                            pricing_model||'|'||events||'|'||input_tokens||'|'||
+                            output_tokens||'|'||COALESCE(cost_usd,-1)
+                     FROM daily_rollups ORDER BY 1",
+                )
+                .unwrap();
+            st.query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap()
+        };
+        let s = Store::open_memory().unwrap();
+        // BOUNDARY_MS = 2025-01-15 23:30Z; +1h lands on the 16th (UTC frame).
+        s.upsert_event(&ev_ts("p1", BOUNDARY_MS)).unwrap();
+        s.upsert_event(&ev_ts("p2", BOUNDARY_MS + 3_600_000))
+            .unwrap();
+        s.rebuild_rollups("+00:00").unwrap();
+
+        // A write lands on the 15th only — day index of that ts in the
+        // +00:00 frame is what the engine feeds rebuild_rollup_days.
+        let mut extra = ev_ts("p3", BOUNDARY_MS);
+        extra.output_tokens = 99;
+        s.upsert_event(&extra).unwrap();
+        let day = (BOUNDARY_MS).div_euclid(86_400_000);
+        let days = std::collections::BTreeSet::from([day]);
+        let n = s.rebuild_rollup_days(&days, "+00:00").unwrap();
+        assert_eq!(n, 1); // one (date,app,…) group rewritten
+        let partial = dump(&s);
+
+        s.rebuild_rollups("+00:00").unwrap();
+        assert_eq!(partial, dump(&s));
+
+        // Untouched days survive a partial rebuild verbatim.
+        let d16: i64 = s
+            .conn()
+            .query_row(
+                "SELECT events FROM daily_rollups WHERE date='2025-01-16'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(d16, 1);
+    }
+
+    #[test]
+    fn rollups_partial_rebuild_offset_frame() {
+        let s = Store::open_memory().unwrap();
+        // 23:30Z on the 15th is 07:30 on the 16th in +08:00 — the day index
+        // must be computed in that same shifted frame or the DELETE misses.
+        s.upsert_event(&ev_ts("o1", BOUNDARY_MS)).unwrap();
+        let off = crate::viewmodel::utc_offset_ms("+08:00").unwrap();
+        let day = (BOUNDARY_MS + off).div_euclid(86_400_000);
+        let n = s
+            .rebuild_rollup_days(&std::collections::BTreeSet::from([day]), "+08:00")
+            .unwrap();
+        assert_eq!(n, 1);
+        let d16: i64 = s
+            .conn()
+            .query_row(
+                "SELECT events FROM daily_rollups WHERE date='2025-01-16'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(d16, 1);
+        // Empty set is a no-op, never wipes the table.
+        assert_eq!(
+            s.rebuild_rollup_days(&std::collections::BTreeSet::new(), "+00:00")
+                .unwrap(),
+            0
+        );
+        assert_eq!(d16, 1);
+    }
+
     #[test]
     fn prune_preserves_rollups() {
         let s = Store::open_memory().unwrap();

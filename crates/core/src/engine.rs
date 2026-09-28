@@ -34,6 +34,13 @@ pub struct ScanReport {
     pub events_skipped: u64,
     pub quotas: u64,
     pub errors: Vec<String>,
+    /// Local day indices (fixed-offset frame, matching the rollup SQL)
+    /// touched by rows actually written this pass — drives the partial
+    /// rollup rebuild.
+    pub rollup_days: std::collections::BTreeSet<i64>,
+    /// A written row lacked ts_start → its day is unrecoverable → caller
+    /// must fall back to a full rollup rebuild.
+    pub rollup_full: bool,
 }
 
 impl Engine {
@@ -74,11 +81,20 @@ impl Engine {
     }
 
     /// Keep daily_rollups in sync — only when this pass ingested something.
+    /// Rebuilds only the local days the writes actually touched; a full
+    /// rebuild stays as the fallback for ts-less rows or huge backfills.
     /// Rollup failure must not fail the scan (derived data can be rebuilt).
     fn refresh_rollups(&self, report: &ScanReport) {
-        if report.events_ingested > 0
-            && let Err(e) = self.store.rebuild_rollups(&local_utc_offset())
-        {
+        if report.events_ingested == 0 {
+            return;
+        }
+        let offset = local_utc_offset();
+        let r = if report.rollup_full || report.rollup_days.len() > 400 {
+            self.store.rebuild_rollups(&offset)
+        } else {
+            self.store.rebuild_rollup_days(&report.rollup_days, &offset)
+        };
+        if let Err(e) = r {
             tracing::warn!("rollup rebuild failed: {e}");
         }
     }
@@ -259,6 +275,9 @@ impl Engine {
         quotas: Vec<crate::model::QuotaSnapshot>,
         report: &mut ScanReport,
     ) {
+        // Day buckets use the same fixed-offset frame as the rollup SQL;
+        // computed once per ingest batch, not per event.
+        let off_ms = crate::viewmodel::utc_offset_ms(&local_utc_offset()).unwrap_or(0);
         for mut ev in events {
             // Metadata-tier adapters (Cursor/Qoder) deliberately emit
             // zero-token activity records — the observed session IS the
@@ -274,7 +293,17 @@ impl Engine {
             // Price + resolve pricing_model on the way in (idempotent).
             self.prices.apply(&mut ev);
             match self.store.upsert_event(&ev) {
-                Ok(true) => report.events_ingested += 1,
+                Ok(true) => {
+                    report.events_ingested += 1;
+                    match ev.ts_start {
+                        Some(ts) => {
+                            report
+                                .rollup_days
+                                .insert((ts + off_ms).div_euclid(86_400_000));
+                        }
+                        None => report.rollup_full = true,
+                    }
+                }
                 Ok(false) => report.events_merged += 1,
                 Err(e) => report
                     .errors
@@ -317,6 +346,8 @@ fn merge(dst: &mut ScanReport, src: ScanReport) {
     dst.events_merged += src.events_merged;
     dst.events_skipped += src.events_skipped;
     dst.quotas += src.quotas;
+    dst.rollup_days.extend(src.rollup_days);
+    dst.rollup_full |= src.rollup_full;
     dst.errors.extend(src.errors);
 }
 
