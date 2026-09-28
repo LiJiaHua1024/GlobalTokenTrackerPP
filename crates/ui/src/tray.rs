@@ -49,20 +49,70 @@ pub fn install() -> Option<TrayIcon> {
         .ok()
 }
 
+/// HWND of THIS process's main window. `FindWindowW` matches by title
+/// system-wide — with a second GTT instance running it can return the other
+/// process's window, which cross-process subclassing can't attach and
+/// show/hide would then move the wrong window. EnumWindows + PID filter
+/// picks our own copy deterministically.
+#[cfg(windows)]
+pub fn main_hwnd() -> windows_sys::Win32::Foundation::HWND {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+    };
+    const TITLE: &[u16] = &[
+        0x0047, 0x006C, 0x006F, 0x0062, 0x0061, 0x006C, 0x0054, 0x006F, 0x006B, 0x0065, 0x006E,
+        0x0054, 0x0072, 0x0061, 0x0063, 0x006B, 0x0065, 0x0072, // "GlobalTokenTracker"
+    ];
+    struct Ctx {
+        pid: u32,
+        found: HWND,
+    }
+    unsafe extern "system" fn cb(hwnd: HWND, lp: isize) -> i32 {
+        unsafe {
+            let ctx = &mut *(lp as *mut Ctx);
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if pid != ctx.pid {
+                return 1;
+            }
+            let n = GetWindowTextLengthW(hwnd);
+            if n != TITLE.len() as i32 {
+                return 1;
+            }
+            let mut buf = [0u16; 64];
+            if GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) == n
+                && buf[..n as usize] == *TITLE
+            {
+                ctx.found = hwnd;
+                return 0; // stop enumeration
+            }
+            1
+        }
+    }
+    unsafe {
+        let mut ctx = Ctx {
+            pid: GetCurrentProcessId(),
+            found: std::ptr::null_mut(),
+        };
+        EnumWindows(Some(cb), &mut ctx as *mut Ctx as isize);
+        ctx.found
+    }
+}
+
 /// Bring the main window to front. `WindowRef` has no focus verb in 0.100.0,
-/// so we go through Win32: title lookup → restore → foreground.
+/// so we go through Win32: own-window lookup → restore → foreground.
 #[cfg(windows)]
 pub fn focus_main_window() {
-    use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        AllowSetForegroundWindow, FindWindowW, SW_RESTORE, SetForegroundWindow, ShowWindow,
+        AllowSetForegroundWindow, SW_RESTORE, SetForegroundWindow, ShowWindow,
     };
-    let title: Vec<u16> = "GlobalTokenTracker\0".encode_utf16().collect();
     unsafe {
         // Permit this process to steal foreground (background call otherwise
         // gets rejected silently on locked desktops).
         AllowSetForegroundWindow(u32::MAX);
-        let hwnd: HWND = FindWindowW(std::ptr::null(), title.as_ptr());
+        let hwnd = main_hwnd();
         if !hwnd.is_null() {
             ShowWindow(hwnd, SW_RESTORE);
             SetForegroundWindow(hwnd);
@@ -78,10 +128,9 @@ pub fn focus_main_window() {}
 /// "显示" restores via `focus_main_window` (SW_RESTORE unhides).
 #[cfg(windows)]
 pub fn hide_main_window() {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, SW_HIDE, ShowWindow};
-    let title: Vec<u16> = "GlobalTokenTracker\0".encode_utf16().collect();
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
     unsafe {
-        let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
+        let hwnd = main_hwnd();
         if !hwnd.is_null() {
             ShowWindow(hwnd, SW_HIDE);
         }
@@ -93,13 +142,12 @@ pub fn hide_main_window() {}
 
 /// Try-hide variant for the `--minimized` autostart path: returns false
 /// while the WinUI window isn't up yet so the caller can retry. `HWND` is
-/// found by title — identical lookup to `focus_main_window`.
+/// found by PID+title — identical lookup to `focus_main_window`.
 #[cfg(windows)]
 pub fn try_hide_main_window() -> bool {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, SW_HIDE, ShowWindow};
-    let title: Vec<u16> = "GlobalTokenTracker\0".encode_utf16().collect();
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
     unsafe {
-        let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
+        let hwnd = main_hwnd();
         if hwnd.is_null() {
             return false;
         }

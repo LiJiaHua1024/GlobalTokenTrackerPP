@@ -784,3 +784,16 @@
 - **实测**（`GTT_NAVTEST` 交替切页，`GTT_DEBUG` 日志帧数统计）：每趟飞行 950ms 内 **65–73 帧 ≈ 68–77fps**（优化前 ~44–48 帧 ≈ 46–50fps），含概览页在内的双页飞行均达标；落定后页面内容正常（缓存仅在飞行期间冻结，anim→None 后首帧即全新构建）。
 - **取舍**：飞行中（≤950ms）enter/leave 页内容冻结——期间到达的 `Loaded`/`Tick` 在落定后的首个 rest 视图统一呈现，无可感知影响；再次点 nav 会丢弃旧 cache 重建一次。`RefCell`/`Rc` 限 UI 线程，Shell 本就 !Send。
 - **验证**：64 测试全过、clippy `-D warnings` 0、改动区 fmt 干净。
+
+## S64 功能+动画改动复审：四处缺陷修复（PID 窗口定位/记忆框复位/Nav 兜底/缓存失效） ✅
+
+- **审查范围**：S62 关闭询问 + S61/S63 滑动动画的全部落地代码。
+- **发现并已修**：
+  1. **多实例窗口误认**（真 bug）：`FindWindowW` 按标题全系统匹配——跑第二个 GTT 实例（如已装版+开发版）时，`close_hook` 的子类化会落到对方进程 HWND（跨进程子类化必败）→ 拦截永远装不上、X 直接退出；`tray.rs` 三处 hide/focus 同样可能操控错窗口。修复：`tray::main_hwnd()` 用 `EnumWindows`+`GetWindowThreadProcessId` PID 过滤 + 标题比对，四个调用点统一改用。
+  2. **「记住我的选择」取消后不复位**（UX bug）：勾选后点取消，`close_remember` 残留 true → 下次弹框已预勾选。修复：`CloseDialogResult` 先取值再清零，复选框按打开生命周期消费。实测勾选→取消→重开 = Off ✓。
+  3. **`Msg::Nav(None)`/未识别标签 → 跳总览**（潜在 bug）：`_ => Page::Overview` 兜底让 SelectorBar 清空选择时把用户传送回首页。修复：总览改显式 arm，`_ => prev` 原地不动。
+  4. **飞行中数据冻结至落定**（正确性瑕疵）：`Loaded` 落地时 `enter` 缓存仍显示加载态。修复：`Msg::Loaded` 处 `*a.cache.borrow_mut() = None`，下一帧即新数据。
+- **复审确认无问题项**：`close_proc` 同线程 TLS sender 合法；`WM_NCDESTROY` 内 RemoveWindowSubclass 文档允许；`allow_next_close` consume-once 语义正确（`replace(false)`）；托盘 Quit 与对话框共用 `quit_now` 已 E2E；spring 闭式解 v(0)=0 数学正确；缓存 RefCell 借用无嵌套冲突；`enter`/`leave` 键恒定保 swapchain；`Block i≥10` 防级联失控。
+- **已知限制**（不本次修）：离场页 ScrollViewer 位置不可保留（reactor 无 scroll offset API）——旧页若已滚动，滑出时显示为顶部状态；S61 起即存在。`GTT_NAVTEST`/`GTT_DONUTTEST` 测试钩子保留在 release（env 触发、默认惰性）。`ensure_installed` 之前点击 X 会直关（启动头几帧窗口期，行为可接受）。
+- **实测**：WM_CLOSE→对话框→勾选记忆→取消→重开未勾选 ✓；close_action=tray 直隐 + `main_hwnd` 恢复 ✓（EnumWindows 路径）。
+- **验证**：64 测试全过、clippy `-D warnings` 0、改动区 fmt 干净。

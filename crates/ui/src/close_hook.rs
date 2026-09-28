@@ -13,7 +13,7 @@ use std::cell::{Cell, RefCell};
 use windows_reactor::LocalSender;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
-use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, WM_CLOSE, WM_NCDESTROY};
+use windows_sys::Win32::UI::WindowsAndMessaging::{WM_CLOSE, WM_NCDESTROY};
 
 const SUBCLASS_ID: usize = 0x4754_5431; // "GTT1"
 
@@ -34,8 +34,10 @@ pub fn ensure_installed(sender: &LocalSender<Msg>) {
     }
     #[cfg(windows)]
     unsafe {
-        let title: Vec<u16> = "GlobalTokenTracker\0".encode_utf16().collect();
-        let hwnd: HWND = FindWindowW(std::ptr::null(), title.as_ptr());
+        // PID-filtered lookup — with a second GTT instance running, a plain
+        // title search can land on the other process's HWND and the subclass
+        // would never attach (cross-process subclassing fails, retried forever).
+        let hwnd = crate::tray::main_hwnd();
         if !hwnd.is_null() && SetWindowSubclass(hwnd, Some(close_proc), SUBCLASS_ID, 0) != 0 {
             INSTALLED.with(|i| i.set(true));
         }

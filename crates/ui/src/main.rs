@@ -571,6 +571,12 @@ impl Component for Shell {
                 };
                 self.last_error = None;
                 self.scanning = false;
+                // New data mid-slide → drop the frozen page cache so the
+                // entering page renders fresh on the next frame instead of
+                // staying stale until settle.
+                if let Some(a) = &self.nav_anim {
+                    *a.cache.borrow_mut() = None;
+                }
                 self.poll_quota_if_stale(context);
                 // Detached price-source fetch: triggered here (post-load) so
                 // network latency never delays the snapshot we just painted.
@@ -804,16 +810,20 @@ impl Component for Shell {
             },
             Msg::CloseDialogResult(res) => {
                 self.close_prompt = false;
+                // Consume the checkbox — a dismissed dialog must not leave
+                // "remember" armed for the next open.
+                let remember = self.close_remember;
+                self.close_remember = false;
                 match res {
                     ContentDialogResult::Primary => {
-                        if self.close_remember {
+                        if remember {
                             self.config.close_action = "quit".into();
                             self.config.save();
                         }
                         self.quit_now(context);
                     }
                     ContentDialogResult::Secondary => {
-                        if self.close_remember {
+                        if remember {
                             self.config.close_action = "tray".into();
                             self.config.save();
                         }
@@ -898,7 +908,10 @@ impl Component for Shell {
                     Some("数据源") | Some("Sources") | Some("sources") => Page::Sources,
                     Some("价格") | Some("Prices") | Some("prices") => Page::Prices,
                     Some("设置") | Some("Settings") | Some("settings") => Page::Settings,
-                    _ => Page::Overview,
+                    Some("总览") | Some("Overview") | Some("overview") => Page::Overview,
+                    // None or an unrecognized label → keep the current page;
+                    // a cleared selector must not teleport the user.
+                    _ => prev,
                 };
                 if self.page != prev {
                     diag!("[nav] {prev:?} → {:?} (anim start)", self.page);
