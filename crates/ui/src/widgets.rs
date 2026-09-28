@@ -41,6 +41,93 @@ pub fn registry_ids() -> Vec<&'static str> {
     OVERVIEW_WIDGETS.iter().map(|(id, _, _)| *id).collect()
 }
 
+// ---------------------------------------------------------------- nav anim
+
+/// Page-switch slide state — closed-form spring, evaluated at paint time.
+/// `dir` +1 = forward nav (new page enters from the right, old exits left).
+pub struct NavAnim {
+    pub from: crate::Page,
+    pub dir: f64,
+    pub t0: std::time::Instant,
+}
+
+/// Underdamped spring position at `t` (secs): x(0)=x0, v(0)=0, target 0.
+/// ζ<1 gives the slight overshoot that reads as "springy"; ζ≥1 uses the
+/// critically-damped closed form.
+fn spring(t: f64, x0: f64, zeta: f64, omega: f64) -> f64 {
+    if t <= 0.0 {
+        return x0;
+    }
+    if zeta >= 1.0 {
+        return x0 * (-omega * t).exp() * (1.0 + omega * t);
+    }
+    let wd = omega * (1.0 - zeta * zeta).sqrt();
+    x0 * (-zeta * omega * t).exp() * ((wd * t).cos() + (zeta * omega / wd) * (wd * t).sin())
+}
+
+impl NavAnim {
+    /// Hard cap — every spring has settled well before this.
+    const DONE_MS: u128 = 950;
+    /// Blocks beyond this animate instantly (long tables stay tables).
+    const MAX_SLIDE: usize = 10;
+
+    /// Whole-layer offset for the entering page — the big "new page slides
+    /// in from the side" motion. Per-block springs stack on top of this.
+    /// ω=8.5/ζ=0.95: ~400ms of readable travel with a barely-there settle.
+    pub fn enter_layer(&self) -> f64 {
+        let t = self.t0.elapsed().as_secs_f64();
+        self.dir * 460.0 * spring(t, 1.0, 0.95, 8.5)
+    }
+
+    /// Extra horizontal offset for entering block `i` — later blocks start
+    /// later, travel farther, and ride a softer spring. Blocks stay opaque:
+    /// the incoming page covers the outgoing one, so the pass reads as a
+    /// slide rather than a see-through crossfade.
+    pub fn block(&self, i: usize) -> f64 {
+        if i >= Self::MAX_SLIDE {
+            return 0.0;
+        }
+        let t = self.t0.elapsed().as_secs_f64() - 0.024 * i as f64;
+        if t <= 0.0 {
+            return self.dir * (46.0 + 15.0 * i as f64);
+        }
+        let k = (150.0 - 10.0 * i as f64).max(60.0);
+        let zeta = 0.80 + 0.012 * i as f64;
+        spring(t, self.dir * (46.0 + 15.0 * i as f64), zeta, k.sqrt())
+    }
+
+    /// (offset, opacity) for the leaving page — slides against `dir` while
+    /// fading out under the incoming (opaque) layer. The ~500ms tail keeps
+    /// it backing the region the new page hasn't covered yet (otherwise the
+    /// Mica backdrop shows through to the desktop mid-flight).
+    pub fn exit(&self) -> (f64, f64) {
+        let t = self.t0.elapsed().as_secs_f64();
+        let p = 1.0 - spring(t, 1.0, 0.9, 15.0);
+        (-self.dir * 120.0 * p, (1.0 - t * 2.0).max(0.0))
+    }
+
+    pub fn done(&self) -> bool {
+        self.t0.elapsed().as_millis() >= Self::DONE_MS
+    }
+}
+
+/// Wrap each top-level page block in a slide driver — the margin trick
+/// (`left=+off, right=-off`) translates without changing width. The Border
+/// wraps unconditionally so the anim→rest transition diffs margins instead
+/// of remounting subtrees (canvas swapchains would flash on settle).
+pub fn slide_children(children: Vec<View>, anim: Option<&NavAnim>) -> Vec<View> {
+    children
+        .into_iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let off = anim.map(|a| a.block(i)).unwrap_or(0.0);
+            Border::new()
+                .margin(Thickness::new(off, 0.0, -off, 0.0))
+                .content(v)
+        })
+        .collect()
+}
+
 /// Card chrome: border + background + optional accent edge. All skin values
 /// come from `theme` — a skin swap restyles every card at once.
 pub fn card(theme: &Theme, content: View) -> View {

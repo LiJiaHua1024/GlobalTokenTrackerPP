@@ -58,7 +58,7 @@ pub struct DetailBundle {
     pub page: i64,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
     Overview,
     Detail,
@@ -106,10 +106,10 @@ pub struct Shell {
     /// Overview reflow column count — driven by the width ruler's
     /// Metrics events (4 until the first measurement lands).
     overview_cols: usize,
-    /// Page-switch entrance is mid-flight — the page container renders at
-    /// opacity 0 / scale .99 for one frame, then `PageSettled` animates it
-    /// in (Border opacity/scale transitions).
-    page_entering: bool,
+    /// Page-switch slide mid-flight — the new page's top-level blocks spring
+    /// in horizontally (each with its own damping/velocity) while the old
+    /// page slides out on a second layer. `None` when at rest.
+    nav_anim: Option<widgets::NavAnim>,
     /// 1-DIP full-width ruler panel on the overview page; its surface
     /// metrics report the real content width for adaptive grids.
     ruler: ElementRef<SwapChainPanel>,
@@ -171,8 +171,8 @@ pub enum Msg {
     ToggleQuotaGroup(String),
     /// Width-ruler observer: overview grids should use this many columns.
     SetOverviewCols(usize),
-    /// First frame of a page switch has painted — ramp the entrance in.
-    PageSettled,
+    /// One animation frame of the nav slide — chained until NavAnim::done.
+    NavAnimTick,
     /// Event sink for RadioButton uncheck transitions — nothing to do.
     Noop,
     /// Settings: window theme — "system" | "light" | "dark".
@@ -467,7 +467,7 @@ impl Component for Shell {
             prices_refreshing: false,
             views_stale: true,
             overview_cols: 4,
-            page_entering: false,
+            nav_anim: None,
             ruler: ElementRef::new(),
         }
     }
@@ -503,6 +503,34 @@ impl Component for Shell {
                         }
                         let price_due = s.price_due;
                         self.snap = Some(*s);
+                        // Test hook: GTT_NAVTEST=<nav label> fires one page
+                        // switch after first paint — scripted input can't
+                        // reach the content island for real verification.
+                        if let Ok(spec) = std::env::var("GTT_NAVTEST") {
+                            static NAVFIRED: std::sync::atomic::AtomicBool =
+                                std::sync::atomic::AtomicBool::new(false);
+                            if !NAVFIRED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                // "label@ms" — alternates label↔总览 every
+                                // ms, so any capture burst lands inside a
+                                // flight window regardless of scan speed.
+                                let mut parts = spec.split('@');
+                                let label = parts.next().unwrap_or("配额").to_string();
+                                let ms = parts
+                                    .next()
+                                    .and_then(|m| m.parse::<u64>().ok())
+                                    .unwrap_or(1200);
+                                let alt = parts.next().unwrap_or("总览").to_string();
+                                for k in 0..8u64 {
+                                    let to = if k % 2 == 0 { &label } else { &alt }.to_string();
+                                    context.spawn_background(move |_| {
+                                        std::thread::sleep(std::time::Duration::from_millis(
+                                            ms * (k + 1),
+                                        ));
+                                        Msg::Nav(Some(to))
+                                    });
+                                }
+                            }
+                        }
                         if let Some(tray) = &self.tray {
                             let total = self
                                 .snap
@@ -750,7 +778,18 @@ impl Component for Shell {
                 self.config.save();
             }
             Msg::Noop => {}
-            Msg::PageSettled => self.page_entering = false,
+            Msg::NavAnimTick => {
+                // One msg per frame — the view() rebuild re-evaluates each
+                // block's closed-form spring at the new elapsed time.
+                if self.nav_anim.as_ref().is_none_or(|a| a.done()) {
+                    self.nav_anim = None;
+                } else {
+                    context.spawn_background(|_| {
+                        std::thread::sleep(std::time::Duration::from_millis(16));
+                        Msg::NavAnimTick
+                    });
+                }
+            }
             // Width-ruler metrics → reflow column count changed. The
             // observer already dedupes, so landing here always rebuilds.
             Msg::SetOverviewCols(n) => self.overview_cols = n.clamp(1, 4),
@@ -797,12 +836,21 @@ impl Component for Shell {
                     _ => Page::Overview,
                 };
                 if self.page != prev {
-                    // Entrance phase 1: page mounts at opacity 0 — the settle
-                    // tick lands one frame later and ramps the transition in.
-                    self.page_entering = true;
+                    diag!("[nav] {prev:?} → {:?} (anim start)", self.page);
+                    // Forward nav → new page springs in from the right while
+                    // the old page exits left; backward flips the direction.
+                    self.nav_anim = Some(widgets::NavAnim {
+                        from: prev,
+                        dir: if (self.page as u8) > (prev as u8) {
+                            1.0
+                        } else {
+                            -1.0
+                        },
+                        t0: std::time::Instant::now(),
+                    });
                     context.spawn_background(|_| {
-                        std::thread::sleep(std::time::Duration::from_millis(30));
-                        Msg::PageSettled
+                        std::thread::sleep(std::time::Duration::from_millis(16));
+                        Msg::NavAnimTick
                     });
                 }
                 // Page-scoped data is lazy: first visit to Sources/Prices
@@ -950,27 +998,40 @@ impl Component for Shell {
         let snap = self.snap.as_ref();
         let theme = &self.theme;
 
-        let content: View = match self.page {
-            Page::Overview => overview_page(
-                snap,
-                theme,
-                context,
-                &OverviewArgs {
-                    scanning: self.scanning,
-                    config: &self.config,
-                    editing: self.editing,
-                    trend: &self.trend,
-                    cols: self.overview_cols,
-                    ruler: &self.ruler,
-                    donuts: &self.donuts,
-                },
-            ),
-            Page::Detail => detail_page(snap, theme, context),
-            Page::Quota => quota_page(snap, theme, &self.quota_collapsed, context),
-            Page::Sources => sources_page(snap, theme),
-            Page::Prices => prices_page(snap, theme),
-            Page::Settings => settings_page(&self.config, theme, context),
-        };
+        // Slide-in-flight renders BOTH pages on stacked Grid layers: the
+        // outgoing page stays alive (springs out under the incoming one)
+        // instead of unmounting instantly. "enter" keeps its key across the
+        // transition so a settled view is never re-mounted — canvas panels
+        // (trend/donut swapchains) would otherwise flicker on every nav.
+        let mut layers: Vec<KeyedView> = Vec::with_capacity(2);
+        if let Some(a) = &self.nav_anim {
+            let (off, op) = a.exit();
+            layers.push(KeyedView::new(
+                "leave",
+                Border::new()
+                    .grid_row(0)
+                    .margin(Thickness::new(off, 0.0, -off, 0.0))
+                    .opacity(op)
+                    .content(self.page_view(a.from, snap, context, None)),
+            ));
+        }
+        // Border wraps unconditionally — keeps the enter layer's element
+        // type identical across the anim→rest boundary (no remount flash).
+        let off = self
+            .nav_anim
+            .as_ref()
+            .map(|a| a.enter_layer())
+            .unwrap_or(0.0);
+        layers.push(KeyedView::new(
+            "enter",
+            Border::new()
+                .margin(Thickness::new(off, 0.0, -off, 0.0))
+                .content(self.page_view(self.page, snap, context, self.nav_anim.as_ref())),
+        ));
+        let content: View = Grid::new()
+            .rows([GridLength::STAR])
+            .grid_row(2)
+            .keyed_children(layers);
 
         let item = |label: &'static str, page: Page| {
             SelectorBarItem::new()
@@ -1046,17 +1107,8 @@ impl Component for Shell {
             }
             _ => Border::new().grid_row(2).into(),
         };
-        // Keyed page container: switching pages changes the key → the old
-        // container unmounts through its exit fade while the new one mounts
-        // at opacity 0 / scale .99 and ramps in on PageSettled (crossfade).
-        let page_key: &'static str = match self.page {
-            Page::Overview => "page:overview",
-            Page::Detail => "page:detail",
-            Page::Quota => "page:quota",
-            Page::Sources => "page:sources",
-            Page::Prices => "page:prices",
-            Page::Settings => "page:settings",
-        };
+        // "pagehost" stays mounted across navs — the exit slide is driven by
+        // the "leave" layer above, so this frame needs no transition chrome.
         // Root must be a Grid: a vertical StackPanel offers children infinite
         // height, which makes the page ScrollViewer measure at full content
         // size and never scroll. Star row bounds the scroll area.
@@ -1073,18 +1125,11 @@ impl Component for Shell {
                 KeyedView::new("brand", brand),
                 KeyedView::new("chrome", chrome),
                 KeyedView::new(
-                    page_key,
+                    "pagehost",
                     Border::new()
                         .grid_row(2)
                         .border_brush(theme.divider)
                         .border_thickness(Thickness::new(0.0, 1.0, 0.0, 0.0))
-                        .opacity(if self.page_entering { 0.0 } else { 1.0 })
-                        .opacity_transition(std::time::Duration::from_millis(200))
-                        .scale(if self.page_entering { 0.99 } else { 1.0 })
-                        .scale_transition(std::time::Duration::from_millis(200))
-                        .exit_transition(ExitTransition::fade(std::time::Duration::from_millis(
-                            160,
-                        )))
                         .content(content),
                 ),
                 KeyedView::new("overlay", overlay),
@@ -1093,6 +1138,41 @@ impl Component for Shell {
 }
 
 impl Shell {
+    /// Build one page's view for the stacked-layer host. `anim` is `Some`
+    /// only on the entering layer — the leaving layer renders at rest (its
+    /// whole-page offset comes from the layer wrapper, not block springs).
+    fn page_view(
+        &self,
+        page: Page,
+        snap: Option<&Snapshot>,
+        context: &mut ViewContext<Self>,
+        anim: Option<&widgets::NavAnim>,
+    ) -> View {
+        let theme = &self.theme;
+        match page {
+            Page::Overview => overview_page(
+                snap,
+                theme,
+                context,
+                &OverviewArgs {
+                    scanning: self.scanning,
+                    config: &self.config,
+                    editing: self.editing,
+                    trend: &self.trend,
+                    cols: self.overview_cols,
+                    ruler: &self.ruler,
+                    donuts: &self.donuts,
+                    anim,
+                },
+            ),
+            Page::Detail => detail_page(snap, theme, context, anim),
+            Page::Quota => quota_page(snap, theme, &self.quota_collapsed, context, anim),
+            Page::Sources => sources_page(snap, theme, anim),
+            Page::Prices => prices_page(snap, theme, anim),
+            Page::Settings => settings_page(&self.config, theme, context, anim),
+        }
+    }
+
     /// Low-frequency vendor quota poll (spec §6.9) — `GTT_NO_QUOTA` disables.
     /// Errors are logged via diag only; the quota page shows what landed.
     fn poll_quota_if_stale(&mut self, context: &ComponentContext<Self>) {

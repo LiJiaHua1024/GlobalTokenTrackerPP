@@ -739,3 +739,16 @@
 - **命中变化**：`donut_hit` 签名去 total 参数（内部求和）、改传 w/h 经 `donut_geom`；右侧气泡带几何上在环外自然返回 None——气泡非交互元素，离开环即消失，无闪烁（命中是纯几何不依赖元素）。
 - **实测**（GTT_DONUTTEST）：col0·Claude → 左下外缘气泡 `Claude / 39.1%·$2896 / 第 2 / 5 项`；col2·Codex → 右外缘气泡 `Codex / 35.8%·59亿 / 第 1 / 5 项`；中心恒显合计。
 - **验证**：`donut_hit` 两测试更新到新几何（右侧带拒绝命中）共 64 全过；clippy `-D warnings` 0；i18n 增词条 `第 {} / {} 项`→`#{} of {}`；改动区 fmt 干净。
+
+## S61 页面切换：横向滑动 + 逐控件弹簧 ✅
+
+- **需求**：页面切换从淡入淡出改为左右滑动；每个控件要有单独的阻尼和弹簧速度。
+- **reactor 现状**：0.100 高层 API 只暴露 opacity/scale 过渡 + fade 出场，无平移过渡、无合成器弹簧入口（`GetElementVisual` 为 pub(crate)）。因此采用**闭式弹簧 + margin 位移**方案：无状态、按 `Instant` 求值，每 ~16ms 一个 `NavAnimTick` 触发 view 重建重算。
+- **结构**：切页时新页、旧页在 Grid 双层叠放——`leave` 层渲染旧页（`page_view(from)`）整层滑出，`enter` 层整层 `dir·460px` 弹簧滑入（ζ=0.95, ω=8.5，约 400ms 可读行程），页面内部每个顶层块再叠加 `dir·(46+15i)` 的独立弹簧——**逐控件参数**：延迟 24ms·i、刚度 k=150−10i、阻尼 ζ=0.80+0.012i（越靠后越软越晚起步，形成级联）。`pagehost` 键恒定，`enter` 键跨切页不变——定局视图绝不重挂载，canvas swapchain 不闪。
+- **方向**：`Page` 声明序即导航序，向高索引页 → dir=+1（新页右来、旧页左去），反向自动镜像。
+- **覆盖式滑动**：进场层不透明（opacity 恒 1）——新页滑动时遮挡旧页，旧页 −120px 逆移 + ~500ms 淡出。避免了双半透明层"鬼影"（实测首版交叉透明时中帧文字糊成一团）；淡出尾巴压到 500ms 是因为新页未覆盖区域需要旧页垫底——否则 Mica 透出桌面（连拍实测验证）。
+- **anim→rest 边界**：`enter` 层 Border 与每块的 Border 包装**无条件**存在（rest 时 margin=0）——否则落定瞬间元素类型跳变触发整子树重挂载，overview 的 5 个 swapchain canvas 会闪。
+- **取舍**：margin 位移走布局路径而非合成器位移动画——reactor 0.100 无公开杠杆（`Translation`/`TranslationTransition` 仅在内部绑定层）；布局量每帧仅 ~15 个顶层块的 margin 变更，实测 debug 下 60fps 无压力。超过 10 块的页（长表）超出块直接静态，防级联失控。
+- **测试钩子**：`GTT_NAVTEST=<label>@<ms>[@<alt>]` 首个快照后每 ms 交替切页 label↔alt——截图实测捕获飞行帧（注入输入到不了 WinUI3 content island，同 GTT_TIPTEST 先例）。
+- **实测**（60 帧连拍）：总览→明细中帧显示表格从右滑入盖在旧页上、旧页左移淡出；明细→配额同效反向。飞行全程 ~15 帧（~320ms 可见运动 + ~600ms 弹簧收尾），DONE_MS=950 收敛。
+- **验证**：64 测试全过、clippy `-D warnings` 0、改动区 fmt 干净（`useless_conversion` 三处 `.into()` 已清）。
