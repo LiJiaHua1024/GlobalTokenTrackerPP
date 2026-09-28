@@ -226,6 +226,7 @@ pub fn trend_strip(
     let accent = theme.accent_cf;
     let subtle = theme.subtle_cf;
     let divider = theme.divider_cf;
+    let card_bg = theme.card_cf;
     let family = theme.font_family.clone();
     let label_pt = theme.label_size as f32;
     let shared = trend.shared.clone();
@@ -240,7 +241,9 @@ pub fn trend_strip(
             use windows_canvas::{ColorF, Rect, TextAlignment, TextFormat, Vector2};
             // Clear before the early return — an empty `days` must still wipe
             // the previous frame, otherwise stale bars linger after filters.
-            ctx.clear(ColorF::TRANSPARENT);
+            // Painted with the card fill: swapchain transparency blends onto
+            // the page below, not the card, so TRANSPARENT showed as a dark box.
+            ctx.clear(card_bg);
             let (w, h) = (ctx.width, ctx.height);
             if w < 16.0 || h < 24.0 || days.is_empty() {
                 return Ok(());
@@ -457,6 +460,10 @@ fn donut(theme: &Theme, spec: DonutSpec<'_>, ctx: &mut ViewContext<Shell>) -> Vi
     let total: f64 = slices.iter().map(|s| s.1).sum();
     let accent = theme.accent_cf;
     let subtle = theme.subtle_cf;
+    // SwapChain pixels composite straight onto the window surface — a
+    // TRANSPARENT clear shows the page, not the card beneath. Painting the
+    // card's own fill is what makes the canvas indistinguishable from it.
+    let card_bg = theme.card_cf;
     let family = theme.font_family.clone();
     let body_pt = theme.body_size as f32;
     let label_pt = theme.label_size as f32;
@@ -490,7 +497,7 @@ fn donut(theme: &Theme, spec: DonutSpec<'_>, ctx: &mut ViewContext<Shell>) -> Vi
                     ColorF, ParagraphAlignment, PathBuilder, Rect, TextAlignment, TextFormat,
                     Vector2,
                 };
-                ctx.clear(ColorF::TRANSPARENT);
+                ctx.clear(card_bg);
                 let (w, h) = (ctx.width, ctx.height);
                 if w < 40.0 || total <= 0.0 {
                     return Ok(());

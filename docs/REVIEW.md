@@ -721,3 +721,12 @@
 - **实测**（release）：摄入事件的扫描内部耗时 **~117ms**（原：0 摄入 ~650ms、有摄入再 +1309ms rollup）；全量 `rollup` 后 `report all` 聚合不变（$7416.44 一致）
 - **取舍/边界**：ON CONFLICT 升级若把 ts_start 改到更早的日（理论边角，快照间 start 不变）旧日聚合会滞后，修复路径 = `rollup` CLI 全量重建；400+ 天首装回填仍走全量——一次性成本可接受
 - **验证**：新增 2 测试（局部重建=全量逐行一致 / +08:00 帧日界正确 / 空集 no-op）共 61 全过；clippy `-D warnings` 0；改动区 fmt 干净
+
+## S59 canvas 底色融入卡片（消灭 SwapChain 黑框） ✅
+
+- **现象**：每个环形图背后有一块 ~150×132 的暗矩形（#1F2021），明显深于卡片（#2B2B2C）。逐像素测量发现**趋势图同样存在**，只是全宽不易察觉。
+- **机制**（红填充实验证实绘制路径正常）：`canvas_invalidated` 的交换链虽以 PREMULTIPLIED 创建，但透明像素的合成目标是**窗口/页面底色**而非下层卡片——Fluent `CardBackground` 主题画刷本身是 ~5% 半透明白叠页面底，交换链透明区跳过了这层，透出页面 #202020。`ctx.clear(TRANSPARENT)` 的"透出卡片"假设在此栈不成立。
+- **修复**：不再依赖透明穿透，canvas 直接把卡片等效填充色画进 buffer——新增 `Theme.card_cf`：`card_bg` 为 hex 配置时 `colorf_of` 精确映射；默认走 Fluent 暗色 `CardBackgroundFillColorDefault` 等效值 `rgba(255,255,255,0x0D)`，canvas 与卡片画刷在同一页面底上合成出逐字节一致的结果。donut 与 trend 两处 clear 均替换。
+- **实测**：修复后 canvas 区域像素 `#2B2B2B` vs 卡片 `#2B2B2C`（Δ=1 LSB 舍入差，视觉不可分辨）；黑框消失。
+- **取舍**：`card_bg` 配非 hex 的命名画刷（如 `accent`/`solid`）时 `card_cf` 回退默认透明白——会轻微失配，已注释；亮色主题同样按暗色常量回退（与既有 accent_cf/subtle_cf 策略一致）。
+- **验证**：64 测试全过、clippy `-D warnings` 0、改动区 fmt 干净。

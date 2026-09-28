@@ -58,6 +58,11 @@ pub struct Theme {
     pub accent_cf: ColorF,
     pub subtle_cf: ColorF,
     pub divider_cf: ColorF,
+    /// Card fill as drawn by the canvas: SwapChainPanel pixels composite
+    /// straight onto the window surface, so transparency can't "see" the
+    /// card's translucent ThemeBrush beneath — the canvas paints the same
+    /// translucent fill itself and lands on the identical result.
+    pub card_cf: ColorF,
     /// DirectWrite family for chart text.
     pub font_family: String,
     pub radius: f64,
@@ -174,6 +179,13 @@ impl Theme {
             divider_cf: colorf_of(
                 cfg.divider.as_deref(),
                 ColorF::from_rgba8(0x80, 0x80, 0x80, 0x44),
+            ),
+            // Fluent dark CardBackgroundFillColorDefault = white @ ~5% — the
+            // canvas paints this over the same page the card brush blends
+            // onto, landing pixel-identical. Hex card_bg overrides map 1:1.
+            card_cf: colorf_of(
+                cfg.card_bg.as_deref(),
+                ColorF::from_rgba8(0xFF, 0xFF, 0xFF, 0x0D),
             ),
             font_family: cfg.font_family.clone().unwrap_or_else(|| "Segoe UI".into()),
             radius: cfg.radius.unwrap_or(8.0),
