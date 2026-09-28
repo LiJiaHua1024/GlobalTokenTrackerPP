@@ -1456,40 +1456,26 @@ const SCALE_OPTIONS: &[(&str, &str)] =
     &[("compact", "紧凑"), ("standard", "标准"), ("large", "较大")];
 const LANG_OPTIONS: &[(&str, &str)] = &[("zh", "中文"), ("en", "English")];
 
-/// Localized label → semantic value. SelectorBar emits only the item text,
-/// so compare against `tr(label)` — dual-locale by construction.
-fn pick_option<'a>(options: &'a [(&'a str, &'a str)], want: &str) -> &'a str {
-    options
-        .iter()
-        .find(|(_, label)| tr(label) == want)
-        .map(|(value, _)| *value)
-        .unwrap_or_default()
-}
-
-/// Segmented picker for one setting row.
-fn setting_selector(
+/// Dropdown picker for one setting row. ComboBox reports the selected
+/// index — semantic value lookup is by position, no label matching.
+fn setting_dropdown(
     options: &'static [(&'static str, &'static str)],
     current: &str,
     ctx: &mut ViewContext<Shell>,
     map: impl Fn(&'static str) -> Msg + 'static + Clone,
 ) -> View {
-    let items: Vec<KeyedView> = options
-        .iter()
-        .enumerate()
-        .map(|(i, (value, label))| {
-            KeyedView::new(
-                i as u64,
-                SelectorBarItem::new()
-                    .text(tr(label))
-                    .is_selected(*value == current),
-            )
-        })
-        .collect();
-    SelectorBar::new()
-        .on_selected_text_changed(ctx.callback(move |want: Option<String>| {
-            map(pick_option(options, &want.unwrap_or_default()))
+    let selected = options.iter().position(|(value, _)| *value == current);
+    ComboBox::new()
+        .items_source(options.iter().map(|(_, label)| tr(label)))
+        .selected_index(selected)
+        .min_width(220.0)
+        .on_selection_changed(ctx.callback(move |idx: Option<usize>| {
+            map(idx
+                .and_then(|i| options.get(i))
+                .map(|(value, _)| *value)
+                .unwrap_or_default())
         }))
-        .collection_slot(SelectorBarSlot::Items, items)
+        .into()
 }
 
 /// Label column + control + optional subtle note — consistent with the
@@ -1556,7 +1542,7 @@ pub fn settings_page(config: &UiConfig, theme: &Theme, ctx: &mut ViewContext<She
         theme,
         "主题模式",
         None,
-        setting_selector(
+        setting_dropdown(
             THEME_OPTIONS,
             match config.window_theme.as_str() {
                 "" => "system",
@@ -1570,7 +1556,7 @@ pub fn settings_page(config: &UiConfig, theme: &Theme, ctx: &mut ViewContext<She
         theme,
         "主题色",
         None,
-        setting_selector(
+        setting_dropdown(
             ACCENT_OPTIONS,
             config.theme.accent.as_deref().unwrap_or(""),
             ctx,
@@ -1581,7 +1567,7 @@ pub fn settings_page(config: &UiConfig, theme: &Theme, ctx: &mut ViewContext<She
         theme,
         "字体",
         Some("仅作用于图表文字；界面控件字体跟随系统"),
-        setting_selector(
+        setting_dropdown(
             FONT_OPTIONS,
             config.theme.font_family.as_deref().unwrap_or(""),
             ctx,
@@ -1592,13 +1578,13 @@ pub fn settings_page(config: &UiConfig, theme: &Theme, ctx: &mut ViewContext<She
         theme,
         "界面字号",
         None,
-        setting_selector(SCALE_OPTIONS, current_scale(theme), ctx, Msg::SetFontScale),
+        setting_dropdown(SCALE_OPTIONS, current_scale(theme), ctx, Msg::SetFontScale),
     );
     let lang_row = setting_row(
         theme,
         "语言",
         None,
-        setting_selector(
+        setting_dropdown(
             LANG_OPTIONS,
             match config.lang.as_str() {
                 "" => "zh",
