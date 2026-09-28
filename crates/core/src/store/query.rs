@@ -30,6 +30,17 @@ pub struct AppSummary {
     pub cost_usd: f64,
 }
 
+/// One share-dimension entry for the cost pie — name + the two metrics the
+/// legend shows.
+#[derive(Debug, Clone)]
+pub struct ShareRow {
+    pub name: String,
+    pub events: u64,
+    /// input+output+cache_read — same headline convention as `bucket_models`.
+    pub tokens: u64,
+    pub cost_usd: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct QuotaRow {
     pub app: String,
@@ -174,6 +185,33 @@ impl super::Store {
                 cache_write_tokens: r.get::<_, i64>(6)? as u64,
                 credits: r.get(7)?,
                 cost_usd: r.get(8)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Per-model aggregation for the share pie — `MODEL_EXPR` identity, so
+    /// slice names match the model filter's checkbox labels exactly.
+    pub fn by_model(
+        &self,
+        from_ms: Option<i64>,
+        to_ms: Option<i64>,
+        apps: Option<&[String]>,
+        models: Option<&[String]>,
+    ) -> Result<Vec<ShareRow>> {
+        let (w, p) = scope_where(from_ms, to_ms, apps, models);
+        let mut st = self.conn().prepare(&format!(
+            "SELECT {MODEL_EXPR}, COUNT(*),
+                    COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens),0),
+                    COALESCE(SUM(cost_usd),0)
+             FROM usage_events {w} GROUP BY 1 ORDER BY cost_usd DESC"
+        ))?;
+        let rows = st.query_map(rusqlite::params_from_iter(p.iter()), |r| {
+            Ok(ShareRow {
+                name: r.get(0)?,
+                events: r.get::<_, i64>(1)? as u64,
+                tokens: r.get::<_, i64>(2)? as u64,
+                cost_usd: r.get(3)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)

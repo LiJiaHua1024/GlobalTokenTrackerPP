@@ -82,6 +82,8 @@ pub struct Shell {
     tray: Option<tray_icon::TrayIcon>,
     /// Trend-chart hover state + repaint handle (shared with the D2D closure).
     trend: widgets::TrendHandle,
+    /// Repaint handle for the overview share donut.
+    share_inv: windows_canvas::Invalidator,
     /// Vendor quota channels poll at this cadence (network calls stay rare).
     quota_at: Option<std::time::Instant>,
     /// Overview statistics window (persisted in ui.json).
@@ -170,6 +172,8 @@ pub enum Msg {
     SetLang(&'static str),
     /// Settings: Run-key launch-at-login toggle; arg is the switch's new state.
     SetAutostart(bool),
+    /// Overview share pie: "model" | "app" slice dimension.
+    SetShareDim(&'static str),
     /// Background quota poll finished (rows written, channel errors).
     QuotaDone(usize, Vec<String>),
     /// Background price-source fetch finished — repriced>0 triggers one
@@ -442,6 +446,7 @@ impl Component for Shell {
             editing: std::env::var("GTT_EDIT").is_ok(),
             tray,
             trend: widgets::TrendHandle::default(),
+            share_inv: windows_canvas::Invalidator::new(),
             quota_at: None,
             open_menu: None,
             quota_collapsed: std::collections::BTreeSet::new(),
@@ -727,6 +732,10 @@ impl Component for Shell {
                 self.config.autostart = got;
                 self.config.save();
             }
+            Msg::SetShareDim(v) => {
+                self.config.share_dim = v.to_string();
+                self.config.save();
+            }
             Msg::Noop => {}
             Msg::WatchFired => {
                 diag!("[watch] fired, scanning={}", self.scanning);
@@ -915,6 +924,7 @@ impl Component for Shell {
                     config: &self.config,
                     editing: self.editing,
                     trend: &self.trend,
+                    share_inv: &self.share_inv,
                 },
             ),
             Page::Detail => detail_page(snap, theme, context),

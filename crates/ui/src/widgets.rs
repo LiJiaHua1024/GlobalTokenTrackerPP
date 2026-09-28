@@ -15,6 +15,7 @@ use windows_reactor::*;
 pub const OVERVIEW_WIDGETS: &[(&str, &str, Symbol)] = &[
     ("stats", "统计卡", Symbol::Calculator),
     ("trend", "近 30 天趋势", Symbol::FourBars),
+    ("share", "费用占比", Symbol::Target),
     ("apps", "本周 · 按工具", Symbol::List),
     ("quotas", "订阅配额", Symbol::Clock),
     ("unpriced", "未计价提示", Symbol::Important),
@@ -372,6 +373,96 @@ pub fn trend_strip(
                 &tick(&days[last].date),
                 &tf_r,
                 &Rect::new(w - 80.0, bottom + 2.0, w, h),
+                &ink,
+            );
+            Ok(())
+        }))
+}
+
+/// Fixed palette for pie slices 1.. (slice 0 always uses the live accent so
+/// the dominant share reads in the brand color). Hues chosen to stay legible
+/// on both light and dark skins; the gray tail usually lands on 其他.
+pub const SLICE_PALETTE: [(u8, u8, u8); 7] = [
+    (0x10, 0xa8, 0x74),
+    (0xe8, 0x85, 0x3d),
+    (0x8b, 0x6f, 0xd8),
+    (0xd8, 0x4d, 0x5b),
+    (0x5b, 0xb8, 0xd8),
+    (0xd8, 0xb8, 0x4d),
+    (0x9e, 0x9e, 0x9e),
+];
+
+/// XAML-side swatch for legend rows — same index rule as the D2D slice fill.
+pub fn slice_brush(theme: &Theme, i: usize) -> Brush {
+    if i == 0 {
+        return theme.accent;
+    }
+    let (r, g, b) = SLICE_PALETTE[(i - 1) % SLICE_PALETTE.len()];
+    Brush::Solid(Color::rgb(r, g, b))
+}
+
+/// Cost-share donut — annular sectors approximated by polygon paths (~3°
+/// steps; a real arc primitive isn't exposed on 0.100). The hollow center
+/// passes the card through, so no guess-the-background hole painting.
+/// `slices` arrive pre-folded (top-N + 其他); `total` centers as a label.
+pub fn share_donut(theme: &Theme, slices: &[(String, f64)], inv: &Invalidator) -> View {
+    let slices: Vec<(String, f64)> = slices.to_vec();
+    let total: f64 = slices.iter().map(|s| s.1).sum();
+    let accent = theme.accent_cf;
+    let subtle = theme.subtle_cf;
+    let family = theme.font_family.clone();
+    let body_pt = theme.body_size as f32;
+    Border::new()
+        .width(190.0)
+        .height(190.0)
+        .content(windows_canvas::canvas_invalidated(inv, move |ctx| {
+            use windows_canvas::{
+                ColorF, ParagraphAlignment, PathBuilder, Rect, TextAlignment, TextFormat, Vector2,
+            };
+            ctx.clear(ColorF::TRANSPARENT);
+            let (w, h) = (ctx.width, ctx.height);
+            if w < 40.0 || total <= 0.0 {
+                return Ok(());
+            }
+            let (cx, cy) = (w * 0.5, h * 0.5);
+            let r_out = (w.min(h) * 0.5 - 4.0).max(1.0);
+            let r_in = r_out * 0.62;
+            let gap = if slices.len() > 1 { 0.016f32 } else { 0.0 };
+            let mut a = -std::f32::consts::FRAC_PI_2;
+            for (i, (_, v)) in slices.iter().enumerate() {
+                let span = (*v / total).max(0.0) as f32 * std::f32::consts::TAU;
+                let a1 = a + span;
+                let (a0, a1c) = (a + gap, (a1 - gap).max(a + gap));
+                if a1c > a0 {
+                    let n = (((a1c - a0) / (std::f32::consts::TAU / 120.0)).ceil() as usize).max(2);
+                    let mut pts = Vec::with_capacity(2 * (n + 1));
+                    for k in 0..=n {
+                        let t = a0 + (a1c - a0) * k as f32 / n as f32;
+                        pts.push(Vector2::new(cx + r_out * t.cos(), cy + r_out * t.sin()));
+                    }
+                    for k in (0..=n).rev() {
+                        let t = a0 + (a1c - a0) * k as f32 / n as f32;
+                        pts.push(Vector2::new(cx + r_in * t.cos(), cy + r_in * t.sin()));
+                    }
+                    let path = PathBuilder::new(ctx.device())?.polygon(pts)?;
+                    let color = if i == 0 {
+                        accent
+                    } else {
+                        let (r, g, b) = SLICE_PALETTE[(i - 1) % SLICE_PALETTE.len()];
+                        ColorF::from_rgb8(r, g, b)
+                    };
+                    ctx.fill_path(&path, &ctx.create_solid_brush(color)?);
+                }
+                a = a1;
+            }
+            let tf = TextFormat::new_bold(&family, body_pt + 2.0)?
+                .with_alignment(TextAlignment::Center)
+                .with_paragraph_alignment(ParagraphAlignment::Center);
+            let ink = ctx.create_solid_brush(subtle)?;
+            ctx.draw_text(
+                &fmt::usd(total),
+                &tf,
+                &Rect::new(cx - r_in + 2.0, cy - r_in, cx + r_in - 2.0, cy + r_in),
                 &ink,
             );
             Ok(())

@@ -213,6 +213,11 @@ pub fn tr(zh: &str) -> &str {
         // ---- widget registry (widgets.rs titles resolve through tr too)
         "统计卡" => "Stats",
         "近 30 天趋势" => "30-day trend",
+        "费用占比" => "Cost share",
+        "按模型" => "By model",
+        "按工具" => "By tool",
+        "其他" => "Other",
+        "所选范围暂无可计价费用" => "No priced cost in this range",
         "本周 · 按工具" => "This week · by tool",
         "未计价提示" => "Unpriced notice",
         "部件" => "Widget",

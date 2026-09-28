@@ -657,3 +657,11 @@
 - **旧数据兼容**：`ui.json` 里已存的 4 个绝对字号字段原样保留，滑块按 `body_size` 读当前值。
 - **验证**：UIA 实测 slider SetValue(12→15) 回读 `body_size:15/title:25`；枚举测试断言 >10 家族且含 Segoe UI；60 测试全绿、clippy 0、触及文件 fmt 净。
 - **如实限制**：字体仍只作用于 D2D 图表文字（reactor 0.100 无 XAML font setter），行内注释保留。
+
+## S52 费用占比环形图 ✅
+
+- **数据源**：`Store::by_model` 新增（`MODEL_EXPR` 分组，与模型筛选器同一身份）；`OverviewVm.by_model` + 复用 `by_app`——均走 `scope_where(from,to,apps,models)`，自动跟随范围选择器（今日/7天/30天/自定义）与工具/模型筛选。
+- **UI**：总览新 widget `share`（默认排在趋势后）：D2D 环形图（环形扇区多边形近似，~3° 步进，0.100 无 arc 原语）+ 图例（色块+名称+`xx.x% · $n`）；`按模型|按工具` SelectorBar 切换，`ui.json:share_dim` 持久化；top-6 + "其他" 折叠。
+- **诚实口径**：仅统计可计价费用——`cost_usd<=0` 的行不画扇区，全零时显示"所选范围暂无可计价费用"而非假图。
+- **修的真 bug**：`tf!` 模板不支持 `{:.1}` 格式说明符（按 Display 直出 15 位小数）——改为先 `format!("{:.1}")` 再进模板。
+- **实测**：UIA 切维度截图验证——按工具 Codex 50.0%/$3710 vs 按模型 claude-opus-5-5 31.6%/$2342，合计 $7416 与统计卡一致。

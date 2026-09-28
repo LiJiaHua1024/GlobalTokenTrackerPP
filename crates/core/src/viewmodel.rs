@@ -1,7 +1,7 @@
 //! ViewModels — plain, serializable structs the UI shells render verbatim.
 //! All SQL/formatting lives here so shells stay dumb (Mac port = same VMs).
 
-use crate::store::{AppSummary, EventRow, QuotaRow, Store, Totals};
+use crate::store::{AppSummary, EventRow, QuotaRow, ShareRow, Store, Totals};
 use anyhow::Result;
 
 /// Statistics window selected on the overview page. Persisted as `key` in
@@ -160,6 +160,8 @@ pub struct OverviewVm {
     pub all: Totals,
     pub range: Range,
     pub by_app: Vec<AppSummary>,
+    /// Per-model totals in the same range — the pie's "按模型" dimension.
+    pub by_model: Vec<ShareRow>,
     /// Trend buckets for the selected range: per local day, or per local hour
     /// for `Today`. Each bucket carries its tooltip payload (top-3 models).
     pub daily: Vec<TrendBucket>,
@@ -303,6 +305,7 @@ impl Store {
             all: self.totals(None, None, apps, models)?,
             range,
             by_app: self.by_app(start, end, apps, models)?,
+            by_model: self.by_model(start, end, apps, models)?,
             daily,
             apps: self.app_names()?,
             models: self.model_names(apps)?,
