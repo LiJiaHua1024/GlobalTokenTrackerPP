@@ -106,6 +106,10 @@ pub struct Shell {
     /// Overview reflow column count — driven by the width ruler's
     /// Metrics events (4 until the first measurement lands).
     overview_cols: usize,
+    /// Page-switch entrance is mid-flight — the page container renders at
+    /// opacity 0 / scale .99 for one frame, then `PageSettled` animates it
+    /// in (Border opacity/scale transitions).
+    page_entering: bool,
     /// 1-DIP full-width ruler panel on the overview page; its surface
     /// metrics report the real content width for adaptive grids.
     ruler: ElementRef<SwapChainPanel>,
@@ -167,6 +171,8 @@ pub enum Msg {
     ToggleQuotaGroup(String),
     /// Width-ruler observer: overview grids should use this many columns.
     SetOverviewCols(usize),
+    /// First frame of a page switch has painted — ramp the entrance in.
+    PageSettled,
     /// Event sink for RadioButton uncheck transitions — nothing to do.
     Noop,
     /// Settings: window theme — "system" | "light" | "dark".
@@ -461,6 +467,7 @@ impl Component for Shell {
             prices_refreshing: false,
             views_stale: true,
             overview_cols: 4,
+            page_entering: false,
             ruler: ElementRef::new(),
         }
     }
@@ -743,6 +750,7 @@ impl Component for Shell {
                 self.config.save();
             }
             Msg::Noop => {}
+            Msg::PageSettled => self.page_entering = false,
             // Width-ruler metrics → reflow column count changed. The
             // observer already dedupes, so landing here always rebuilds.
             Msg::SetOverviewCols(n) => self.overview_cols = n.clamp(1, 4),
@@ -779,6 +787,7 @@ impl Component for Shell {
             }
             Msg::Nav(tag) => {
                 self.open_menu = None;
+                let prev = self.page;
                 self.page = match tag.as_deref() {
                     Some("明细") | Some("Details") | Some("detail") => Page::Detail,
                     Some("配额") | Some("Quota") | Some("quota") => Page::Quota,
@@ -787,6 +796,15 @@ impl Component for Shell {
                     Some("设置") | Some("Settings") | Some("settings") => Page::Settings,
                     _ => Page::Overview,
                 };
+                if self.page != prev {
+                    // Entrance phase 1: page mounts at opacity 0 — the settle
+                    // tick lands one frame later and ramps the transition in.
+                    self.page_entering = true;
+                    context.spawn_background(|_| {
+                        std::thread::sleep(std::time::Duration::from_millis(30));
+                        Msg::PageSettled
+                    });
+                }
                 // Page-scoped data is lazy: first visit to Sources/Prices
                 // triggers one load; ticks keep it fresh while open.
                 let missing = match self.page {
@@ -1028,25 +1046,49 @@ impl Component for Shell {
             }
             _ => Border::new().grid_row(2).into(),
         };
+        // Keyed page container: switching pages changes the key → the old
+        // container unmounts through its exit fade while the new one mounts
+        // at opacity 0 / scale .99 and ramps in on PageSettled (crossfade).
+        let page_key: &'static str = match self.page {
+            Page::Overview => "page:overview",
+            Page::Detail => "page:detail",
+            Page::Quota => "page:quota",
+            Page::Sources => "page:sources",
+            Page::Prices => "page:prices",
+            Page::Settings => "page:settings",
+        };
         // Root must be a Grid: a vertical StackPanel offers children infinite
         // height, which makes the page ScrollViewer measure at full content
         // size and never scroll. Star row bounds the scroll area.
         Grid::new()
             .rows([GridLength::Auto, GridLength::Auto, GridLength::STAR])
-            .children((
-                TitleBar::new()
-                    .preferred_height(WindowTitleBarHeight::Tall)
-                    .grid_row(0),
-                nav,
-                brand,
-                chrome,
-                Border::new()
-                    .grid_row(2)
-                    .border_brush(theme.divider)
-                    .border_thickness(Thickness::new(0.0, 1.0, 0.0, 0.0))
-                    .content(content),
-                overlay,
-            ))
+            .keyed_children([
+                KeyedView::new(
+                    "titlebar",
+                    TitleBar::new()
+                        .preferred_height(WindowTitleBarHeight::Tall)
+                        .grid_row(0),
+                ),
+                KeyedView::new("nav", nav),
+                KeyedView::new("brand", brand),
+                KeyedView::new("chrome", chrome),
+                KeyedView::new(
+                    page_key,
+                    Border::new()
+                        .grid_row(2)
+                        .border_brush(theme.divider)
+                        .border_thickness(Thickness::new(0.0, 1.0, 0.0, 0.0))
+                        .opacity(if self.page_entering { 0.0 } else { 1.0 })
+                        .opacity_transition(std::time::Duration::from_millis(200))
+                        .scale(if self.page_entering { 0.99 } else { 1.0 })
+                        .scale_transition(std::time::Duration::from_millis(200))
+                        .exit_transition(ExitTransition::fade(std::time::Duration::from_millis(
+                            160,
+                        )))
+                        .content(content),
+                ),
+                KeyedView::new("overlay", overlay),
+            ])
     }
 }
 

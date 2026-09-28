@@ -697,3 +697,14 @@
 - **基础设施**：`DonutHandle`(shared+inv) ×4 存 Shell；`DonutSpec` 打包 slices/center/fmt/key/handle 避参数上限；`GTT_DONUTTEST=<col>,<idx>` 强制悬停（注入指针到不了 content island，与 GTT_TIPTEST 同理）。
 - **实测**（PrintWindow）：`GTT_DONUTTEST=0,1` → 第 1 环显示 `Claude 39.1%·$2896`+他区压暗；`=2,0` → 第 3 环 `Codex 35.8%·59亿`。
 - **验证**：`donut_hit` 单测 2 个（角度区间归属/环孔外空拒绝）共 62 全过；clippy `-D warnings` 0；改动区 fmt 干净。
+
+## S57 环图对齐 + 页面切换动画 ✅
+
+- **对齐**：donut `horizontal_alignment` Center→Left——之前环居中悬浮，下方图例靠左，视觉错位；现在环左缘与图例文字左缘齐平。
+- **页面切换动画**：`LayoutControl::exit_transition` + Border 原生 `opacity_transition`/`scale_transition`（reactor 0.100 的合成器动画，无自写插值）。
+  - 页面容器按 `page:<name>` 做 key：换页 → 旧容器卸载触发 `ExitTransition::fade(160ms)` 淡出
+  - 入场两阶段：`Msg::Nav` 置 `page_entering` → 首帧挂载 opacity 0 / scale .99 → 30ms 后 `Msg::PageSettled` → 0→1 / .99→1 过渡 200ms，与淡出交叠成交叉淡入
+  - 同页导航不触发；30ms 延迟是单帧级，额外 tick 无副作用（幂等置 false）
+- **实测**：总览↔明细↔配额 UIA 切换正常渲染（opacity 正确回 1，无卡壳）；环图对齐截图确认。
+- **取舍**：入场用的"挂载 0 → 下一帧置 1"两帧法——reactor 属性过渡只在已挂载元素间生效，挂载即终值不会自动播入场动画；PrintWindow 抓合成器最终态，动画帧需肉眼确认。
+- **验证**：62 测试全过、clippy `-D warnings` 0；改动区 fmt 干净。

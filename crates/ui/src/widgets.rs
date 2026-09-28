@@ -474,7 +474,9 @@ fn donut(theme: &Theme, spec: DonutSpec<'_>, ctx: &mut ViewContext<Shell>) -> Vi
     Border::new()
         .width(150.0)
         .height(132.0)
-        .horizontal_alignment(HorizontalAlignment::Center)
+        // Left edge aligns with the legend rows below — centering floated
+        // the ring right of the text column.
+        .horizontal_alignment(HorizontalAlignment::Left)
         // Transparent (not null) Background keeps the canvas hit-testable.
         .background(Brush::Solid(Color::argb(0, 0, 0, 0)))
         .on_pointer_moved(ctx.callback(move |e: PointerEventInfo| {
