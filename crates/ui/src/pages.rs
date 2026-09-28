@@ -2,13 +2,15 @@
 //! from `Theme`; overview blocks are config-ordered `widgets` so users can
 //! reorder/hide them (persisted in ui.json) without touching code.
 
-use crate::config::{refresh_label, UiConfig, REFRESH_OPTIONS};
+use crate::config::{REFRESH_OPTIONS, UiConfig, refresh_label};
+use crate::i18n::{self, tr};
 use crate::theme::Theme;
 use crate::widgets as w;
-use crate::{MenuKind, Msg, Shell, Snapshot, DETAIL_PAGE_SIZE};
+use crate::{DETAIL_PAGE_SIZE, MenuKind, Msg, Shell, Snapshot};
+use crate::{t, tf};
 use globaltokentracker_core::store::EventRow;
-use globaltokentracker_core::viewmodel::fmt;
 use globaltokentracker_core::viewmodel::Range;
+use globaltokentracker_core::viewmodel::fmt;
 use windows_reactor::*;
 
 pub fn keyed(views: Vec<View>) -> impl Iterator<Item = KeyedView> {
@@ -23,7 +25,13 @@ fn cell(col: i32, v: View) -> View {
 }
 
 /// Quota row where the percent earns a tone badge (>=50% only — sparingly).
-fn quota_row_badged(theme: &Theme, label: &str, pct: f64, tone: w::BadgeTone, reset: String) -> View {
+fn quota_row_badged(
+    theme: &Theme,
+    label: &str,
+    pct: f64,
+    tone: w::BadgeTone,
+    reset: String,
+) -> View {
     Grid::new()
         .columns([GridLength::STAR, GridLength::Auto, GridLength::Auto])
         .column_spacing(10.0)
@@ -35,10 +43,7 @@ fn quota_row_badged(theme: &Theme, label: &str, pct: f64, tone: w::BadgeTone, re
                     .font_size(theme.body_size)
                     .into(),
             ),
-            cell(
-                1,
-                w::badge(theme, format!("{pct:.0}%"), tone),
-            ),
+            cell(1, w::badge(theme, format!("{pct:.0}%"), tone)),
             cell(
                 2,
                 TextBlock::new()
@@ -60,11 +65,16 @@ fn vstack(spacing: f64, children: Vec<View>) -> View {
 fn loading(theme: &Theme, scanning: bool) -> View {
     let mut children: Vec<View> = Vec::new();
     if scanning {
-        children.push(ProgressRing::new().is_indeterminate(true).is_active(true).into());
+        children.push(
+            ProgressRing::new()
+                .is_indeterminate(true)
+                .is_active(true)
+                .into(),
+        );
     }
     children.push(
         TextBlock::new()
-            .text("正在扫描数据源…")
+            .text(t!("正在扫描数据源…"))
             .foreground(theme.subtle)
             .into(),
     );
@@ -100,8 +110,7 @@ fn header(theme: &Theme, title: &str, actions: Vec<View>) -> View {
 }
 
 fn page_frame(theme: &Theme, body: View) -> View {
-    let mut frame = Border::new()
-        .padding(Thickness::xy(24.0, 16.0));
+    let mut frame = Border::new().padding(Thickness::xy(24.0, 16.0));
     if let Some(bg) = &theme.page_bg {
         frame = frame.background(*bg);
     }
@@ -134,45 +143,43 @@ fn edit_chrome(theme: &Theme, page: &str, id: &'static str, ctx: &mut ViewContex
                             let p = page.clone();
                             move |_| Msg::MoveWidget(p.clone(), id.to_string(), -1)
                         }))
-                        .content("上移"),
+                        .content(t!("上移")),
                     Button::new()
                         .on_click(ctx.callback({
                             let p = page.clone();
                             move |_| Msg::MoveWidget(p.clone(), id.to_string(), 1)
                         }))
-                        .content("下移"),
+                        .content(t!("下移")),
                     Button::new()
                         .on_click(ctx.callback({
                             let p = page.clone();
                             move |_| Msg::HideWidget(p.clone(), id.to_string(), true)
                         }))
-                        .content("隐藏"),
+                        .content(t!("隐藏")),
                 )),
         )
 }
 
 fn hidden_chip(theme: &Theme, page: &str, id: &'static str, ctx: &mut ViewContext<Shell>) -> View {
     let page = page.to_string();
-    Border::new()
-        .padding(Thickness::xy(10.0, 4.0))
-        .content(
-            StackPanel::new()
-                .orientation(Orientation::Horizontal)
-                .spacing(8.0)
-                .children((
-                    TextBlock::new()
-                        .text(format!("已隐藏：{}", w::widget_title(id)))
-                        .font_size(theme.label_size)
-                        .foreground(theme.subtle)
-                        .vertical_alignment(VerticalAlignment::Center),
-                    Button::new()
-                        .on_click(ctx.callback({
-                            let p = page.clone();
-                            move |_| Msg::HideWidget(p.clone(), id.to_string(), false)
-                        }))
-                        .content("恢复"),
-                )),
-        )
+    Border::new().padding(Thickness::xy(10.0, 4.0)).content(
+        StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(8.0)
+            .children((
+                TextBlock::new()
+                    .text(tf!("已隐藏：{}", w::widget_title(id)))
+                    .font_size(theme.label_size)
+                    .foreground(theme.subtle)
+                    .vertical_alignment(VerticalAlignment::Center),
+                Button::new()
+                    .on_click(ctx.callback({
+                        let p = page.clone();
+                        move |_| Msg::HideWidget(p.clone(), id.to_string(), false)
+                    }))
+                    .content(t!("恢复")),
+            )),
+    )
 }
 
 /// Render one overview widget (without edit chrome).
@@ -184,7 +191,7 @@ fn overview_widget(
     ctx: &mut ViewContext<Shell>,
 ) -> Option<View> {
     let vm = &s.vm;
-    let rl = vm.range.label();
+    let rl = tr(vm.range.label());
     match id {
         "stats" => Some(
             Grid::new()
@@ -201,9 +208,9 @@ fn overview_widget(
                         w::stat_card(
                             theme,
                             Symbol::Calculator,
-                            &format!("{rl} Tokens"),
+                            &tf!("{rl} Tokens", rl),
                             fmt::tokens_exact(fmt::tokens_total(&vm.span)),
-                            format!("事件 {}", fmt::tokens_exact(vm.span.events)),
+                            tf!("事件 {}", fmt::tokens_exact(vm.span.events)),
                             false,
                             None,
                         ),
@@ -213,11 +220,11 @@ fn overview_widget(
                         w::stat_card(
                             theme,
                             Symbol::Tag,
-                            &format!("{rl}估算成本"),
+                            &tf!("{rl}估算成本", rl),
                             fmt::usd(vm.span.cost_usd),
-                            format!("全部 {}", fmt::usd(vm.all.cost_usd)),
+                            tf!("全部 {}", fmt::usd(vm.all.cost_usd)),
                             true,
-                            Some(("估算", w::BadgeTone::Accent)),
+                            Some((t!("估算"), w::BadgeTone::Accent)),
                         ),
                     ),
                     cell(
@@ -225,9 +232,9 @@ fn overview_widget(
                         w::stat_card(
                             theme,
                             Symbol::SyncFolder,
-                            &format!("{rl}缓存读"),
+                            &tf!("{rl}缓存读", rl),
                             fmt::tokens_exact(vm.span.cache_read_tokens),
-                            format!("输入 {}", fmt::tokens_exact(vm.span.input_tokens)),
+                            tf!("输入 {}", fmt::tokens_exact(vm.span.input_tokens)),
                             false,
                             None,
                         ),
@@ -237,9 +244,9 @@ fn overview_widget(
                         w::stat_card(
                             theme,
                             Symbol::CalendarWeek,
-                            &format!("{rl}事件"),
+                            &tf!("{rl}事件", rl),
                             fmt::tokens_exact(vm.span.events),
-                            format!(
+                            tf!(
                                 "活跃 {}",
                                 if vm.span.active_ms > 0 {
                                     fmt::duration(Some(vm.span.active_ms as i64))
@@ -255,9 +262,9 @@ fn overview_widget(
         ),
         "trend" => {
             let trend_title: String = match vm.range {
-                Range::Today => "今日 · 按小时".into(),
-                Range::All => "全部 · 按天（近 60 桶）".into(),
-                _ => format!("{rl}趋势"),
+                Range::Today => t!("今日 · 按小时").into(),
+                Range::All => t!("全部 · 按天（近 60 桶）").into(),
+                _ => tf!("{rl}趋势", rl),
             };
             Some(w::card(
                 theme,
@@ -275,8 +282,8 @@ fn overview_widget(
             for a in vm.by_app.iter().take(8) {
                 rows.push(w::key_value_row(
                     theme,
-                    format!("{}  ·  {} 事件", a.app, a.events),
-                    format!(
+                    tf!("{}  ·  {} 事件", a.app, a.events),
+                    tf!(
                         "{} tok  ·  {}",
                         fmt::tokens_exact(
                             a.input_tokens
@@ -291,7 +298,7 @@ fn overview_widget(
             if rows.is_empty() {
                 rows.push(
                     TextBlock::new()
-                        .text("暂无数据")
+                        .text(t!("暂无数据"))
                         .font_size(theme.body_size)
                         .foreground(theme.subtle)
                         .into(),
@@ -303,7 +310,7 @@ fn overview_widget(
                     .orientation(Orientation::Vertical)
                     .spacing(8.0)
                     .children((
-                        w::section_header(theme, Symbol::List, &format!("{rl} · 按工具")),
+                        w::section_header(theme, Symbol::List, &tf!("{rl} · 按工具", rl)),
                         vstack(2.0, rows),
                     )),
             ))
@@ -311,19 +318,31 @@ fn overview_widget(
         "quotas" => {
             let mut rows: Vec<View> = Vec::new();
             for q in vm.quotas.iter().take(6) {
-                let label = format!("{} · {}", q.app, q.window_kind);
+                let label = tf!("{} · {}", q.app, tr(&q.window_kind));
                 match q.used_percent {
                     Some(p) if p >= 50.0 => {
-                        let tone = if p >= 80.0 { w::BadgeTone::Danger } else { w::BadgeTone::Warn };
-                        rows.push(quota_row_badged(theme, &label, p, tone, fmt::until(q.resets_at)));
+                        let tone = if p >= 80.0 {
+                            w::BadgeTone::Danger
+                        } else {
+                            w::BadgeTone::Warn
+                        };
+                        rows.push(quota_row_badged(
+                            theme,
+                            &label,
+                            p,
+                            tone,
+                            fmt::until(q.resets_at),
+                        ));
                     }
                     _ => rows.push(w::key_value_row(
                         theme,
                         label,
-                        format!(
+                        tf!(
                             "{}  ·  reset {}",
-                            q.used_percent.map(|p| format!("{p:.0}%")).unwrap_or_else(|| "—".into()),
-                            fmt::until(q.resets_at)
+                            q.used_percent
+                                .map(|p| format!("{p:.0}%"))
+                                .unwrap_or_else(|| "—".into()),
+                            tr(&fmt::until(q.resets_at))
                         ),
                     )),
                 }
@@ -331,7 +350,7 @@ fn overview_widget(
             if rows.is_empty() {
                 rows.push(
                     TextBlock::new()
-                        .text("暂无配额信号")
+                        .text(t!("暂无配额信号"))
                         .font_size(theme.body_size)
                         .foreground(theme.subtle)
                         .into(),
@@ -343,7 +362,7 @@ fn overview_widget(
                     .orientation(Orientation::Vertical)
                     .spacing(8.0)
                     .children((
-                        w::section_header(theme, Symbol::Clock, "订阅配额"),
+                        w::section_header(theme, Symbol::Clock, t!("订阅配额")),
                         vstack(2.0, rows),
                     )),
             ))
@@ -356,8 +375,8 @@ fn overview_widget(
                 InfoBar::new()
                     .severity(InfoBarSeverity::Warning)
                     .is_open(true)
-                    .title("未计价模型".to_string())
-                    .message(format!(
+                    .title(t!("未计价模型").to_string())
+                    .message(tf!(
                         "{} — 请在价格页补充覆写（绝不猜价）",
                         vm.unpriced
                             .iter()
@@ -384,10 +403,8 @@ const TOOLS_BTN_W: f64 = 104.0;
 const MODELS_BTN_W: f64 = 104.0;
 const REFRESH_BTN_W: f64 = 120.0;
 const TOOLS_PANEL_X: f64 = CHROME_LEFT + LABEL_W + GROUP_GAP;
-const MODELS_PANEL_X: f64 =
-    TOOLS_PANEL_X + TOOLS_BTN_W + PICKER_GAP + LABEL_W + GROUP_GAP;
-const REFRESH_PANEL_X: f64 =
-    MODELS_PANEL_X + MODELS_BTN_W + PICKER_GAP + LABEL_W + GROUP_GAP;
+const MODELS_PANEL_X: f64 = TOOLS_PANEL_X + TOOLS_BTN_W + PICKER_GAP + LABEL_W + GROUP_GAP;
+const REFRESH_PANEL_X: f64 = MODELS_PANEL_X + MODELS_BTN_W + PICKER_GAP + LABEL_W + GROUP_GAP;
 
 /// Filter-strip state bundle — keeps `filter_chrome`/`dropdown_overlay`
 /// signatures tidy as more pickers join.
@@ -402,9 +419,9 @@ pub struct ChromeState<'a> {
 /// deliberately empty, `Some(f)` = partial coverage.
 fn check_summary(filter: &Option<Vec<String>>, total: usize) -> String {
     match filter {
-        None => "全部".to_string(),
-        Some(f) if f.is_empty() => "未选".into(),
-        Some(f) => format!("已选 {}/{total}", f.len()),
+        None => t!("全部").to_string(),
+        Some(f) if f.is_empty() => t!("未选").into(),
+        Some(f) => tf!("已选 {}/{total}", f.len(), total),
     }
 }
 
@@ -441,7 +458,7 @@ pub fn filter_chrome(
             ),
             picker_button(
                 theme,
-                refresh_label(state.refresh_secs).to_string(),
+                tr(refresh_label(state.refresh_secs)).to_string(),
                 REFRESH_BTN_W,
                 state.open == Some(MenuKind::Refresh),
                 MenuKind::Refresh,
@@ -461,9 +478,9 @@ fn picker_button(
     ctx: &mut ViewContext<Shell>,
 ) -> View {
     let (label, a11y) = match kind {
-        MenuKind::Tools => ("工具", "工具筛选"),
-        MenuKind::Models => ("模型", "模型筛选"),
-        MenuKind::Refresh => ("刷新", "刷新频率"),
+        MenuKind::Tools => (t!("工具"), t!("工具筛选")),
+        MenuKind::Models => (t!("模型"), t!("模型筛选")),
+        MenuKind::Refresh => (t!("刷新"), t!("刷新频率")),
     };
     StackPanel::new()
         .orientation(Orientation::Horizontal)
@@ -514,9 +531,7 @@ fn tools_menu_items(
         col.push(
             CheckBox::new()
                 .is_checked(checked)
-                .on_is_checked_changed(ctx.callback(move |on: bool| {
-                    Msg::ToggleApp(n.clone(), on)
-                }))
+                .on_is_checked_changed(ctx.callback(move |on: bool| Msg::ToggleApp(n.clone(), on)))
                 .content(
                     TextBlock::new()
                         .text(name.clone())
@@ -538,10 +553,10 @@ fn tools_menu_items(
             .children((
                 Button::new()
                     .on_click(ctx.callback(|_| Msg::SetApps(None)))
-                    .content("全选"),
+                    .content(t!("全选")),
                 Button::new()
                     .on_click(ctx.callback(|_| Msg::SetApps(Some(Vec::new()))))
-                    .content("清空"),
+                    .content(t!("清空")),
             )),
     );
     col
@@ -564,9 +579,9 @@ fn models_menu_items(
         checks.push(
             CheckBox::new()
                 .is_checked(checked)
-                .on_is_checked_changed(ctx.callback(move |on: bool| {
-                    Msg::ToggleModel(n.clone(), on)
-                }))
+                .on_is_checked_changed(
+                    ctx.callback(move |on: bool| Msg::ToggleModel(n.clone(), on)),
+                )
                 .content(
                     TextBlock::new()
                         .text(truncate(name, 36))
@@ -596,21 +611,17 @@ fn models_menu_items(
             .children((
                 Button::new()
                     .on_click(ctx.callback(|_| Msg::SetModels(None)))
-                    .content("全选"),
+                    .content(t!("全选")),
                 Button::new()
                     .on_click(ctx.callback(|_| Msg::SetModels(Some(Vec::new()))))
-                    .content("清空"),
+                    .content(t!("清空")),
             )),
     ]
 }
 
 /// Refresh-cadence radio rows — single-select, so a pick light-dismisses the
 /// panel (`SetRefreshSecs` clears `open_menu`). `0` seconds = file-watch only.
-fn refresh_menu_items(
-    theme: &Theme,
-    secs: u64,
-    ctx: &mut ViewContext<Shell>,
-) -> Vec<View> {
+fn refresh_menu_items(theme: &Theme, secs: u64, ctx: &mut ViewContext<Shell>) -> Vec<View> {
     let mut rows: Vec<View> = Vec::with_capacity(REFRESH_OPTIONS.len());
     for (s, label) in REFRESH_OPTIONS {
         rows.push(
@@ -624,11 +635,7 @@ fn refresh_menu_items(
                         Msg::Noop
                     }
                 }))
-                .content(
-                    TextBlock::new()
-                        .text(label)
-                        .font_size(theme.body_size),
-                ),
+                .content(TextBlock::new().text(tr(label)).font_size(theme.body_size)),
         );
     }
     rows
@@ -717,12 +724,20 @@ pub fn overview_page(
 
     let range_item = |label: &'static str, r: Range| {
         SelectorBarItem::new()
-            .text(label)
+            .text(tr(label))
             .is_selected(s.vm.range == r)
     };
     let range_sel: View = SelectorBar::new()
         .on_selected_text_changed(ctx.callback(|t: Option<String>| {
-            Msg::SetRange(t.unwrap_or_default())
+            // SelectorBarItem carries only text — map the localized label
+            // back to the semantic value (works in either UI language).
+            let want = t.unwrap_or_default();
+            let r = Range::LIST
+                .iter()
+                .find(|r| tr(r.label()) == want)
+                .copied()
+                .unwrap_or_default();
+            Msg::SetRange(r)
         }))
         .collection_slot(
             SelectorBarSlot::Items,
@@ -734,12 +749,11 @@ pub fn overview_page(
             ],
         );
 
-    let mut col: Vec<View> = vec![
-        header(
-            theme,
-            "总览",
-            vec![
-                range_sel,
+    let mut col: Vec<View> = vec![header(
+        theme,
+        t!("总览"),
+        vec![
+            range_sel,
             if scanning {
                 ProgressRing::new()
                     .is_indeterminate(true)
@@ -753,15 +767,14 @@ pub fn overview_page(
             },
             Button::new()
                 .on_click(ctx.callback(|_| Msg::ToggleEdit))
-                .content(if editing { "完成" } else { "布局" }),
+                .content(if editing { t!("完成") } else { t!("布局") }),
             Button::new()
                 .on_click(ctx.callback(|_| Msg::Rescan))
-                .content("刷新"),
-            ]
-            .into_iter()
-            .collect(),
-        ),
-    ];
+                .content(t!("刷新")),
+        ]
+        .into_iter()
+        .collect(),
+    )];
 
     for id in order.iter() {
         let id_static: &'static str = match registry.iter().find(|r| **r == id) {
@@ -794,14 +807,14 @@ pub fn overview_page(
 /// Shared column shape for header + every data row — identical widths on each
 /// per-row Grid keep columns aligned without one giant 200-row measure pass.
 const DETAIL_COLS: [GridLength; 8] = [
-    GridLength::Pixel(96.0),  // 时间
-    GridLength::Pixel(72.0),  // 工具
-    GridLength::STAR,         // 模型
-    GridLength::Pixel(96.0),  // 输入
-    GridLength::Pixel(96.0),  // 输出
-    GridLength::Pixel(96.0),  // 缓存
-    GridLength::Pixel(92.0),  // 成本
-    GridLength::Pixel(72.0),  // 时长
+    GridLength::Pixel(96.0), // 时间
+    GridLength::Pixel(72.0), // 工具
+    GridLength::STAR,        // 模型
+    GridLength::Pixel(96.0), // 输入
+    GridLength::Pixel(96.0), // 输出
+    GridLength::Pixel(96.0), // 缓存
+    GridLength::Pixel(92.0), // 成本
+    GridLength::Pixel(72.0), // 时长
 ];
 
 fn dcell(col: i32, v: View) -> View {
@@ -835,20 +848,16 @@ fn detail_header(theme: &Theme) -> View {
         .padding(Thickness::xy(10.0, 6.0))
         .border_brush(theme.divider)
         .border_thickness(Thickness::new(0.0, 0.0, 0.0, 1.0))
-        .content(
-            Grid::new()
-                .columns(DETAIL_COLS)
-                .children([
-                    h(theme, "时间", 0, false),
-                    h(theme, "工具", 1, false),
-                    h(theme, "模型", 2, false),
-                    h(theme, "输入", 3, true),
-                    h(theme, "输出", 4, true),
-                    h(theme, "缓存", 5, true),
-                    h(theme, "成本", 6, true),
-                    h(theme, "时长", 7, true),
-                ]),
-        )
+        .content(Grid::new().columns(DETAIL_COLS).children([
+            h(theme, t!("时间"), 0, false),
+            h(theme, t!("工具"), 1, false),
+            h(theme, t!("模型"), 2, false),
+            h(theme, t!("输入"), 3, true),
+            h(theme, t!("输出"), 4, true),
+            h(theme, t!("缓存"), 5, true),
+            h(theme, t!("成本"), 6, true),
+            h(theme, t!("时长"), 7, true),
+        ]))
 }
 
 fn event_row(theme: &Theme, r: &EventRow, zebra: bool) -> View {
@@ -880,8 +889,14 @@ fn event_row(theme: &Theme, r: &EventRow, zebra: bool) -> View {
                 .foreground(theme.subtle)
                 .into(),
         ),
-        dcell(3, dtext(theme, fmt::tokens_exact(r.input_tokens), true).into()),
-        dcell(4, dtext(theme, fmt::tokens_exact(r.output_tokens), true).into()),
+        dcell(
+            3,
+            dtext(theme, fmt::tokens_exact(r.input_tokens), true).into(),
+        ),
+        dcell(
+            4,
+            dtext(theme, fmt::tokens_exact(r.output_tokens), true).into(),
+        ),
         dcell(
             5,
             dtext(
@@ -942,12 +957,12 @@ pub fn detail_page(snap: Option<&Snapshot>, theme: &Theme, ctx: &mut ViewContext
         nav.push(
             Button::new()
                 .on_click(ctx.callback(move |_| Msg::DetailPage(page - 1)))
-                .content("← 上一页"),
+                .content(t!("← 上一页")),
         );
     }
     nav.push(
         TextBlock::new()
-            .text(format!(
+            .text(tf!(
                 "第 {} / {} 页 · 共 {} 条",
                 page + 1,
                 pages.max(1),
@@ -962,7 +977,7 @@ pub fn detail_page(snap: Option<&Snapshot>, theme: &Theme, ctx: &mut ViewContext
         nav.push(
             Button::new()
                 .on_click(ctx.callback(move |_| Msg::DetailPage(page + 1)))
-                .content("下一页 →"),
+                .content(t!("下一页 →")),
         );
     }
 
@@ -973,11 +988,13 @@ pub fn detail_page(snap: Option<&Snapshot>, theme: &Theme, ctx: &mut ViewContext
             vec![
                 header(
                     theme,
-                    "明细",
-                    vec![StackPanel::new()
-                        .orientation(Orientation::Horizontal)
-                        .spacing(8.0)
-                        .keyed_children(keyed(nav))],
+                    t!("明细"),
+                    vec![
+                        StackPanel::new()
+                            .orientation(Orientation::Horizontal)
+                            .spacing(8.0)
+                            .keyed_children(keyed(nav)),
+                    ],
                 ),
                 w::card(
                     theme,
@@ -997,7 +1014,9 @@ pub fn detail_page(snap: Option<&Snapshot>, theme: &Theme, ctx: &mut ViewContext
 /// window_kind, percent badge + bar when known, usage/limit and reset on the
 /// meta line.
 fn quota_row(theme: &Theme, q: &globaltokentracker_core::store::QuotaRow) -> View {
-    let label = globaltokentracker_core::viewmodel::quota_kind_label(&q.window_kind);
+    let label = tr(globaltokentracker_core::viewmodel::quota_kind_label(
+        &q.window_kind,
+    ));
     let mut title: Vec<View> = vec![
         TextBlock::new()
             .text(label)
@@ -1032,9 +1051,11 @@ fn quota_row(theme: &Theme, q: &globaltokentracker_core::store::QuotaRow) -> Vie
             ),
         ));
     }
-    let mut body: Vec<View> = vec![Grid::new()
-        .columns([GridLength::STAR, GridLength::Auto])
-        .keyed_children(keyed(head))];
+    let mut body: Vec<View> = vec![
+        Grid::new()
+            .columns([GridLength::STAR, GridLength::Auto])
+            .keyed_children(keyed(head)),
+    ];
     if let Some(pct) = q.used_percent {
         body.push(
             ProgressBar::new()
@@ -1049,18 +1070,18 @@ fn quota_row(theme: &Theme, q: &globaltokentracker_core::store::QuotaRow) -> Vie
     // counts go on the tooltip for reconciliation.
     let (usage, usage_exact) = if q.window_kind == "credits" {
         (
-            q.used.map(|u| format!("余额 {}", fmt::tokens_compact(u as u64))),
-            q.used.map(|u| format!("余额 {}", fmt::tokens_exact(u as u64))),
+            q.used.map(|u| tf!("余额 {}", i18n::compact(u as u64))),
+            q.used.map(|u| tf!("余额 {}", fmt::tokens_exact(u as u64))),
         )
     } else {
         let pair = |(u, l): (f64, f64)| {
             (
-                format!(
+                tf!(
                     "已用 {} / 上限 {}",
-                    fmt::tokens_compact(u as u64),
-                    fmt::tokens_compact(l as u64)
+                    i18n::compact(u as u64),
+                    i18n::compact(l as u64)
                 ),
-                format!(
+                tf!(
                     "已用 {} / 上限 {}",
                     fmt::tokens_exact(u as u64),
                     fmt::tokens_exact(l as u64)
@@ -1073,23 +1094,23 @@ fn quota_row(theme: &Theme, q: &globaltokentracker_core::store::QuotaRow) -> Vie
                 (Some(c), Some(e))
             }
             (Some(u), None) => (
-                Some(format!("用量 {}", fmt::tokens_compact(u as u64))),
-                Some(format!("用量 {}", fmt::tokens_exact(u as u64))),
+                Some(tf!("用量 {}", i18n::compact(u as u64))),
+                Some(tf!("用量 {}", fmt::tokens_exact(u as u64))),
             ),
             (None, Some(l)) => (
-                Some(format!("上限 {}", fmt::tokens_compact(l as u64))),
-                Some(format!("上限 {}", fmt::tokens_exact(l as u64))),
+                Some(tf!("上限 {}", i18n::compact(l as u64))),
+                Some(tf!("上限 {}", fmt::tokens_exact(l as u64))),
             ),
             (None, None) => (None, None),
         }
     };
-    let mut meta = format!(
+    let mut meta = tf!(
         "重置 {} · 采集 {}",
-        fmt::until(q.resets_at),
+        tr(&fmt::until(q.resets_at)),
         fmt::ts_short(Some(q.captured_at))
     );
     if let Some(u) = usage {
-        meta = format!("{u} · {meta}");
+        meta = tf!("{u} · {meta}", u, meta);
     }
     let mut meta_v: View = TextBlock::new()
         .text(meta)
@@ -1120,7 +1141,7 @@ pub fn quota_page(
         let worst = g.worst_pct.unwrap_or(0.0);
         let app_key = g.app.clone();
         let header_btn = Button::new()
-            .automation_name(format!("配额组 {}", g.display))
+            .automation_name(tf!("配额组 {}", g.display))
             .horizontal_alignment(HorizontalAlignment::Stretch)
             .horizontal_content_alignment(HorizontalAlignment::Stretch)
             .on_click(ctx.callback(move |_| Msg::ToggleQuotaGroup(app_key.clone())))
@@ -1137,7 +1158,7 @@ pub fn quota_page(
                                 .children((
                                     SymbolIcon::new().symbol(Symbol::Clock),
                                     TextBlock::new()
-                                        .text(format!("{} · {} 项配额", g.display, g.rows.len()))
+                                        .text(tf!("{} · {} 项配额", g.display, g.rows.len()))
                                         .font_weight(FontWeight::SEMI_BOLD)
                                         .vertical_alignment(VerticalAlignment::Center),
                                 )),
@@ -1176,7 +1197,7 @@ pub fn quota_page(
     if list.is_empty() {
         list.push(
             TextBlock::new()
-                .text("暂无配额数据")
+                .text(t!("暂无配额数据"))
                 .foreground(theme.subtle)
                 .into(),
         );
@@ -1185,7 +1206,7 @@ pub fn quota_page(
         theme,
         vstack(
             10.0,
-            vec![header(theme, "配额", vec![]), vstack(8.0, list)],
+            vec![header(theme, t!("配额"), vec![]), vstack(8.0, list)],
         ),
     )
 }
@@ -1201,8 +1222,8 @@ pub fn sources_page(snap: Option<&Snapshot>, theme: &Theme) -> View {
         let state = h
             .last_error
             .as_ref()
-            .map(|e| format!("⚠ {e}"))
-            .unwrap_or_else(|| "正常".into());
+            .map(|e| tf!("⚠ {e}", e))
+            .unwrap_or_else(|| t!("正常").into());
         let err = h.last_error.is_some();
         list.push(w::card(
             theme,
@@ -1226,7 +1247,7 @@ pub fn sources_page(snap: Option<&Snapshot>, theme: &Theme) -> View {
                                             .vertical_alignment(VerticalAlignment::Center),
                                     )),
                                 TextBlock::new()
-                                    .text(format!(
+                                    .text(tf!(
                                         "{} 文件 · 累计 {} 行 · 游标 {} · 上次 {}",
                                         h.files_seen,
                                         h.rows_ingested,
@@ -1255,7 +1276,7 @@ pub fn sources_page(snap: Option<&Snapshot>, theme: &Theme) -> View {
     if list.is_empty() {
         list.push(
             TextBlock::new()
-                .text("尚未扫描")
+                .text(t!("尚未扫描"))
                 .foreground(theme.subtle)
                 .into(),
         );
@@ -1264,7 +1285,7 @@ pub fn sources_page(snap: Option<&Snapshot>, theme: &Theme) -> View {
         theme,
         vstack(
             10.0,
-            vec![header(theme, "数据源", vec![]), vstack(8.0, list)],
+            vec![header(theme, t!("数据源"), vec![]), vstack(8.0, list)],
         ),
     )
 }
@@ -1285,7 +1306,11 @@ const PRICE_COLS: [GridLength; 6] = [
 fn price_num(v: f64) -> String {
     let s = format!("{v:.4}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
-    if s.is_empty() { "0".into() } else { s.to_string() }
+    if s.is_empty() {
+        "0".into()
+    } else {
+        s.to_string()
+    }
 }
 
 fn price_head(theme: &Theme) -> View {
@@ -1300,12 +1325,12 @@ fn price_head(theme: &Theme) -> View {
         )
     };
     let cells: [View; 6] = [
-        head_cell(0, "模型"),
-        head_cell(1, "输入"),
-        head_cell(2, "输出"),
-        head_cell(3, "缓存读"),
-        head_cell(4, "缓存写"),
-        head_cell(5, "来源"),
+        head_cell(0, t!("模型")),
+        head_cell(1, t!("输入")),
+        head_cell(2, t!("输出")),
+        head_cell(3, t!("缓存读")),
+        head_cell(4, t!("缓存写")),
+        head_cell(5, t!("来源")),
     ];
     Border::new()
         .padding(Thickness::xy(10.0, 6.0))
@@ -1385,17 +1410,17 @@ pub fn prices_page(snap: Option<&Snapshot>, theme: &Theme) -> View {
         vstack(
             10.0,
             vec![
-                header(theme, "价目表（$/1M tokens）", vec![]),
+                header(theme, t!("价目表（$/1M tokens）"), vec![]),
                 TextBlock::new()
-                    .text(format!(
+                    .text(tf!(
                         "{} 个模型 · 前 400 条 · {}",
                         rows.len(),
                         match s.prices_synced_at {
-                            Some(t) => format!(
+                            Some(t) => tf!(
                                 "联网同步于 {} 小时前",
                                 (globaltokentracker_core::store::now_ms() - t) / 3_600_000
                             ),
-                            None => "仅本地种子，尚未联网同步".to_string(),
+                            None => t!("仅本地种子，尚未联网同步").to_string(),
                         }
                     ))
                     .font_size(theme.body_size)
@@ -1403,6 +1428,209 @@ pub fn prices_page(snap: Option<&Snapshot>, theme: &Theme) -> View {
                     .into(),
                 // Card chrome around the table — same as the detail page.
                 w::card(theme, vstack(0.0, list)),
+            ],
+        ),
+    )
+}
+
+// ---------------------------------------------------------------- settings
+
+/// (semantic value, zh label) — labels go through `tr` at render so the
+/// emitted text always matches the active locale.
+const THEME_OPTIONS: &[(&str, &str)] =
+    &[("system", "跟随系统"), ("light", "浅色"), ("dark", "深色")];
+const ACCENT_OPTIONS: &[(&str, &str)] = &[
+    ("", "默认"),
+    ("#4d8ae8", "蓝色"),
+    ("#10a874", "绿色"),
+    ("#8b6fd8", "紫色"),
+    ("#e8853d", "橙色"),
+    ("#d84d5b", "红色"),
+];
+const FONT_OPTIONS: &[(&str, &str)] = &[
+    ("", "默认（Segoe UI）"),
+    ("Microsoft YaHei", "微软雅黑"),
+    ("DengXian", "等线"),
+];
+const SCALE_OPTIONS: &[(&str, &str)] =
+    &[("compact", "紧凑"), ("standard", "标准"), ("large", "较大")];
+const LANG_OPTIONS: &[(&str, &str)] = &[("zh", "中文"), ("en", "English")];
+
+/// Localized label → semantic value. SelectorBar emits only the item text,
+/// so compare against `tr(label)` — dual-locale by construction.
+fn pick_option<'a>(options: &'a [(&'a str, &'a str)], want: &str) -> &'a str {
+    options
+        .iter()
+        .find(|(_, label)| tr(label) == want)
+        .map(|(value, _)| *value)
+        .unwrap_or_default()
+}
+
+/// Segmented picker for one setting row.
+fn setting_selector(
+    options: &'static [(&'static str, &'static str)],
+    current: &str,
+    ctx: &mut ViewContext<Shell>,
+    map: impl Fn(&'static str) -> Msg + 'static + Clone,
+) -> View {
+    let items: Vec<KeyedView> = options
+        .iter()
+        .enumerate()
+        .map(|(i, (value, label))| {
+            KeyedView::new(
+                i as u64,
+                SelectorBarItem::new()
+                    .text(tr(label))
+                    .is_selected(*value == current),
+            )
+        })
+        .collect();
+    SelectorBar::new()
+        .on_selected_text_changed(ctx.callback(move |want: Option<String>| {
+            map(pick_option(options, &want.unwrap_or_default()))
+        }))
+        .collection_slot(SelectorBarSlot::Items, items)
+}
+
+/// Label column + control + optional subtle note — consistent with the
+/// pages' two-column chrome.
+fn setting_row(
+    theme: &Theme,
+    label: &'static str,
+    note: Option<&'static str>,
+    control: View,
+) -> View {
+    let mut left: Vec<View> = vec![
+        TextBlock::new()
+            .text(tr(label))
+            .font_size(theme.body_size)
+            .font_weight(FontWeight::SEMI_BOLD)
+            .vertical_alignment(VerticalAlignment::Center)
+            .into(),
+    ];
+    if let Some(n) = note {
+        left.push(
+            TextBlock::new()
+                .text(tr(n))
+                .font_size(theme.label_size)
+                .foreground(theme.subtle)
+                .into(),
+        );
+    }
+    Grid::new()
+        .columns([GridLength::Pixel(300.0), GridLength::STAR])
+        .children([
+            cell(
+                0,
+                StackPanel::new().spacing(2.0).keyed_children(keyed(left)),
+            ),
+            cell(
+                1,
+                StackPanel::new()
+                    .orientation(Orientation::Horizontal)
+                    .horizontal_alignment(HorizontalAlignment::Left)
+                    .vertical_alignment(VerticalAlignment::Center)
+                    .children([control]),
+            ),
+        ])
+}
+
+/// Current size preset derived from the resolved theme — a hand-edited
+/// ui.json simply shows no selection instead of a stale marker.
+fn current_scale(theme: &Theme) -> &'static str {
+    match (
+        theme.title_size,
+        theme.h2_size,
+        theme.body_size,
+        theme.label_size,
+    ) {
+        (20.0, 13.0, 11.0, 10.0) => "compact",
+        (24.0, 15.0, 13.0, 12.0) => "large",
+        (22.0, 14.0, 12.0, 11.0) => "standard",
+        _ => "",
+    }
+}
+
+pub fn settings_page(config: &UiConfig, theme: &Theme, ctx: &mut ViewContext<Shell>) -> View {
+    let theme_row = setting_row(
+        theme,
+        "主题模式",
+        None,
+        setting_selector(
+            THEME_OPTIONS,
+            match config.window_theme.as_str() {
+                "" => "system",
+                v => v,
+            },
+            ctx,
+            Msg::SetThemeMode,
+        ),
+    );
+    let accent_row = setting_row(
+        theme,
+        "主题色",
+        None,
+        setting_selector(
+            ACCENT_OPTIONS,
+            config.theme.accent.as_deref().unwrap_or(""),
+            ctx,
+            Msg::SetAccent,
+        ),
+    );
+    let font_row = setting_row(
+        theme,
+        "字体",
+        Some("仅作用于图表文字；界面控件字体跟随系统"),
+        setting_selector(
+            FONT_OPTIONS,
+            config.theme.font_family.as_deref().unwrap_or(""),
+            ctx,
+            Msg::SetFontFamily,
+        ),
+    );
+    let scale_row = setting_row(
+        theme,
+        "界面字号",
+        None,
+        setting_selector(SCALE_OPTIONS, current_scale(theme), ctx, Msg::SetFontScale),
+    );
+    let lang_row = setting_row(
+        theme,
+        "语言",
+        None,
+        setting_selector(
+            LANG_OPTIONS,
+            match config.lang.as_str() {
+                "" => "zh",
+                v => v,
+            },
+            ctx,
+            Msg::SetLang,
+        ),
+    );
+    let autostart_row = setting_row(
+        theme,
+        "开机自启动",
+        Some("登录 Windows 后自动启动（最小化到托盘）"),
+        ToggleSwitch::new()
+            .is_on(config.autostart)
+            .on_toggled(ctx.callback(Msg::SetAutostart))
+            .into(),
+    );
+
+    page_frame(
+        theme,
+        vstack(
+            theme.section_gap,
+            vec![
+                header(theme, tr("设置"), vec![]),
+                w::section_header(theme, Symbol::FontColor, tr("外观")),
+                w::card(
+                    theme,
+                    vstack(theme.gap, vec![theme_row, accent_row, font_row, scale_row]),
+                ),
+                w::section_header(theme, Symbol::Setting, tr("通用")),
+                w::card(theme, vstack(theme.gap, vec![lang_row, autostart_row])),
             ],
         ),
     )

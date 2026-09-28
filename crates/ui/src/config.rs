@@ -45,6 +45,14 @@ pub struct UiConfig {
     /// Periodic refresh cadence in seconds; `0` = file-watch only.
     #[serde(default = "default_refresh_secs")]
     pub refresh_secs: u64,
+    /// UI language: "zh" (default) | "en".
+    pub lang: String,
+    /// Window theme: "" | "system" | "light" | "dark" — drives
+    /// `WindowVisuals::theme` in the shell view.
+    pub window_theme: String,
+    /// Cached mirror of the Run-key state so the toggle renders instantly;
+    /// `autostart::enabled()` is authoritative at startup.
+    pub autostart: bool,
     /// page name → layout
     pub pages: BTreeMap<String, PageLayout>,
 }
@@ -61,6 +69,9 @@ impl Default for UiConfig {
             apps: None,
             models: None,
             refresh_secs: DEFAULT_REFRESH_SECS,
+            lang: String::new(),
+            window_theme: String::new(),
+            autostart: false,
             pages: BTreeMap::new(),
         }
     }

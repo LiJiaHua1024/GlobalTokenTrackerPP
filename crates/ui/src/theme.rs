@@ -138,7 +138,10 @@ impl Theme {
     pub fn resolve(cfg: &ThemeConfig) -> Self {
         Self {
             accent: brush_of(cfg.accent.as_deref(), Brush::Theme(ThemeBrush::Accent)),
-            accent_soft: brush_of(cfg.accent_soft.as_deref(), Brush::Theme(ThemeBrush::AccentText)),
+            accent_soft: brush_of(
+                cfg.accent_soft.as_deref(),
+                Brush::Theme(ThemeBrush::AccentText),
+            ),
             text: brush_of(cfg.text.as_deref(), Brush::Theme(ThemeBrush::PrimaryText)),
             subtle: brush_of(cfg.subtle.as_deref(), Brush::Theme(ThemeBrush::AccentText)),
             danger: brush_of(
@@ -146,24 +149,24 @@ impl Theme {
                 Brush::Theme(ThemeBrush::SystemCritical),
             ),
             // Fluent warning yellow — not among the 8 theme brushes.
-            warn: brush_of(
-                cfg.warn.as_deref(),
-                Brush::Solid(Color::rgb(255, 185, 0)),
-            ),
+            warn: brush_of(cfg.warn.as_deref(), Brush::Solid(Color::rgb(255, 185, 0))),
             // Fluent success green.
             ok: brush_of(cfg.ok.as_deref(), Brush::Solid(Color::rgb(16, 168, 116))),
-            card_bg: brush_of(cfg.card_bg.as_deref(), Brush::Theme(ThemeBrush::CardBackground)),
-            card_border: brush_of(cfg.card_border.as_deref(), Brush::Theme(ThemeBrush::CardStroke)),
+            card_bg: brush_of(
+                cfg.card_bg.as_deref(),
+                Brush::Theme(ThemeBrush::CardBackground),
+            ),
+            card_border: brush_of(
+                cfg.card_border.as_deref(),
+                Brush::Theme(ThemeBrush::CardStroke),
+            ),
             divider: brush_of(cfg.divider.as_deref(), Brush::Theme(ThemeBrush::CardStroke)),
             page_bg: cfg
                 .page_bg
                 .as_deref()
                 .map(|s| brush_of(Some(s), Brush::Theme(ThemeBrush::SolidBackground))),
             // Win11 dark accent #76B9ED; hex overrides map exactly.
-            accent_cf: colorf_of(
-                cfg.accent.as_deref(),
-                ColorF::from_rgb8(0x76, 0xB9, 0xED),
-            ),
+            accent_cf: colorf_of(cfg.accent.as_deref(), ColorF::from_rgb8(0x76, 0xB9, 0xED)),
             subtle_cf: colorf_of(
                 cfg.subtle.as_deref(),
                 ColorF::from_rgba8(0x9E, 0x9E, 0x9E, 0xFF),
@@ -172,10 +175,7 @@ impl Theme {
                 cfg.divider.as_deref(),
                 ColorF::from_rgba8(0x80, 0x80, 0x80, 0x44),
             ),
-            font_family: cfg
-                .font_family
-                .clone()
-                .unwrap_or_else(|| "Segoe UI".into()),
+            font_family: cfg.font_family.clone().unwrap_or_else(|| "Segoe UI".into()),
             radius: cfg.radius.unwrap_or(8.0),
             pad: cfg.card_pad.unwrap_or(16.0),
             gap: cfg.gap.unwrap_or(12.0),

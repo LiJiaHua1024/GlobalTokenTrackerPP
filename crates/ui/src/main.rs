@@ -7,19 +7,21 @@
 //! (`diag!`, panic stderr) only exist when GTT_DEBUG=1; then we attach to the
 //! parent console, or allocate one for a double-clicked debug launch.
 
+mod autostart;
 mod config;
+mod i18n;
 mod pages;
 mod theme;
 mod tray;
 mod watch;
 mod widgets;
 
+use config::{REFRESH_OPTIONS, UiConfig};
 use globaltokentracker_core::adapters;
-use globaltokentracker_core::store::{default_db_path, EventRow, PriceRow, SourceHealth};
-use globaltokentracker_core::viewmodel::fmt;
+use globaltokentracker_core::store::{EventRow, PriceRow, SourceHealth, default_db_path};
 use globaltokentracker_core::viewmodel::Range;
+use globaltokentracker_core::viewmodel::fmt;
 use globaltokentracker_core::{Engine, OverviewVm, Store};
-use config::{UiConfig, REFRESH_OPTIONS};
 use pages::*;
 use std::path::PathBuf;
 use theme::Theme;
@@ -62,6 +64,7 @@ pub enum Page {
     Quota,
     Sources,
     Prices,
+    Settings,
 }
 
 pub struct Shell {
@@ -126,8 +129,9 @@ pub enum Msg {
     /// Dwell timer fired for bar `usize` — arms the tooltip if still hovering.
     TrendTip(usize),
     TrendLeave,
-    /// Statistics range changed (label text from the selector).
-    SetRange(String),
+    /// Statistics range changed — resolved to `Range` at the selector so
+    /// localized labels never leak into state handling.
+    SetRange(Range),
     /// Tool checkbox toggled (app name, new checked state).
     ToggleApp(String, bool),
     /// Bulk tool-scope set from the filter flyout — `None` = all tools,
@@ -146,6 +150,18 @@ pub enum Msg {
     ToggleQuotaGroup(String),
     /// Event sink for RadioButton uncheck transitions — nothing to do.
     Noop,
+    /// Settings: window theme — "system" | "light" | "dark".
+    SetThemeMode(&'static str),
+    /// Settings: accent override — "" restores the theme default.
+    SetAccent(&'static str),
+    /// Settings: D2D chart font family — "" restores Segoe UI.
+    SetFontFamily(&'static str),
+    /// Settings: size preset — "compact" | "standard" | "large".
+    SetFontScale(&'static str),
+    /// Settings: UI language — "zh" | "en".
+    SetLang(&'static str),
+    /// Settings: Run-key launch-at-login toggle; arg is the switch's new state.
+    SetAutostart(bool),
     /// Background quota poll finished (rows written, channel errors).
     QuotaDone(usize, Vec<String>),
     /// Background price-source fetch finished — repriced>0 triggers one
@@ -182,8 +198,8 @@ fn diag_console() {
         CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
     use windows_sys::Win32::System::Console::{
-        AllocConsole, AttachConsole, GetStdHandle, SetStdHandle,
-        ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
+        ATTACH_PARENT_PROCESS, AllocConsole, AttachConsole, GetStdHandle, STD_ERROR_HANDLE,
+        STD_OUTPUT_HANDLE, SetStdHandle,
     };
     unsafe {
         if !GetStdHandle(STD_ERROR_HANDLE).is_null() {
@@ -350,7 +366,11 @@ impl Component for Shell {
     type Message = Msg;
 
     fn create(_input: &(), context: &ComponentContext<Self>) -> Self {
-        let config = UiConfig::load();
+        let mut config = UiConfig::load();
+        i18n::set_lang(i18n::Lang::from_config(&config.lang));
+        // The registry is authoritative — ui.json only mirrors the last write
+        // (a fresh install or manual removal clears the flag honestly).
+        config.autostart = autostart::enabled();
         let range = Range::from_key(&config.range);
         let app_filter = config.apps.clone();
         let model_filter = config.models.clone();
@@ -359,6 +379,7 @@ impl Component for Shell {
             Ok("quota") => Page::Quota,
             Ok("sources") => Page::Sources,
             Ok("prices") => Page::Prices,
+            Ok("settings") => Page::Settings,
             _ => Page::Overview,
         };
         // force_prices=true: one refresh attempt on every launch (per spec:
@@ -378,6 +399,20 @@ impl Component for Shell {
         let tray = tray::install();
         if tray.is_some() {
             arm_tray(context);
+            // `--minimized` (autostart): hide once the window exists — the
+            // background poll tolerates the WinUI window not being up yet.
+            // No tray → stay visible; hidden without tray would be a zombie.
+            if std::env::args().any(|a| a == "--minimized") {
+                context.spawn_background(|_| {
+                    for _ in 0..20 {
+                        if tray::try_hide_main_window() {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(400));
+                    }
+                    Msg::Noop
+                });
+            }
         }
         let theme = Theme::resolve(&config.theme);
         // OTLP receiver: dedicated blocking thread (never the reactor pool).
@@ -442,7 +477,7 @@ impl Component for Shell {
                                 .as_ref()
                                 .map(|s| fmt::tokens_total(&s.vm.today))
                                 .unwrap_or(0);
-                            let _ = tray.set_tooltip(Some(format!(
+                            let _ = tray.set_tooltip(Some(tf!(
                                 "GlobalTokenTracker — 今日 {}",
                                 fmt::tokens_exact(total)
                             )));
@@ -466,9 +501,7 @@ impl Component for Shell {
                     context.spawn_background(|_| {
                         Msg::PricesDone(
                             Store::open(&db_path())
-                                .and_then(|s| {
-                                    globaltokentracker_core::pricing::refresh(&s)
-                                })
+                                .and_then(|s| globaltokentracker_core::pricing::refresh(&s))
                                 .map_err(|e| e.to_string()),
                         )
                     });
@@ -501,9 +534,8 @@ impl Component for Shell {
                 self.views_stale = true;
                 self.start_scan(context);
             }
-            Msg::SetRange(label) => {
+            Msg::SetRange(r) => {
                 self.open_menu = None;
-                let r = Range::from_label(&label);
                 if r != self.range {
                     self.range = r;
                     self.config.range = r.key().to_string();
@@ -623,6 +655,56 @@ impl Component for Shell {
                     self.quota_collapsed.insert(app);
                 }
             }
+            Msg::SetThemeMode(v) => {
+                self.config.window_theme = v.to_string();
+                self.config.save();
+                // `window_visuals` is re-published every view — no extra work.
+            }
+            Msg::SetAccent(v) => {
+                self.config.theme.accent = if v.is_empty() {
+                    None
+                } else {
+                    Some(v.to_string())
+                };
+                self.theme = Theme::resolve(&self.config.theme);
+                self.config.save();
+            }
+            Msg::SetFontFamily(v) => {
+                self.config.theme.font_family = if v.is_empty() {
+                    None
+                } else {
+                    Some(v.to_string())
+                };
+                self.theme = Theme::resolve(&self.config.theme);
+                self.config.save();
+            }
+            Msg::SetFontScale(v) => {
+                let (title, h2, body, label) = match v {
+                    "compact" => (20.0, 13.0, 11.0, 10.0),
+                    "large" => (24.0, 15.0, 13.0, 12.0),
+                    _ => (22.0, 14.0, 12.0, 11.0),
+                };
+                let t = &mut self.config.theme;
+                t.title_size = Some(title);
+                t.h2_size = Some(h2);
+                t.body_size = Some(body);
+                t.label_size = Some(label);
+                self.theme = Theme::resolve(&self.config.theme);
+                self.config.save();
+            }
+            Msg::SetLang(v) => {
+                self.config.lang = v.to_string();
+                self.config.save();
+                i18n::set_lang(i18n::Lang::from_config(v));
+            }
+            Msg::SetAutostart(on) => {
+                // Registry write may fail (policy/AV) — mirror the real
+                // outcome so the toggle reflects the truth, not the intent.
+                let got = autostart::set(on);
+                diag!("[settings] autostart want={on} got={got}");
+                self.config.autostart = got;
+                self.config.save();
+            }
             Msg::Noop => {}
             Msg::WatchFired => {
                 diag!("[watch] fired, scanning={}", self.scanning);
@@ -658,23 +740,18 @@ impl Component for Shell {
             Msg::Nav(tag) => {
                 self.open_menu = None;
                 self.page = match tag.as_deref() {
-                    Some("明细") | Some("detail") => Page::Detail,
-                    Some("配额") | Some("quota") => Page::Quota,
-                    Some("数据源") | Some("sources") => Page::Sources,
-                    Some("价格") | Some("prices") => Page::Prices,
+                    Some("明细") | Some("Details") | Some("detail") => Page::Detail,
+                    Some("配额") | Some("Quota") | Some("quota") => Page::Quota,
+                    Some("数据源") | Some("Sources") | Some("sources") => Page::Sources,
+                    Some("价格") | Some("Prices") | Some("prices") => Page::Prices,
+                    Some("设置") | Some("Settings") | Some("settings") => Page::Settings,
                     _ => Page::Overview,
                 };
                 // Page-scoped data is lazy: first visit to Sources/Prices
                 // triggers one load; ticks keep it fresh while open.
                 let missing = match self.page {
-                    Page::Sources => self
-                        .snap
-                        .as_ref()
-                        .is_none_or(|s| s.sources.is_none()),
-                    Page::Prices => self
-                        .snap
-                        .as_ref()
-                        .is_none_or(|s| s.prices.is_none()),
+                    Page::Sources => self.snap.as_ref().is_none_or(|s| s.sources.is_none()),
+                    Page::Prices => self.snap.as_ref().is_none_or(|s| s.prices.is_none()),
                     _ => false,
                 };
                 if missing {
@@ -768,7 +845,10 @@ impl Component for Shell {
                     Ok(r) => {
                         diag!(
                             "[prices] synced: dev={} litellm={} llmpricing={} repriced={}",
-                            r.models_dev, r.litellm, r.llmpricing, r.repriced
+                            r.models_dev,
+                            r.litellm,
+                            r.llmpricing,
+                            r.repriced
                         );
                         // A successful sync refreshes prices_synced_at too;
                         // repriced>0 additionally changes visible USD.
@@ -784,11 +864,18 @@ impl Component for Shell {
     }
 
     fn view(&self, _input: &(), context: &mut ViewContext<Self>) -> View {
+        // Publish the render locale before any `tr`/`tf!` resolves text.
+        i18n::set_lang(i18n::Lang::from_config(&self.config.lang));
         context.window_title("GlobalTokenTracker");
         context.window_visuals(
             WindowVisuals::new()
                 .backdrop(WindowBackdrop::Mica)
                 .client_size(1180.0, 780.0)
+                .theme(match self.config.window_theme.as_str() {
+                    "light" => WindowTheme::Light,
+                    "dark" => WindowTheme::Dark,
+                    _ => WindowTheme::System,
+                })
                 // Real .ico path materialized beside the ledger — the
                 // embedded resource still drives Explorer/shortcut icons.
                 .icon(window_icon_path()),
@@ -812,6 +899,7 @@ impl Component for Shell {
             Page::Quota => quota_page(snap, theme, &self.quota_collapsed, context),
             Page::Sources => sources_page(snap, theme),
             Page::Prices => prices_page(snap, theme),
+            Page::Settings => settings_page(&self.config, theme, context),
         };
 
         let item = |label: &'static str, page: Page| {
@@ -830,11 +918,12 @@ impl Component for Shell {
             .collection_slot(
                 SelectorBarSlot::Items,
                 [
-                    KeyedView::new("overview", item("总览", Page::Overview)),
-                    KeyedView::new("detail", item("明细", Page::Detail)),
-                    KeyedView::new("quota", item("配额", Page::Quota)),
-                    KeyedView::new("sources", item("数据源", Page::Sources)),
-                    KeyedView::new("prices", item("价格", Page::Prices)),
+                    KeyedView::new("overview", item(t!("总览"), Page::Overview)),
+                    KeyedView::new("detail", item(t!("明细"), Page::Detail)),
+                    KeyedView::new("quota", item(t!("配额"), Page::Quota)),
+                    KeyedView::new("sources", item(t!("数据源"), Page::Sources)),
+                    KeyedView::new("prices", item(t!("价格"), Page::Prices)),
+                    KeyedView::new("settings", item(t!("设置"), Page::Settings)),
                 ],
             );
         // Brand mark pinned to the caption area's left edge. It renders in

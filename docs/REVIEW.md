@@ -560,3 +560,17 @@
 - **真实 runner 验证（push 触发）**：run 36334277350 verify job 9m24s 全绿——12/12 Python 测试、tooling 干跑（changelog 生成+模板渲染+token 零残留）、debug/release 构建、50/50 单测、clippy 0 警告、package.ps1 产出安装包；publish 正确跳过。
 - **首跑暴露并修复**：Python 3.14 + cp1252 控制台下 `SystemExit` 消息含 em-dash → 子进程 `UnicodeDecodeError`。子进程解码统一 `errors="replace"`，错误消息去非 ASCII。
 - **待办（使用时）**：发布前在仓库 Settings 建 `alpha-release`/`stable-release` 环境（可加审批）；首个 stable 建议手动填 `release_summary`。
+
+## S47 设置页 + 国际化 + 开机自启动 ✅
+
+- **范围**：新增设置页（主题/主题色/字体/字号/语言/开机自启动），全 UI 字符串 i18n 化（中/英双语运行时切换），托盘菜单本地化，`--minimized` 静默启动到托盘。
+- **架构**：
+  - `i18n.rs`：`Lang`（AtomicU8 全局态——D2D 绘制回调可能不在 UI 线程，thread_local 不安全）+ `tr` 全字匹配表（缺键透传中文，永不空白）+ `t!`/`tf!` 宏（`tf!` 位置占位替换，`as_display` helper 做 `&T→&dyn Display` unsize）+ `compact()` en 模式 K/M/B 压缩。词条表按页面分区注释。
+  - 关键纪律：**语义值不过 UI 文本**——SelectorBar 只吐 item text，`pick_option`/`Range::LIST` 用 `tr(label)` 双语匹配回语义值（en 模式下 Range 解析曾会失配回退 Week，已修为回调时双语比对）。
+  - `autostart.rs`：HKCU `...\Run` 写/删/读，`current_exe` 路径 + `--minimized` 参数；`set()` 返回**操作后的真实注册表状态**（`enabled()` 复读），不是操作成功与否——第一版曾把 `set(false)` 的"删除成功 true"误存为 `autostart=true` 导致开关视觉回弹，实测抓出已修。
+  - `config.rs`：`lang`/`window_theme`/`autostart` 三字段 `#[serde(default)]` 向后兼容；autostart 启动时以注册表为权威对账（重装/手删自愈）。
+  - 主题：`WindowVisuals::theme` 每次 view 重发布（SetThemeMode 零额外工作）；reactor `apply_window_theme` 映射 `ElementTheme::{Default,Light,Dark}` 真切换 + TitleBarTheme 跟随。
+- **如实标注的限制**：字体族仅作用于 D2D 图表文字——reactor 0.100 无 XAML 控件 font_family setter，设置页该行附注说明，不冒充全局生效。
+- **实测（GUI 端到端）**：设置页渲染正常；语言切换实时全页生效（截图验证 zh→en）；ToggleSwitch 空格触发 → `want=true got=true` 注册表写入 `"exe" --minimized` → 再切 `want=false got=false` 值删除不回弹；`--minimized` 启动实例 4 个顶层窗口全 `visible=False` 托盘常驻。
+- **环境插曲**：测试期间 Run 键写入遭 AV 行为监控拦截（~31s 阻塞后失败）——代码无 bug，`set` 返回真实状态的设计恰好兜底；单测改到非监控暂存键验证注册表 plumbing。
+- **验证**：52/52 测试（core 50 + i18n/autostart 各 1）、clippy `-D warnings` 0、触碰文件 fmt 净。

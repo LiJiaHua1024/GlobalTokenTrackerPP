@@ -2,8 +2,9 @@
 //! title and icon. `UiConfig` orders/hides them; pages render them via `render`.
 //! Adding a widget = one registry entry + one match arm.
 
+use crate::i18n::tr;
 use crate::theme::Theme;
-use crate::{Msg, Shell};
+use crate::{Msg, Shell, tf};
 use globaltokentracker_core::viewmodel::fmt;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -23,8 +24,8 @@ pub fn widget_title(id: &str) -> &'static str {
     OVERVIEW_WIDGETS
         .iter()
         .find(|(i, _, _)| *i == id)
-        .map(|(_, t, _)| *t)
-        .unwrap_or("部件")
+        .map(|(_, t, _)| tr(t))
+        .unwrap_or(tr("部件"))
 }
 
 pub fn widget_icon(id: &str) -> Symbol {
@@ -211,9 +212,7 @@ pub fn trend_strip(
         .background(Brush::Solid(Color::argb(0, 0, 0, 0)))
         .on_pointer_moved(ctx.callback(|e: PointerEventInfo| Msg::TrendHover(e.x)))
         .on_pointer_exited(ctx.callback(|_| Msg::TrendLeave))
-        .content(windows_canvas::canvas_invalidated(
-            &trend.inv,
-            move |ctx| {
+        .content(windows_canvas::canvas_invalidated(&trend.inv, move |ctx| {
             use windows_canvas::{ColorF, Rect, TextAlignment, TextFormat, Vector2};
             // Clear before the early return — an empty `days` must still wipe
             // the previous frame, otherwise stale bars linger after filters.
@@ -270,7 +269,8 @@ pub fn trend_strip(
             shared.width.set(w);
             shared.count.set(days.len());
             for (i, d) in days.iter().enumerate() {
-                let bh = ((d.tokens as f32) / max * plot_h).max(if d.tokens > 0 { 3.0 } else { 1.5 });
+                let bh =
+                    ((d.tokens as f32) / max * plot_h).max(if d.tokens > 0 { 3.0 } else { 1.5 });
                 let x = slot * i as f32 + (slot - bar_w) * 0.5;
                 let lit = i == last || hover == Some(i);
                 let brush = ctx.create_solid_brush(ColorF::new(
@@ -289,7 +289,7 @@ pub fn trend_strip(
                     ctx.draw_rounded_rect(&bar, &ink, 1.0);
                     // Hover detail top-right: "MM-DD · 1,234 tok".
                     ctx.draw_text(
-                        &format!(
+                        &tf!(
                             "{} · {} tok",
                             d.date.get(5..10).unwrap_or(&d.date),
                             fmt::tokens_exact(d.tokens)
@@ -310,14 +310,18 @@ pub fn trend_strip(
                     d.date.get(5..10).unwrap_or(&d.date).to_string()
                 };
                 let mut lines: Vec<String> = vec![
-                    format!("{} tok · {}", fmt::tokens_exact(d.tokens), fmt::usd(d.cost_usd)),
-                    format!("{} 事件", fmt::tokens_exact(d.events)),
+                    tf!(
+                        "{} tok · {}",
+                        fmt::tokens_exact(d.tokens),
+                        fmt::usd(d.cost_usd)
+                    ),
+                    tf!("{} 事件", fmt::tokens_exact(d.events)),
                 ];
                 for (m, t) in &d.top {
                     lines.push(format!(
                         "{}  {}",
                         if m.chars().count() > 20 {
-                            format!("{}…", m.chars().take(19).collect::<String>())
+                            tf!("{}…", m.chars().take(19).collect::<String>())
                         } else {
                             m.clone()
                         },
@@ -327,9 +331,11 @@ pub fn trend_strip(
                 let line_h = label_pt + 4.0;
                 let pw = 216.0f32;
                 let ph = 26.0 + lines.len() as f32 * line_h + 10.0;
-                let px = (slot * i as f32 + slot * 0.5 - pw * 0.5).clamp(4.0, (w - pw - 4.0).max(4.0));
+                let px =
+                    (slot * i as f32 + slot * 0.5 - pw * 0.5).clamp(4.0, (w - pw - 4.0).max(4.0));
                 let py = top + 2.0;
-                let panel = windows_canvas::RoundedRect::new(Rect::new(px, py, px + pw, py + ph), 7.0, 7.0);
+                let panel =
+                    windows_canvas::RoundedRect::new(Rect::new(px, py, px + pw, py + ph), 7.0, 7.0);
                 // Near-opaque dark card (Fluent tooltip idiom; reads on both themes).
                 let bg = ctx.create_solid_brush(ColorF::from_rgba8(28, 28, 30, 242))?;
                 let frame = ctx.create_solid_brush(ColorF::from_rgba8(255, 255, 255, 36))?;
@@ -369,46 +375,36 @@ pub fn trend_strip(
                 &ink,
             );
             Ok(())
-        },
-    ))
+        }))
 }
 
 /// Two-column row; right-aligned meta. Hairline divider under the row when the
 /// theme enables line separators.
 pub fn key_value_row(theme: &Theme, left: String, right: String) -> View {
     let divider: View = if theme.line_separators {
-        Border::new()
-            .height(1.0)
-            .background(theme.divider)
-            .into()
+        Border::new().height(1.0).background(theme.divider).into()
     } else {
         Border::new().height(0.0).into()
     };
-    Border::new()
-        .padding(Thickness::xy(0.0, 3.0))
-        .content(
-            StackPanel::new()
-                .orientation(Orientation::Vertical)
-                .spacing(0.0)
-                .children((
-                    Grid::new()
-                        .columns([GridLength::STAR, GridLength::Auto])
-                        .children([
-                            Border::new()
-                                .grid_column(0)
-                                .content(
-                                    TextBlock::new().text(left).font_size(theme.body_size),
-                                ),
-                            Border::new()
-                                .grid_column(1)
-                                .content(
-                                    TextBlock::new()
-                                        .text(right)
-                                        .font_size(theme.body_size)
-                                        .foreground(theme.subtle),
-                                ),
-                        ]),
-                    divider,
-                )),
-        )
+    Border::new().padding(Thickness::xy(0.0, 3.0)).content(
+        StackPanel::new()
+            .orientation(Orientation::Vertical)
+            .spacing(0.0)
+            .children((
+                Grid::new()
+                    .columns([GridLength::STAR, GridLength::Auto])
+                    .children([
+                        Border::new()
+                            .grid_column(0)
+                            .content(TextBlock::new().text(left).font_size(theme.body_size)),
+                        Border::new().grid_column(1).content(
+                            TextBlock::new()
+                                .text(right)
+                                .font_size(theme.body_size)
+                                .foreground(theme.subtle),
+                        ),
+                    ]),
+                divider,
+            )),
+    )
 }

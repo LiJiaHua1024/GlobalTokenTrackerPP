@@ -3,6 +3,7 @@
 //! closes. Tooltip carries today's totals. `TrayIcon` is `!Send` and lives
 //! inside `Shell` on the UI thread.
 
+use crate::i18n::tr;
 use tray_icon::menu::{Menu, MenuEvent, MenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
@@ -29,10 +30,16 @@ pub fn install() -> Option<TrayIcon> {
         .or_else(|_| Icon::from_path(crate::window_icon_path(), Some((32, 32))))
         .or_else(|_| glyph_icon())
         .ok()?;
+    // Labels freeze at startup — a language switch localizes new launches.
     let menu = Menu::new();
-    let _ = menu.append(&MenuItem::with_id(MENU_SHOW, "显示 GlobalTokenTracker", true, None));
-    let _ = menu.append(&MenuItem::with_id(MENU_HIDE, "隐藏到托盘", true, None));
-    let _ = menu.append(&MenuItem::with_id(MENU_QUIT, "退出", true, None));
+    let _ = menu.append(&MenuItem::with_id(
+        MENU_SHOW,
+        tr("显示 GlobalTokenTracker"),
+        true,
+        None,
+    ));
+    let _ = menu.append(&MenuItem::with_id(MENU_HIDE, tr("隐藏到托盘"), true, None));
+    let _ = menu.append(&MenuItem::with_id(MENU_QUIT, tr("退出"), true, None));
     TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_tooltip("GlobalTokenTracker")
@@ -48,7 +55,7 @@ pub fn install() -> Option<TrayIcon> {
 pub fn focus_main_window() {
     use windows_sys::Win32::Foundation::HWND;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        AllowSetForegroundWindow, FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE,
+        AllowSetForegroundWindow, FindWindowW, SW_RESTORE, SetForegroundWindow, ShowWindow,
     };
     let title: Vec<u16> = "GlobalTokenTracker\0".encode_utf16().collect();
     unsafe {
@@ -71,7 +78,7 @@ pub fn focus_main_window() {}
 /// "显示" restores via `focus_main_window` (SW_RESTORE unhides).
 #[cfg(windows)]
 pub fn hide_main_window() {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SW_HIDE};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, SW_HIDE, ShowWindow};
     let title: Vec<u16> = "GlobalTokenTracker\0".encode_utf16().collect();
     unsafe {
         let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
@@ -83,6 +90,28 @@ pub fn hide_main_window() {
 
 #[cfg(not(windows))]
 pub fn hide_main_window() {}
+
+/// Try-hide variant for the `--minimized` autostart path: returns false
+/// while the WinUI window isn't up yet so the caller can retry. `HWND` is
+/// found by title — identical lookup to `focus_main_window`.
+#[cfg(windows)]
+pub fn try_hide_main_window() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, SW_HIDE, ShowWindow};
+    let title: Vec<u16> = "GlobalTokenTracker\0".encode_utf16().collect();
+    unsafe {
+        let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
+        if hwnd.is_null() {
+            return false;
+        }
+        ShowWindow(hwnd, SW_HIDE);
+    }
+    true
+}
+
+#[cfg(not(windows))]
+pub fn try_hide_main_window() -> bool {
+    false
+}
 
 /// Blocking poll over the tray icon + menu event channels. Re-armed by the
 /// shell after every call.
