@@ -48,7 +48,15 @@ pub fn registry_ids() -> Vec<&'static str> {
 pub struct NavAnim {
     pub from: crate::Page,
     pub dir: f64,
+    /// Wall-clock start — only the hard end-of-flight cap and diagnostics
+    /// read it; motion follows `clock`.
     pub t0: std::time::Instant,
+    /// Animation time (secs), advanced once per tick by the frame delta
+    /// clamped to `MAX_DT`. A UI-thread stall (mounting the new page, a
+    /// swapchain being created) then pauses the motion instead of letting
+    /// the wall clock leap the springs forward — the "jump" that read as
+    /// stutter.
+    pub clock: std::cell::Cell<f64>,
     /// Page content built once when the flight begins — without it every
     /// ~16ms tick rebuilds two whole pages (every TextBlock/format!/canvas
     /// closure), which is what made the slide drop frames. `View` clones
@@ -58,6 +66,12 @@ pub struct NavAnim {
     /// Rendered frames — logged once at settle under `GTT_DEBUG` so the
     /// effective animation frame rate is observable.
     pub frames: std::cell::Cell<u32>,
+    /// Frame-pacing probe (GTT_DEBUG only reads it): when the previous tick
+    /// was handled, the worst tick-to-tick gap, and the slowest `view()`.
+    pub last_tick: std::cell::Cell<std::time::Instant>,
+    pub first_gap_ms: std::cell::Cell<u128>,
+    pub max_gap_ms: std::cell::Cell<u128>,
+    pub max_view_ms: std::cell::Cell<u128>,
 }
 
 /// Built-once page trees for one nav flight.
@@ -85,8 +99,14 @@ fn spring(t: f64, x0: f64, zeta: f64, omega: f64) -> f64 {
 }
 
 impl NavAnim {
-    /// Hard cap — every spring has settled well before this.
-    const DONE_MS: u128 = 600;
+    /// Animation-time length — every spring has settled well before this.
+    const DONE_S: f64 = 0.6;
+    /// Wall-clock backstop: a pathologically slow machine still ends the
+    /// flight (the clamped clock alone would stretch it without bound).
+    const HARD_CAP_MS: u128 = 1500;
+    /// Largest animation-time step per tick (~2 vsyncs): normal frame-rate
+    /// wobble stays real-time, a genuine stall is absorbed.
+    const MAX_DT: f64 = 0.032;
     /// Blocks beyond this animate instantly (long tables stay tables).
     const MAX_SLIDE: usize = 10;
 
@@ -95,7 +115,7 @@ impl NavAnim {
     /// ω=15/ζ=0.97: ~240ms of travel, near-critical so the layer snaps in
     /// instead of bouncing.
     pub fn enter_layer(&self) -> f64 {
-        let t = self.t0.elapsed().as_secs_f64();
+        let t = self.clock.get();
         self.dir * 430.0 * spring(t, 1.0, 0.97, 15.0)
     }
 
@@ -107,7 +127,7 @@ impl NavAnim {
         if i >= Self::MAX_SLIDE {
             return 0.0;
         }
-        let t = self.t0.elapsed().as_secs_f64() - 0.012 * i as f64;
+        let t = self.clock.get() - 0.012 * i as f64;
         if t <= 0.0 {
             return self.dir * (34.0 + 10.0 * i as f64);
         }
@@ -122,13 +142,29 @@ impl NavAnim {
     /// re-arrange the whole outgoing page every frame for no visual gain.
     /// ~250ms tail backs the strip the new page hasn't covered yet.
     pub fn exit(&self) -> Option<f64> {
-        let t = self.t0.elapsed().as_secs_f64();
+        let t = self.clock.get();
         let op = 1.0 - t * 4.0;
         (op > 0.0).then_some(op)
     }
 
     pub fn done(&self) -> bool {
-        self.t0.elapsed().as_millis() >= Self::DONE_MS
+        self.clock.get() >= Self::DONE_S || self.t0.elapsed().as_millis() >= Self::HARD_CAP_MS
+    }
+
+    /// Step the clock for one tick and record the pacing probe. Called from
+    /// the tick handler only — `view()` just reads `clock`, so every render
+    /// between ticks sees one consistent animation time.
+    pub fn advance(&self) {
+        let now = std::time::Instant::now();
+        let gap = now.duration_since(self.last_tick.replace(now));
+        if self.frames.get() == 0 {
+            self.first_gap_ms.set(gap.as_millis());
+        } else {
+            self.max_gap_ms
+                .set(self.max_gap_ms.get().max(gap.as_millis()));
+        }
+        self.clock
+            .set(self.clock.get() + gap.as_secs_f64().min(Self::MAX_DT));
     }
 }
 
@@ -323,10 +359,13 @@ impl Default for DonutHandle {
 /// honored here (the one place family config takes effect on 0.100.0).
 /// Pointer hover lifts the bar to full alpha and prints its date·tokens;
 /// dwelling ~450ms opens a tooltip card with events/cost/top-3 models.
+///
+/// `defer`: not this chart's turn to mount yet — see `defer_slot`.
 pub fn trend_strip(
     theme: &Theme,
     daily: &[globaltokentracker_core::viewmodel::TrendBucket],
     trend: &TrendHandle,
+    defer: bool,
     ctx: &mut ViewContext<Shell>,
 ) -> View {
     let days: Vec<globaltokentracker_core::viewmodel::TrendBucket> =
@@ -345,172 +384,193 @@ pub fn trend_strip(
         .background(Brush::Solid(Color::argb(0, 0, 0, 0)))
         .on_pointer_moved(ctx.callback(|e: PointerEventInfo| Msg::TrendHover(e.x)))
         .on_pointer_exited(ctx.callback(|_| Msg::TrendLeave))
-        .content(windows_canvas::canvas_invalidated(&trend.inv, move |ctx| {
-            use windows_canvas::{ColorF, Rect, TextAlignment, TextFormat, Vector2};
-            // Clear before the early return — an empty `days` must still wipe
-            // the previous frame, otherwise stale bars linger after filters.
-            // Painted with the card fill: swapchain transparency blends onto
-            // the page below, not the card, so TRANSPARENT showed as a dark box.
-            ctx.clear(card_bg);
-            let (w, h) = (ctx.width, ctx.height);
-            if w < 16.0 || h < 24.0 || days.is_empty() {
-                return Ok(());
-            }
-
-            let tf = TextFormat::new(&family, label_pt)?;
-            let tf_r = tf.clone().with_alignment(TextAlignment::Trailing);
-            let ink = ctx.create_solid_brush(subtle)?;
-            let line = ctx.create_solid_brush(divider)?;
-
-            // Layout: 18px top label strip, plot area, 16px bottom ticks.
-            let top = 18.0f32;
-            let bottom = h - 16.0;
-            let plot_h = (bottom - top).max(1.0);
-            let max = days.iter().map(|d| d.tokens).max().unwrap_or(1).max(1) as f32;
-
-            // Max label (top-left) + faint mid gridline.
-            ctx.draw_text(
-                &fmt::tokens_exact(max as u64),
-                &tf,
-                &Rect::new(0.0, 0.0, 120.0, top),
-                &ink,
-            );
-            let mid_y = top + plot_h * 0.5;
-            ctx.draw_line(Vector2::new(0.0, mid_y), Vector2::new(w, mid_y), &line, 1.0);
-            ctx.draw_line(
-                Vector2::new(0.0, bottom),
-                Vector2::new(w, bottom),
-                &line,
-                1.0,
-            );
-
-            let n = days.len() as f32;
-            let slot = w / n;
-            let bar_w = (slot * 0.62).clamp(3.0, 20.0);
-            let last = days.len() - 1;
-            let hover = shared.hover.get().filter(|&i| i <= last);
-            // GTT_TIPTEST=<idx> forces the tooltip in test builds — injected
-            // pointer input never reaches WinUI3's content island, so this is
-            // the screenshot-verifiable path for the popup itself.
-            let tip = shared
-                .tip
-                .get()
-                .or_else(|| {
-                    std::env::var("GTT_TIPTEST")
-                        .ok()
-                        .and_then(|v| v.parse::<usize>().ok())
-                })
-                .filter(|&i| i <= last);
-            shared.width.set(w);
-            shared.count.set(days.len());
-            for (i, d) in days.iter().enumerate() {
-                let bh =
-                    ((d.tokens as f32) / max * plot_h).max(if d.tokens > 0 { 3.0 } else { 1.5 });
-                let x = slot * i as f32 + (slot - bar_w) * 0.5;
-                let lit = i == last || hover == Some(i);
-                let brush = ctx.create_solid_brush(ColorF::new(
-                    accent.r,
-                    accent.g,
-                    accent.b,
-                    accent.a * if lit { 1.0 } else { 0.45 },
-                ))?;
-                let bar = windows_canvas::RoundedRect::new(
-                    Rect::new(x, bottom - bh, x + bar_w, bottom),
-                    2.5,
-                    2.5,
-                );
-                ctx.fill_rounded_rect(&bar, &brush);
-                if hover == Some(i) {
-                    ctx.draw_rounded_rect(&bar, &ink, 1.0);
-                    // Hover detail top-right: "MM-DD · 1,234 tok".
-                    ctx.draw_text(
-                        &tf!(
-                            "{} · {} tok",
-                            d.date.get(5..10).unwrap_or(&d.date),
-                            fmt::tokens_exact(d.tokens)
-                        ),
-                        &tf_r,
-                        &Rect::new(w - 220.0, 0.0, w, top),
-                        &ink,
-                    );
+        .content(defer_slot(
+            defer,
+            windows_canvas::canvas_invalidated(&trend.inv, move |ctx| {
+                use windows_canvas::{ColorF, Rect, TextAlignment, TextFormat, Vector2};
+                // Clear before the early return — an empty `days` must still wipe
+                // the previous frame, otherwise stale bars linger after filters.
+                // Painted with the card fill: swapchain transparency blends onto
+                // the page below, not the card, so TRANSPARENT showed as a dark box.
+                ctx.clear(card_bg);
+                let (w, h) = (ctx.width, ctx.height);
+                if w < 16.0 || h < 24.0 || days.is_empty() {
+                    return Ok(());
                 }
-            }
 
-            // Delayed tooltip card — drawn last so it floats above the plot.
-            if let Some(i) = tip {
-                let d = &days[i];
-                let day_label = if d.date.len() > 10 {
-                    d.date.clone()
-                } else {
-                    d.date.get(5..10).unwrap_or(&d.date).to_string()
-                };
-                let mut lines: Vec<String> = vec![
-                    tf!(
-                        "{} tok · {}",
-                        fmt::tokens_exact(d.tokens),
-                        fmt::usd(d.cost_usd)
-                    ),
-                    tf!("{} 事件", fmt::tokens_exact(d.events)),
-                ];
-                for (m, t) in &d.top {
-                    lines.push(format!(
-                        "{}  {}",
-                        if m.chars().count() > 20 {
-                            tf!("{}…", m.chars().take(19).collect::<String>())
-                        } else {
-                            m.clone()
-                        },
-                        fmt::tokens_exact(*t)
-                    ));
-                }
-                let line_h = label_pt + 4.0;
-                let pw = 216.0f32;
-                let ph = 26.0 + lines.len() as f32 * line_h + 10.0;
-                let px =
-                    (slot * i as f32 + slot * 0.5 - pw * 0.5).clamp(4.0, (w - pw - 4.0).max(4.0));
-                let py = top + 2.0;
-                let panel =
-                    windows_canvas::RoundedRect::new(Rect::new(px, py, px + pw, py + ph), 7.0, 7.0);
-                // Near-opaque dark card (Fluent tooltip idiom; reads on both themes).
-                let bg = ctx.create_solid_brush(ColorF::from_rgba8(28, 28, 30, 242))?;
-                let frame = ctx.create_solid_brush(ColorF::from_rgba8(255, 255, 255, 36))?;
-                let head = ctx.create_solid_brush(accent)?;
-                let body = ctx.create_solid_brush(ColorF::from_rgba8(235, 235, 235, 255))?;
-                ctx.fill_rounded_rect(&panel, &bg);
-                ctx.draw_rounded_rect(&panel, &frame, 1.0);
+                let tf = TextFormat::new(&family, label_pt)?;
+                let tf_r = tf.clone().with_alignment(TextAlignment::Trailing);
+                let ink = ctx.create_solid_brush(subtle)?;
+                let line = ctx.create_solid_brush(divider)?;
+
+                // Layout: 18px top label strip, plot area, 16px bottom ticks.
+                let top = 18.0f32;
+                let bottom = h - 16.0;
+                let plot_h = (bottom - top).max(1.0);
+                let max = days.iter().map(|d| d.tokens).max().unwrap_or(1).max(1) as f32;
+
+                // Max label (top-left) + faint mid gridline.
                 ctx.draw_text(
-                    &day_label,
+                    &fmt::tokens_exact(max as u64),
                     &tf,
-                    &Rect::new(px + 10.0, py + 7.0, px + pw - 10.0, py + 7.0 + line_h),
-                    &head,
+                    &Rect::new(0.0, 0.0, 120.0, top),
+                    &ink,
                 );
-                for (li, l) in lines.iter().enumerate() {
-                    let y = py + 7.0 + (li + 1) as f32 * line_h;
-                    ctx.draw_text(
-                        l,
-                        &tf,
-                        &Rect::new(px + 10.0, y, px + pw - 10.0, y + line_h),
-                        &body,
-                    );
-                }
-            }
+                let mid_y = top + plot_h * 0.5;
+                ctx.draw_line(Vector2::new(0.0, mid_y), Vector2::new(w, mid_y), &line, 1.0);
+                ctx.draw_line(
+                    Vector2::new(0.0, bottom),
+                    Vector2::new(w, bottom),
+                    &line,
+                    1.0,
+                );
 
-            // Sparse date ticks: first / last day (MM-DD tail of ISO date).
-            let tick = |d: &str| d.get(5..10).unwrap_or(d).to_string();
-            ctx.draw_text(
-                &tick(&days[0].date),
-                &tf,
-                &Rect::new(0.0, bottom + 2.0, 80.0, h),
-                &ink,
-            );
-            ctx.draw_text(
-                &tick(&days[last].date),
-                &tf_r,
-                &Rect::new(w - 80.0, bottom + 2.0, w, h),
-                &ink,
-            );
-            Ok(())
-        }))
+                let n = days.len() as f32;
+                let slot = w / n;
+                let bar_w = (slot * 0.62).clamp(3.0, 20.0);
+                let last = days.len() - 1;
+                let hover = shared.hover.get().filter(|&i| i <= last);
+                // GTT_TIPTEST=<idx> forces the tooltip in test builds — injected
+                // pointer input never reaches WinUI3's content island, so this is
+                // the screenshot-verifiable path for the popup itself.
+                let tip = shared
+                    .tip
+                    .get()
+                    .or_else(|| {
+                        std::env::var("GTT_TIPTEST")
+                            .ok()
+                            .and_then(|v| v.parse::<usize>().ok())
+                    })
+                    .filter(|&i| i <= last);
+                shared.width.set(w);
+                shared.count.set(days.len());
+                for (i, d) in days.iter().enumerate() {
+                    let bh = ((d.tokens as f32) / max * plot_h).max(if d.tokens > 0 {
+                        3.0
+                    } else {
+                        1.5
+                    });
+                    let x = slot * i as f32 + (slot - bar_w) * 0.5;
+                    let lit = i == last || hover == Some(i);
+                    let brush = ctx.create_solid_brush(ColorF::new(
+                        accent.r,
+                        accent.g,
+                        accent.b,
+                        accent.a * if lit { 1.0 } else { 0.45 },
+                    ))?;
+                    let bar = windows_canvas::RoundedRect::new(
+                        Rect::new(x, bottom - bh, x + bar_w, bottom),
+                        2.5,
+                        2.5,
+                    );
+                    ctx.fill_rounded_rect(&bar, &brush);
+                    if hover == Some(i) {
+                        ctx.draw_rounded_rect(&bar, &ink, 1.0);
+                        // Hover detail top-right: "MM-DD · 1,234 tok".
+                        ctx.draw_text(
+                            &tf!(
+                                "{} · {} tok",
+                                d.date.get(5..10).unwrap_or(&d.date),
+                                fmt::tokens_exact(d.tokens)
+                            ),
+                            &tf_r,
+                            &Rect::new(w - 220.0, 0.0, w, top),
+                            &ink,
+                        );
+                    }
+                }
+
+                // Delayed tooltip card — drawn last so it floats above the plot.
+                if let Some(i) = tip {
+                    let d = &days[i];
+                    let day_label = if d.date.len() > 10 {
+                        d.date.clone()
+                    } else {
+                        d.date.get(5..10).unwrap_or(&d.date).to_string()
+                    };
+                    let mut lines: Vec<String> = vec![
+                        tf!(
+                            "{} tok · {}",
+                            fmt::tokens_exact(d.tokens),
+                            fmt::usd(d.cost_usd)
+                        ),
+                        tf!("{} 事件", fmt::tokens_exact(d.events)),
+                    ];
+                    for (m, t) in &d.top {
+                        lines.push(format!(
+                            "{}  {}",
+                            if m.chars().count() > 20 {
+                                tf!("{}…", m.chars().take(19).collect::<String>())
+                            } else {
+                                m.clone()
+                            },
+                            fmt::tokens_exact(*t)
+                        ));
+                    }
+                    let line_h = label_pt + 4.0;
+                    let pw = 216.0f32;
+                    let ph = 26.0 + lines.len() as f32 * line_h + 10.0;
+                    let px = (slot * i as f32 + slot * 0.5 - pw * 0.5)
+                        .clamp(4.0, (w - pw - 4.0).max(4.0));
+                    let py = top + 2.0;
+                    let panel = windows_canvas::RoundedRect::new(
+                        Rect::new(px, py, px + pw, py + ph),
+                        7.0,
+                        7.0,
+                    );
+                    // Near-opaque dark card (Fluent tooltip idiom; reads on both themes).
+                    let bg = ctx.create_solid_brush(ColorF::from_rgba8(28, 28, 30, 242))?;
+                    let frame = ctx.create_solid_brush(ColorF::from_rgba8(255, 255, 255, 36))?;
+                    let head = ctx.create_solid_brush(accent)?;
+                    let body = ctx.create_solid_brush(ColorF::from_rgba8(235, 235, 235, 255))?;
+                    ctx.fill_rounded_rect(&panel, &bg);
+                    ctx.draw_rounded_rect(&panel, &frame, 1.0);
+                    ctx.draw_text(
+                        &day_label,
+                        &tf,
+                        &Rect::new(px + 10.0, py + 7.0, px + pw - 10.0, py + 7.0 + line_h),
+                        &head,
+                    );
+                    for (li, l) in lines.iter().enumerate() {
+                        let y = py + 7.0 + (li + 1) as f32 * line_h;
+                        ctx.draw_text(
+                            l,
+                            &tf,
+                            &Rect::new(px + 10.0, y, px + pw - 10.0, y + line_h),
+                            &body,
+                        );
+                    }
+                }
+
+                // Sparse date ticks: first / last day (MM-DD tail of ISO date).
+                let tick = |d: &str| d.get(5..10).unwrap_or(d).to_string();
+                ctx.draw_text(
+                    &tick(&days[0].date),
+                    &tf,
+                    &Rect::new(0.0, bottom + 2.0, 80.0, h),
+                    &ink,
+                );
+                ctx.draw_text(
+                    &tick(&days[last].date),
+                    &tf_r,
+                    &Rect::new(w - 80.0, bottom + 2.0, w, h),
+                    &ink,
+                );
+                Ok(())
+            }),
+        ))
+}
+
+/// Canvas slot content. Every `canvas_invalidated` builds its *own* GPU device
+/// (D3D11 + D2D) on its first layout — ~15ms each on the UI thread, and the
+/// library offers no shared-device variant for demand canvases. Overview has
+/// five, so mounting them mid-slide was the ~85ms freeze on every flight
+/// to/from it. While `defer` (slide in flight, or later in the post-settle
+/// stagger) the slot holds an empty placeholder inside the same sized Border;
+/// a later frame swaps the real canvas in. Building the canvas `View` itself
+/// is cheap — the device only appears once it is mounted.
+fn defer_slot(defer: bool, canvas: View) -> View {
+    if defer { Border::new().into() } else { canvas }
 }
 
 /// Fixed palette for pie slices 1.. (slice 0 always uses the live accent so
@@ -554,6 +614,8 @@ pub struct DonutSpec<'a> {
     pub key: u8,
     /// Hover state + repaint handle owned by `Shell`.
     pub handle: &'a DonutHandle,
+    /// Not this donut's turn to mount yet — placeholder (see `defer_slot`).
+    pub defer: bool,
 }
 
 fn donut(theme: &Theme, spec: DonutSpec<'_>, ctx: &mut ViewContext<Shell>) -> View {
@@ -563,6 +625,7 @@ fn donut(theme: &Theme, spec: DonutSpec<'_>, ctx: &mut ViewContext<Shell>) -> Vi
         fmt_v,
         key,
         handle,
+        defer,
     } = spec;
     let slices: Vec<(String, f64)> = slices.to_vec();
     let total: f64 = slices.iter().map(|s| s.1).sum();
@@ -599,9 +662,9 @@ fn donut(theme: &Theme, spec: DonutSpec<'_>, ctx: &mut ViewContext<Shell>) -> Vi
             Msg::DonutHover(key, donut_hit(e.x, e.y, 200.0, 132.0, &hit_vals))
         }))
         .on_pointer_exited(ctx.callback(move |_| Msg::DonutHover(key, None)))
-        .content(windows_canvas::canvas_invalidated(
-            &handle.inv,
-            move |ctx| {
+        .content(defer_slot(
+            defer,
+            windows_canvas::canvas_invalidated(&handle.inv, move |ctx| {
                 use windows_canvas::{
                     ColorF, ParagraphAlignment, PathBuilder, Rect, TextAlignment, TextFormat,
                     Vector2,
@@ -735,7 +798,7 @@ fn donut(theme: &Theme, spec: DonutSpec<'_>, ctx: &mut ViewContext<Shell>) -> Vi
                     );
                 }
                 Ok(())
-            },
+            }),
         ))
 }
 
@@ -791,6 +854,7 @@ pub fn donut_cell(
         fmt_v,
         key,
         handle,
+        defer,
     } = spec;
     let total: f64 = slices.iter().map(|s| s.1).sum();
     let body: View = if total <= 0.0 {
@@ -848,6 +912,7 @@ pub fn donut_cell(
                         fmt_v,
                         key,
                         handle,
+                        defer,
                     },
                     ctx,
                 ),
@@ -926,5 +991,72 @@ mod tests {
         assert_eq!(donut_hit(190.0, 66.0, 200.0, 132.0, &vals), None); // right band
         assert_eq!(donut_hit(5.0, 5.0, 200.0, 132.0, &vals), None); // outside
         assert_eq!(donut_hit(120.0, 66.0, 200.0, 132.0, &[0.0, 0.0]), None); // no data
+    }
+}
+
+#[cfg(test)]
+mod nav_clock_tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+    use std::time::{Duration, Instant};
+
+    /// A flight whose previous tick was handled `since_tick` ago and which
+    /// started `since_start` ago (wall clock).
+    fn anim(since_tick: Duration, since_start: Duration) -> NavAnim {
+        let now = Instant::now();
+        NavAnim {
+            from: crate::Page::Overview,
+            dir: 1.0,
+            t0: now.checked_sub(since_start).expect("instant underflow"),
+            clock: Cell::new(0.0),
+            cache: RefCell::new(None),
+            frames: Cell::new(1),
+            last_tick: Cell::new(now.checked_sub(since_tick).expect("instant underflow")),
+            first_gap_ms: Cell::new(0),
+            max_gap_ms: Cell::new(0),
+            max_view_ms: Cell::new(0),
+        }
+    }
+
+    #[test]
+    fn a_ui_stall_moves_the_clock_by_one_capped_step_only() {
+        // 400ms hitch (mounting a page, creating a GPU device…) must not
+        // leap the springs forward by 400ms.
+        let a = anim(Duration::from_millis(400), Duration::from_millis(400));
+        a.advance();
+        assert!(
+            (a.clock.get() - NavAnim::MAX_DT).abs() < 1e-9,
+            "{}",
+            a.clock.get()
+        );
+        assert!(a.max_gap_ms.get() >= 400);
+    }
+
+    #[test]
+    fn a_normal_frame_gap_stays_real_time() {
+        let a = anim(Duration::from_millis(12), Duration::from_millis(12));
+        a.advance();
+        let c = a.clock.get();
+        assert!((0.012..NavAnim::MAX_DT).contains(&c), "{c}");
+    }
+
+    #[test]
+    fn done_follows_animation_time_not_just_wall_time() {
+        let a = anim(Duration::ZERO, Duration::from_millis(100));
+        assert!(!a.done());
+        a.clock.set(NavAnim::DONE_S);
+        assert!(a.done());
+    }
+
+    #[test]
+    fn wall_clock_backstop_ends_a_starved_flight() {
+        // Every tick clamped and the machine crawling: animation time never
+        // reaches DONE_S, but the flight must still end.
+        let a = anim(
+            Duration::ZERO,
+            Duration::from_millis(NavAnim::HARD_CAP_MS as u64 + 50),
+        );
+        assert!(a.clock.get() < NavAnim::DONE_S);
+        assert!(a.done());
     }
 }

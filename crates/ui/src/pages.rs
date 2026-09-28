@@ -6,7 +6,7 @@ use crate::config::{REFRESH_OPTIONS, UiConfig, refresh_label};
 use crate::i18n::{self, tr};
 use crate::theme::Theme;
 use crate::widgets as w;
-use crate::{DETAIL_PAGE_SIZE, MenuKind, Msg, Shell, Snapshot};
+use crate::{DETAIL_PAGE_SIZE, MenuKind, Msg, PriceTable, Shell, Snapshot};
 use crate::{t, tf};
 use globaltokentracker_core::store::EventRow;
 use globaltokentracker_core::viewmodel::Range;
@@ -368,7 +368,7 @@ fn overview_widget(
                     .spacing(10.0)
                     .children((
                         w::section_header(theme, Symbol::FourBars, &trend_title),
-                        w::trend_strip(theme, &vm.daily, trend, ctx),
+                        w::trend_strip(theme, &vm.daily, trend, args.canvas_ready < 1, ctx),
                     )),
             ))
         }
@@ -447,6 +447,8 @@ fn overview_widget(
                         fmt_v: *f,
                         key: i as u8,
                         handle: &args.donuts[i],
+                        // Trend takes stage 1, donut `i` stage 2+i.
+                        defer: args.canvas_ready < 2 + i,
                     },
                     ctx,
                 ));
@@ -896,6 +898,12 @@ pub struct OverviewArgs<'a> {
     pub ruler: &'a ElementRef<SwapChainPanel>,
     /// Hover state per share-donut column (pointer → Msg → invalidation).
     pub donuts: &'a [w::DonutHandle; 4],
+    /// How many of the page's D2D charts may be mounted yet (trend = 1st,
+    /// then one donut per stage). Held at 0 through a slide and stepped up
+    /// one per ~16ms after it settles (`Msg::CanvasStage`); the rest of the
+    /// time it sits at `usize::MAX`. Anything not yet allowed renders as a
+    /// same-size placeholder (`widgets::defer_slot`).
+    pub canvas_ready: usize,
 }
 
 /// Returns the page's raw top-level blocks — `frame_page` assembles them
@@ -1178,17 +1186,18 @@ pub fn detail_page(
     snap: Option<&Snapshot>,
     theme: &Theme,
     ctx: &mut ViewContext<Shell>,
+    table: &TableArgs,
 ) -> Vec<View> {
     let Some(s) = snap else {
         return vec![loading(theme, true)];
     };
     let d = &s.detail;
-    let list: Vec<View> = d
-        .rows
-        .iter()
-        .enumerate()
-        .map(|(i, r)| event_row(theme, r, i % 2 == 1))
-        .collect();
+    // Virtualized: only rows scrolled into view are ever built or mounted
+    // (~25 of a 200-row page) — the old eager list mounted ~4000 elements
+    // in one UI-thread turn and re-arranged them every slide frame. Keys are
+    // row indices, so a page flip refreshes realized rows in place.
+    let list: View = virtual_rows(theme, d.rows.clone(), d.rows.len(), table.width, event_row);
+    let ruler = table_ruler(ctx, "detail-ruler", table.ruler);
     let pages = (d.total as i64 + DETAIL_PAGE_SIZE - 1) / DETAIL_PAGE_SIZE;
     let page = d.page;
     let mut nav: Vec<View> = Vec::new();
@@ -1231,14 +1240,79 @@ pub fn detail_page(
                     .keyed_children(keyed(nav)),
             ],
         ),
-        w::card(
-            theme,
-            vstack(
-                0.0,
-                std::iter::once(detail_header(theme)).chain(list).collect(),
-            ),
-        ),
+        w::card(theme, vstack(0.0, vec![ruler, detail_header(theme), list])),
     ]
+}
+
+/// What a virtualized table page needs from the shell: the measured row
+/// width (0 = not measured yet) and the page's own width ruler.
+pub struct TableArgs<'a> {
+    pub width: f64,
+    pub ruler: &'a ElementRef<SwapChainPanel>,
+}
+
+/// 1-DIP full-width ruler inside the table card: its surface Metrics report
+/// the exact width a row must span (`Msg::SetTableWidth`, whole DIPs only, so
+/// a resize drag rebuilds ~25 realized rows per step, not the page).
+fn table_ruler(
+    ctx: &mut ViewContext<Shell>,
+    key: &'static str,
+    ruler: &ElementRef<SwapChainPanel>,
+) -> View {
+    let on_width = ctx.callback(|w: f64| Msg::SetTableWidth(w));
+    ctx.use_effect(key, (), {
+        let ruler = ruler.clone();
+        move || {
+            let last = std::cell::Cell::new(0.0f64);
+            let obs = ruler.observe_surface(move |event| {
+                if let SwapChainPanelEvent::Metrics { width, .. } = event {
+                    let w = width.floor();
+                    if w > 0.0 && w != last.get() {
+                        last.set(w);
+                        let _ = on_width.call(w);
+                    }
+                }
+            });
+            Some(Box::new(move || drop(obs)))
+        }
+    });
+    SwapChainPanel::new().element_ref(ruler).height(1.0).into()
+}
+
+/// Virtualized table body: `row(theme, &item, zebra)` runs only for indices
+/// the ItemsRepeater realizes. `Arc` data + a cloned `Theme` keep the closure
+/// `'static` without copying rows; keys are indices, so a same-length data
+/// swap just re-reconciles the realized rows (no collection reset).
+///
+/// `width` is explicit because ItemsRepeater hosts every row in a
+/// ContentControl whose HorizontalContentAlignment is Left: a row is laid out
+/// at its *content* width, so the Grid's `*` column collapses and the numeric
+/// columns no longer line up with the full-width header. (A huge `MinWidth`
+/// does not help — XAML does not clamp it to the available width; the row
+/// really becomes that wide and its right-hand columns fall off the card.)
+fn virtual_rows<T: 'static>(
+    theme: &Theme,
+    rows: std::sync::Arc<Vec<T>>,
+    shown: usize,
+    width: f64,
+    row: fn(&Theme, &T, bool) -> View,
+) -> View {
+    let theme = theme.clone();
+    ItemsRepeater::new()
+        .virtual_source(VirtualSource::new(
+            0,
+            shown.min(rows.len()),
+            |i| i as u64,
+            move |i| {
+                let body = row(&theme, &rows[i], i % 2 == 1);
+                if width > 0.0 {
+                    Border::new().width(width).content(body)
+                } else {
+                    body
+                }
+            },
+        ))
+        .into()
 }
 
 // ---------------------------------------------------------------- quota
@@ -1444,8 +1518,11 @@ pub fn quota_page(
 
 // ---------------------------------------------------------------- sources
 
-pub fn sources_page(snap: Option<&Snapshot>, theme: &Theme) -> Vec<View> {
-    let Some(list_src) = snap.and_then(|s| s.sources.as_ref()) else {
+pub fn sources_page(
+    list_src: Option<&[globaltokentracker_core::store::SourceHealth]>,
+    theme: &Theme,
+) -> Vec<View> {
+    let Some(list_src) = list_src else {
         return vec![loading(theme, true)];
     };
     let mut list: Vec<View> = Vec::new();
@@ -1617,28 +1694,30 @@ fn price_row(theme: &Theme, p: &globaltokentracker_core::store::PriceRow, zebra:
         .tooltip(p.model.clone())
 }
 
-pub fn prices_page(snap: Option<&Snapshot>, theme: &Theme) -> Vec<View> {
-    let Some(s) = snap else {
+/// Rows the price table shows (the query fetches more for the count line).
+const PRICE_ROWS_SHOWN: usize = 400;
+
+pub fn prices_page(
+    table: Option<&PriceTable>,
+    theme: &Theme,
+    ctx: &mut ViewContext<Shell>,
+    args: &TableArgs,
+) -> Vec<View> {
+    let Some(table) = table else {
         return vec![loading(theme, true)];
     };
-    let Some(rows) = s.prices.as_ref() else {
-        return vec![loading(theme, true)];
-    };
-    let list: Vec<View> = std::iter::once(price_head(theme))
-        .chain(
-            rows.iter()
-                .take(400)
-                .enumerate()
-                .map(|(i, p)| price_row(theme, p, i % 2 == 1)),
-        )
-        .collect();
+    let rows = &table.rows;
+    // Virtualized like the detail table — the 400-row cap now only bounds
+    // what's browsable, not what gets mounted.
+    let list: View = virtual_rows(theme, rows.clone(), PRICE_ROWS_SHOWN, args.width, price_row);
+    let ruler = table_ruler(ctx, "prices-ruler", args.ruler);
     vec![
         header(theme, t!("价目表（$/1M tokens）"), vec![]),
         TextBlock::new()
             .text(tf!(
                 "{} 个模型 · 前 400 条 · {}",
                 rows.len(),
-                match s.prices_synced_at {
+                match table.synced_at {
                     Some(t) => tf!(
                         "联网同步于 {} 小时前",
                         (globaltokentracker_core::store::now_ms() - t) / 3_600_000
@@ -1650,7 +1729,7 @@ pub fn prices_page(snap: Option<&Snapshot>, theme: &Theme) -> Vec<View> {
             .foreground(theme.subtle)
             .into(),
         // Card chrome around the table — same as the detail page.
-        w::card(theme, vstack(0.0, list)),
+        w::card(theme, vstack(0.0, vec![ruler, price_head(theme), list])),
     ]
 }
 

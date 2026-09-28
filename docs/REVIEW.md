@@ -851,3 +851,39 @@
 - **实测**（GTT_NAVTEST 交替切页 + 帧数统计）：38–48 帧/600ms ≈ **63–80fps**（debug 构建），飞行时长再 −14%；中段截图确认进层不透明盖入、无重影、无桌面透出（250ms 时新页已覆盖 ~97%）。
 - **已知上限**（如实）：margin 布局路径的每帧 arrange 无法完全消除——XAML `Translation`（GPU 路径）的 vtable 槽位存在但绑定被裁；除非上游放开 `ElementCompositionPreview::GetElementVisual` 或补 `SetTranslation` 绑定，否则已到本框架内极限。剩余可调项只有弹簧参数与 DONE_MS。
 - **验证**：67 测试全过、clippy `-D warnings` 0、改动区 fmt 干净。
+
+## S69 切页卡顿根治：大表虚拟化 + 页面数据与扫描解耦 + 停顿钳制时钟 + 总览图表延后挂载 ✅
+
+- **诉求**：切页动画在条目多的页面卡顿，怀疑加载策略——要求让加载更高效或异步化，使动画不受加载拖累。
+- **定位（release，真实 63k 事件账本，`GTT_NAVTEST` 交替切页 8 趟、去掉首趟）**：`view()` 最慢仅 0–1ms（S63 的树缓存已榨干 Rust 侧），耗时全在 view 之后的原生 XAML 挂载/布局。三个根因：
+  1. 明细 200 行 / 价格 400 行为非虚拟化 `StackPanel`，每行 ~20 个元素，一次性同步挂载 4000–8000 元素，且每帧 margin 位移都要重新 arrange；
+  2. 切 数据源/价格 时 `start_scan` 先跑完整 `scan_once`（~300ms）+ 总览/明细聚合，数据恰好在动画中段落地，`Msg::Loaded` 还会**清空动画缓存**→ 飞行中途整页重建重挂载；
+  3. 动画时钟是墙钟 `t0.elapsed()`——UI 线程任何一次停顿之后弹簧被"跳过"一截，观感即跳帧。
+  另有一项在修完前三项后由对照实验暴露：**总览的 5 个 D2D canvas**——`windows_canvas::canvas_invalidated` 每个 canvas 各自 `GpuDevice::new_or_warp`（各建一套 D3D11+D2D 设备，~15ms/个，且无共享设备的按需重绘变体），挂载后首个布局时落在 UI 线程 ≈ **85ms 冻结**，出现在所有到/离开总览的飞行中。
+- **改动**：
+  1. **表格虚拟化**（`pages.rs` `virtual_rows`）：明细/价格改 `ItemsRepeater` + `VirtualSource`，行闭包只为可视索引执行（~25 行）；数据改 `Arc<Vec<_>>`（`DetailBundle.rows`、`PriceTable.rows`）避免每次 `view()` 复制；键=行索引，`key_revision` 恒 0——同长度换内容只 reconcile 已实化行，长度变化才重置集合（reactor `reconcile_virtual_collection` 源码核实）。
+     - **行宽问题（首版回归，用户截图发现）**：reactor 用 `ContentControl` 承载每个虚拟行，其 `HorizontalContentAlignment` 默认 Left，行按**内容宽度**布局，`*` 列塌缩、数字列与全宽表头错位。首个修法 `min_width(16384)`（假设 XAML 会把期望宽度钳到可用宽度）**被实测证伪**：行真的变成 16384 宽，数字列被推出卡片裁掉。最终方案：卡片内放 1-DIP 宽度尺子（沿用总览已验证的 `SwapChainPanel` Metrics 机制），`Msg::SetTableWidth` 取整 DIP 上报，行以测得宽度 `width()` 铺满；初值按默认窗口估算（1180−48−2·pad−2）避免首帧跳变。
+  2. **页面数据与扫描解耦**（`main.rs`）：`sources`/`prices`/`prices_synced_at` 移出 `Snapshot`，成为 Shell 字段，由轻量 `load_page(page)`（只 `Store::open` + 单表查询，不扫描）经 `Msg::PageData` 回填；首个快照落地后**预取**两页，`Nav` 不再 `start_scan`（stale-while-revalidate：先渲染已有数据，后台补刷）；每页单飞 + `page_again` 标记合并重复请求；`PricesDone` 成功后刷新价目表。`Msg::Loaded` 不再无条件清动画缓存——仅"首个快照"（缓存里只有扫描占位）或 `PageData` 落到仍为空的入场页时才清，其余保持冻结到落定（S63 语义）。
+  3. **停顿钳制动画时钟**（`widgets.rs` `NavAnim`）：`clock` 按 tick 累加，单步增量封顶 `MAX_DT=32ms`（约 2 个 vsync，正常帧率抖动仍保持实时）；UI 停顿只会让动画暂停而不是跳过；墙钟 1500ms 硬上限兜底防无限拉长；`view()` 只读 `clock`，两次 tick 间任意次重绘看到一致的动画时间。新增 `advance()` 同时承载帧间隔探针。
+  4. **总览图表延后 + 错峰挂载**：飞行期间 `canvas_ready=0`，趋势图/环图以同尺寸占位（外层 Border 的尺寸/背景/指针事件不变，只把 canvas 槽换成空 Border，`defer_slot`）；落定后每 16ms 放行一个（趋势图→4 个环图，`Msg::CanvasStage`），单个 UI 回合最多多付 ~15ms，不再一次吃 5 个 GPU 设备创建。新一次飞行会重置并中断错峰。
+- **诊断**：`GTT_DEBUG` 下每次飞行结算日志增加 首帧延迟 / 最坏帧间隔 / 最慢 `view()`（`[nav] anim settled: N frames in Xms (first gap …, worst gap …, worst view() …)`）。
+- **实测（release，`GTT_NAVTEST` 每目标页 8 趟去首趟，"帧"=动画 tick，间隔为 UI 线程消息循环 tick→tick，非 GPU 呈现时间）**：
+
+  | 目标页↔总览 | 旧：帧/墙钟 | 旧：首帧延迟 | 旧：最坏帧间隔 | 新：帧/墙钟 | 新：首帧延迟 | 新：最坏帧间隔 |
+  |---|---|---|---|---|---|---|
+  | 明细 | 38.3 / 602ms | 65ms（max 81） | 107ms（max 114） | 65.7 / 608ms | 25ms（max 43） | **30ms（max 31）** |
+  | 价格 | 25.3 / 603ms | 100ms（max 106） | 166ms（max 180） | 65.7 / 608ms | 24ms（max 44） | **30ms（max 31）** |
+  | 配额 | — | — | ~88ms | 66.6 / 620ms | 25ms（max 47） | 40ms（max 42） |
+  | 数据源 | — | — | ~90ms | 66.6 / 614ms | 41ms（max 45） | 18ms（max 32） |
+  | 配额↔数据源（不含总览，对照） | — | — | — | 68.0 / 604ms | 32ms | **8ms（max 9）** |
+
+  分步归因：仅前三项时明细/价格已到 ~90fps、最坏间隔 86ms；第 4 项（总览 canvas 延后）把最坏间隔从 86ms 压到 ≤42ms。对照行证明去掉总览后飞行零冻结、墙钟恰为 600ms（无停顿被钳制）。价格页帧率 42→~108（tick 频率，受 8ms sleep 步进限制，高于 60Hz vsync，有意义的指标是最坏帧间隔）。
+- **视觉验证（PrintWindow 截图，非仅帧数）**：明细/价格首屏满宽、数字列与表头对齐、斑马纹全宽；2000px 高窗口一次实化 ~66 行且内容正确；820px 窄窗口行宽随窗口收缩；数据源页正常；总览静止态与"明细→总览"飞行落定后趋势图 + 4 环图均在；明细翻页两条路径（同长度换内容：第 2/316 页，含更高的 `unpriced` 徽章行；长度变化重置：末页 200→3 行）均正确——用临时 `GTT_DETAILPAGE` 钩子驱动，验完已撤，未留在代码里。
+- **验证命令**：`cargo test --workspace` 71 过（core 62 + ui 9，新增 4 个 `nav_clock_tests`：停顿封顶单步 / 正常帧距保持实时 / 完成判定 / 墙钟硬上限）；`cargo clippy --workspace --all-targets -- -D warnings` 0；`cargo fmt --check -p globaltokentracker-ui` 仅剩 HEAD 既有的 2 处漂移（`pages.rs` `frame_page`、`settings_page`，非本步改动，未动）。
+- **已知限制 / 未验证（如实）**：
+  - **滚动后的实化未能程序化验证**：UIA `ScrollPattern.Scroll` 会挂起、`SetScrollPercent` 被拒（`E_INVALIDARG`），注入输入到不了 content island。替代证据是视口变化时的实化（2000px 窗口）与 UIA 读到的视口占比 13.1%（总高度估算正确）。**建议实机滚动明细页确认**。
+  - 虚拟行外壳 `ContentControl` 的 `MinHeight=24`（reactor 内部 `ESTIMATED_ROW_HEIGHT`）使未实化区域按 24px/行估算、实际行 ~27px，滚动条滑块长度会随滚动轻微调整。
+  - 图表落定后依次出现（~5×16ms 级联）是有意的；启动首屏与非切页路径不受影响（`canvas_ready` 初值 `usize::MAX`）。
+  - 价格表 400 行上限现在只限制可浏览范围、不再影响挂载成本，可放开（涉及 i18n 文案"前 400 条"，未擅自改行为）。
+- **范围外发现（未改）**：`Msg::DetailPage` 查询失败走 `Msg::Failed`，会重复 `arm_refresh` 累积刷新定时器；价目表首行是一条模型名为空的 litellm 记录（数据本身）。
+- **流程教训**：首版只用帧数验证，漏掉了渲染回归（行宽），由用户截图发现——之后所有 UI 改动补上截图核对。

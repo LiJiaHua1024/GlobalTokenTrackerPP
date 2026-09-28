@@ -28,6 +28,7 @@ use globaltokentracker_core::{Engine, OverviewVm, Store};
 use i18n::tr;
 use pages::*;
 use std::path::PathBuf;
+use std::sync::Arc;
 use theme::Theme;
 use windows_reactor::*;
 
@@ -40,25 +41,48 @@ pub enum LoadOutcome {
 }
 
 /// One background refresh produces this bundle (all Send-safe plain data).
-/// `sources`/`prices` are page-scoped: fetched only while that page is open —
-/// the 5k-row price table was otherwise rebuilt on every refresh tick.
+/// The sources/prices tables are NOT part of it — they load on their own
+/// (`PageData`), so a scan never gates them and they never gate a scan.
 pub struct Snapshot {
     pub vm: OverviewVm,
     pub detail: DetailBundle,
-    pub sources: Option<Vec<SourceHealth>>,
-    pub prices: Option<Vec<PriceRow>>,
-    /// `prices` live-source sync timestamp (ms); `None` = seed only.
-    pub prices_synced_at: Option<i64>,
     /// A price refresh is due (startup force or >12h stale) — run it as its
     /// own background task so network latency never gates the first paint.
     pub price_due: bool,
     pub scan_ms: u128,
 }
 
+/// `Arc` rows: the virtualized table's row closure owns a cheap handle
+/// instead of copying up to a page of strings on every `view()`.
 pub struct DetailBundle {
-    pub rows: Vec<EventRow>,
+    pub rows: Arc<Vec<EventRow>>,
     pub total: u64,
     pub page: i64,
+}
+
+/// Price table + the live-source sync stamp it was read with.
+#[derive(Clone)]
+pub struct PriceTable {
+    pub rows: Arc<Vec<PriceRow>>,
+    /// Live-source sync timestamp (ms); `None` = seed only.
+    pub synced_at: Option<i64>,
+}
+
+/// Page-scoped table data, loaded by a light query — no filesystem scan, no
+/// overview/detail re-aggregation. Prefetched after first paint and
+/// refreshed on nav, so opening the page never waits on (or races) a scan.
+pub enum PageData {
+    Sources(Vec<SourceHealth>),
+    Prices(PriceTable),
+}
+
+/// Index into the per-page load bookkeeping (`None` = not a lazy page).
+fn lazy_slot(page: Page) -> Option<usize> {
+    match page {
+        Page::Sources => Some(0),
+        Page::Prices => Some(1),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +97,23 @@ pub enum Page {
 
 pub struct Shell {
     snap: Option<Snapshot>,
+    /// Sources / prices tables — independent of `snap`, see `PageData`.
+    sources: Option<Vec<SourceHealth>>,
+    prices: Option<PriceTable>,
+    /// Per lazy page (`lazy_slot`): a load is running / was asked for again
+    /// meanwhile (re-run on completion instead of racing two queries).
+    page_loading: [bool; 2],
+    page_again: [bool; 2],
+    /// First snapshot landed → sources/prices were prefetched once.
+    prefetched: bool,
+    /// Overview charts allowed to mount so far — see `OverviewArgs`.
+    canvas_ready: usize,
+    /// Measured row width of the virtualized tables (DIPs) — see
+    /// `pages::TableArgs`. Seeded from the default window until the rulers
+    /// report, so the first frame is already close.
+    table_w: f64,
+    /// Width rulers for the detail / prices table cards.
+    table_rulers: [ElementRef<SwapChainPanel>; 2],
     page: Page,
     scanning: bool,
     /// A filesystem event arrived while a scan was running — rescan when it ends.
@@ -141,7 +182,9 @@ pub enum Msg {
     Tray(tray::TrayAction),
     Nav(Option<String>),
     DetailPage(i64),
-    DetailLoaded(Vec<EventRow>, u64, i64),
+    DetailLoaded(Arc<Vec<EventRow>>, u64, i64),
+    /// A light page-table query finished (`Page` says which slot to free).
+    PageData(Page, Result<PageData, String>),
     ToggleEdit,
     MoveWidget(String, String, i32),
     HideWidget(String, String, bool),
@@ -179,6 +222,10 @@ pub enum Msg {
     ToggleQuotaGroup(String),
     /// Width-ruler observer: overview grids should use this many columns.
     SetOverviewCols(usize),
+    /// Table-card ruler: virtualized rows must span this many DIPs.
+    SetTableWidth(f64),
+    /// Post-slide stagger: let the next Overview chart mount.
+    CanvasStage,
     /// One animation frame of the nav slide — chained until NavAnim::done.
     NavAnimTick,
     /// Event sink for RadioButton uncheck transitions — nothing to do.
@@ -300,7 +347,6 @@ fn load_all(
     apps: Option<Vec<String>>,
     models: Option<Vec<String>>,
     force_prices: bool,
-    page: Page,
     // True when the caller knows visible data must be rebuilt even if the
     // scan lands nothing (filter/range/page change, reprice, quota poll).
     force_views: bool,
@@ -331,30 +377,38 @@ fn load_all(
         .store
         .detail(0, DETAIL_PAGE_SIZE, apps.as_deref(), models.as_deref())
         .map_err(|e| e.to_string())?;
-    // Page-scoped reads: the heavy tables only exist while their page is open.
-    let sources = (page == Page::Sources)
-        .then(|| engine.store.source_health())
-        .transpose()
-        .map_err(|e| e.to_string())?;
-    let prices = (page == Page::Prices)
-        .then(|| engine.store.price_rows(5000))
-        .transpose()
-        .map_err(|e| e.to_string())?;
-    let prices_synced_at =
-        globaltokentracker_core::pricing::last_live_sync(&engine.store).unwrap_or(None);
     Ok(LoadOutcome::Fresh(Box::new(Snapshot {
         vm,
         detail: DetailBundle {
-            rows: d.rows,
+            rows: Arc::new(d.rows),
             total: d.total_events,
             page: 0,
         },
-        sources,
-        prices,
-        prices_synced_at,
         price_due,
         scan_ms,
     })))
+}
+
+/// Light per-page table query — opens the ledger, reads one table, done.
+/// Deliberately does NOT scan: the old path re-ran the whole filesystem scan
+/// (~300ms) plus overview/detail aggregation just to fetch a page's table,
+/// landing mid-slide and dragging the animation.
+fn load_page(page: Page) -> Result<PageData, String> {
+    let store = Store::open(&db_path()).map_err(|e| e.to_string())?;
+    match page {
+        Page::Sources => store
+            .source_health()
+            .map(PageData::Sources)
+            .map_err(|e| e.to_string()),
+        Page::Prices => {
+            let rows = store.price_rows(5000).map_err(|e| e.to_string())?;
+            Ok(PageData::Prices(PriceTable {
+                rows: Arc::new(rows),
+                synced_at: globaltokentracker_core::pricing::last_live_sync(&store).unwrap_or(None),
+            }))
+        }
+        _ => Err("not a table page".into()),
+    }
 }
 
 /// Arms one periodic-refresh timer. `secs == 0` (仅文件变更) skips arming —
@@ -437,7 +491,7 @@ impl Component for Shell {
         // refresh when >12h stale.
         context.spawn_background(move |_| {
             power::worker("gtt-scan");
-            match load_all(range, app_filter, model_filter, true, page, true) {
+            match load_all(range, app_filter, model_filter, true, true) {
                 Ok(s) => Msg::Loaded(s),
                 Err(e) => Msg::Failed(e),
             }
@@ -472,6 +526,15 @@ impl Component for Shell {
         let _otel = globaltokentracker_core::otel::spawn(db_path());
         Self {
             snap: None,
+            sources: None,
+            prices: None,
+            page_loading: [false; 2],
+            page_again: [false; 2],
+            prefetched: false,
+            // 1180 client - 2x24 page padding - card padding/border.
+            table_w: 1180.0 - 48.0 - 2.0 * theme.pad - 2.0,
+            table_rulers: [ElementRef::new(), ElementRef::new()],
+            canvas_ready: usize::MAX,
             page,
             scanning: true,
             pending_rescan: false,
@@ -501,6 +564,7 @@ impl Component for Shell {
     fn update(&mut self, message: Msg, context: &ComponentContext<Self>) {
         match message {
             Msg::Loaded(outcome) => {
+                let (mut fresh, mut first_snapshot) = (false, false);
                 let price_due = match outcome {
                     LoadOutcome::Fresh(s) => {
                         diag!("[scan] loaded, pending_rescan={}", self.pending_rescan);
@@ -528,6 +592,8 @@ impl Component for Shell {
                             }
                         }
                         let price_due = s.price_due;
+                        first_snapshot = self.snap.is_none();
+                        fresh = true;
                         self.snap = Some(*s);
                         // Test hook: GTT_NAVTEST=<nav label> fires one page
                         // switch after first paint — scripted input can't
@@ -580,11 +646,23 @@ impl Component for Shell {
                 };
                 self.last_error = None;
                 self.scanning = false;
-                // New data mid-slide → drop the frozen page cache so the
-                // entering page renders fresh on the next frame instead of
-                // staying stale until settle.
-                if let Some(a) = &self.nav_anim {
+                // A slide in flight keeps its frozen page cache: rebuilding
+                // both pages mid-flight is exactly the hitch we avoid, and
+                // the fresh data shows at settle. The one exception is the
+                // very first snapshot — the cache then holds only the
+                // "scanning…" placeholder, so it must refresh at once.
+                if first_snapshot && let Some(a) = &self.nav_anim {
                     *a.cache.borrow_mut() = None;
+                }
+                // Tables load off their own light queries, never the scan:
+                // prefetch both once (so the first visit is instant), then
+                // keep the open one current when new data lands.
+                if self.snap.is_some() && !self.prefetched {
+                    self.prefetched = true;
+                    self.load_page_data(Page::Sources, context);
+                    self.load_page_data(Page::Prices, context);
+                } else if fresh {
+                    self.load_page_data(self.page, context);
                 }
                 self.poll_quota_if_stale(context);
                 // Detached price-source fetch: triggered here (post-load) so
@@ -853,14 +931,25 @@ impl Component for Shell {
             }
             Msg::Noop => {}
             Msg::NavAnimTick => {
-                // One msg per frame — the view() rebuild re-evaluates each
-                // block's closed-form spring at the new elapsed time.
+                // One msg per frame — step the (stall-clamped) animation
+                // clock; the view() rebuild re-evaluates each block's
+                // closed-form spring at the new animation time.
+                if let Some(a) = &self.nav_anim {
+                    a.advance();
+                }
                 if self.nav_anim.as_ref().is_none_or(|a| a.done()) {
                     if let Some(a) = self.nav_anim.take() {
+                        // Charts were held back for the flight — bring them
+                        // in one per frame so no single UI turn eats 5 GPU
+                        // device creations at once.
+                        self.arm_canvas_stage(context);
                         diag!(
-                            "[nav] anim settled: {} frames in {}ms",
+                            "[nav] anim settled: {} frames in {}ms (first gap {}ms, worst gap {}ms, worst view() {}ms)",
                             a.frames.get(),
-                            a.t0.elapsed().as_millis()
+                            a.t0.elapsed().as_millis(),
+                            a.first_gap_ms.get(),
+                            a.max_gap_ms.get(),
+                            a.max_view_ms.get()
                         );
                     }
                 } else {
@@ -881,6 +970,14 @@ impl Component for Shell {
             // Width-ruler metrics → reflow column count changed. The
             // observer already dedupes, so landing here always rebuilds.
             Msg::SetOverviewCols(n) => self.overview_cols = n.clamp(1, 4),
+            Msg::SetTableWidth(w) => self.table_w = w,
+            Msg::CanvasStage => {
+                // A new slide owns the charts again — its settle re-arms us.
+                if self.nav_anim.is_none() {
+                    self.canvas_ready = self.canvas_ready.saturating_add(1);
+                    self.arm_canvas_stage(context);
+                }
+            }
             Msg::WatchFired => {
                 diag!("[watch] fired, scanning={}", self.scanning);
                 // Only 仅文件变更 mode scans on file events — in timer mode
@@ -930,6 +1027,8 @@ impl Component for Shell {
                     diag!("[nav] {prev:?} → {:?} (anim start)", self.page);
                     // Forward nav → new page springs in from the right while
                     // the old page exits left; backward flips the direction.
+                    self.canvas_ready = 0;
+                    let now = std::time::Instant::now();
                     self.nav_anim = Some(widgets::NavAnim {
                         from: prev,
                         dir: if (self.page as u8) > (prev as u8) {
@@ -937,9 +1036,14 @@ impl Component for Shell {
                         } else {
                             -1.0
                         },
-                        t0: std::time::Instant::now(),
+                        t0: now,
+                        clock: std::cell::Cell::new(0.0),
                         cache: std::cell::RefCell::new(None),
                         frames: std::cell::Cell::new(0),
+                        last_tick: std::cell::Cell::new(now),
+                        first_gap_ms: std::cell::Cell::new(0),
+                        max_gap_ms: std::cell::Cell::new(0),
+                        max_view_ms: std::cell::Cell::new(0),
                     });
                     context.spawn_background(|_| {
                         power::name_thread("gtt-anim");
@@ -947,16 +1051,11 @@ impl Component for Shell {
                         Msg::NavAnimTick
                     });
                 }
-                // Page-scoped data is lazy: first visit to Sources/Prices
-                // triggers one load; ticks keep it fresh while open.
-                let missing = match self.page {
-                    Page::Sources => self.snap.as_ref().is_none_or(|s| s.sources.is_none()),
-                    Page::Prices => self.snap.as_ref().is_none_or(|s| s.prices.is_none()),
-                    _ => false,
-                };
-                if missing {
-                    self.views_stale = true;
-                    self.start_scan(context);
+                // Sources/Prices tables: the prefetched copy renders at once
+                // (stale-while-revalidate); this light query only tops it up.
+                // No scan — that used to land mid-slide and stall the flight.
+                if self.page != prev {
+                    self.load_page_data(self.page, context);
                 }
             }
             Msg::DetailPage(page) => {
@@ -968,7 +1067,7 @@ impl Component for Shell {
                     match Store::open(&db_path()).and_then(|s| {
                         s.detail(page, DETAIL_PAGE_SIZE, apps.as_deref(), models.as_deref())
                     }) {
-                        Ok(d) => Msg::DetailLoaded(d.rows, d.total_events, page),
+                        Ok(d) => Msg::DetailLoaded(Arc::new(d.rows), d.total_events, page),
                         Err(e) => Msg::Failed(e.to_string()),
                     }
                 });
@@ -976,6 +1075,37 @@ impl Component for Shell {
             Msg::DetailLoaded(rows, total, page) => {
                 if let Some(s) = &mut self.snap {
                     s.detail = DetailBundle { rows, total, page };
+                }
+            }
+            Msg::PageData(page, res) => {
+                if let Some(slot) = lazy_slot(page) {
+                    self.page_loading[slot] = false;
+                    // Requested again while this query ran → one more pass.
+                    if std::mem::take(&mut self.page_again[slot]) {
+                        self.load_page_data(page, context);
+                    }
+                }
+                let was_empty = match page {
+                    Page::Sources => self.sources.is_none(),
+                    _ => self.prices.is_none(),
+                };
+                match res {
+                    Ok(PageData::Sources(rows)) => self.sources = Some(rows),
+                    Ok(PageData::Prices(t)) => self.prices = Some(t),
+                    Err(e) => {
+                        diag!("[page] {page:?} load failed: {e}");
+                        return;
+                    }
+                }
+                // Landed mid-slide onto a still-empty entering page (only
+                // possible before the prefetch finished): refresh the frozen
+                // cache so the table shows now rather than at settle. A
+                // top-up of an already-shown table stays frozen until settle.
+                if was_empty
+                    && page == self.page
+                    && let Some(a) = &self.nav_anim
+                {
+                    *a.cache.borrow_mut() = None;
                 }
             }
             Msg::ToggleEdit => {
@@ -1060,9 +1190,11 @@ impl Component for Shell {
                             r.llmpricing,
                             r.repriced
                         );
-                        // A successful sync refreshes prices_synced_at too;
-                        // repriced>0 additionally changes visible USD.
+                        // A successful sync rewrites the price table and its
+                        // sync stamp; repriced>0 additionally changes
+                        // visible USD.
                         self.views_stale = true;
+                        self.load_page_data(Page::Prices, context);
                         if r.repriced > 0 {
                             self.start_scan(context);
                         }
@@ -1074,6 +1206,7 @@ impl Component for Shell {
     }
 
     fn view(&self, _input: &(), context: &mut ViewContext<Self>) -> View {
+        let t_view = std::time::Instant::now();
         // Publish the render locale before any `tr`/`tf!` resolves text.
         i18n::set_lang(i18n::Lang::from_config(&self.config.lang));
         // WM_CLOSE → Msg::CloseRequested (idempotent once the HWND exists).
@@ -1278,7 +1411,7 @@ impl Component for Shell {
         // Root must be a Grid: a vertical StackPanel offers children infinite
         // height, which makes the page ScrollViewer measure at full content
         // size and never scroll. Star row bounds the scroll area.
-        Grid::new()
+        let root: View = Grid::new()
             .rows([GridLength::Auto, GridLength::Auto, GridLength::STAR])
             .keyed_children([
                 KeyedView::new(
@@ -1300,7 +1433,12 @@ impl Component for Shell {
                 ),
                 KeyedView::new("overlay", overlay),
                 KeyedView::new("closedlg", close_dialog),
-            ])
+            ]);
+        if let Some(a) = &self.nav_anim {
+            let ms = t_view.elapsed().as_millis();
+            a.max_view_ms.set(a.max_view_ms.get().max(ms));
+        }
+        root
     }
 }
 
@@ -1334,12 +1472,29 @@ impl Shell {
                     cols: self.overview_cols,
                     ruler: &self.ruler,
                     donuts: &self.donuts,
+                    canvas_ready: self.canvas_ready,
                 },
             ),
-            Page::Detail => detail_page(snap, theme, context),
+            Page::Detail => detail_page(
+                snap,
+                theme,
+                context,
+                &TableArgs {
+                    width: self.table_w,
+                    ruler: &self.table_rulers[0],
+                },
+            ),
             Page::Quota => quota_page(snap, theme, &self.quota_collapsed, context),
-            Page::Sources => sources_page(snap, theme),
-            Page::Prices => prices_page(snap, theme),
+            Page::Sources => sources_page(self.sources.as_deref(), theme),
+            Page::Prices => prices_page(
+                self.prices.as_ref(),
+                theme,
+                context,
+                &TableArgs {
+                    width: self.table_w,
+                    ruler: &self.table_rulers[1],
+                },
+            ),
             Page::Settings => settings_page(&self.config, theme, context),
         }
     }
@@ -1431,15 +1586,48 @@ impl Shell {
             let range = self.range;
             let apps = self.app_filter.clone();
             let models = self.model_filter.clone();
-            let page = self.page;
             context.spawn_background(move |_| {
                 power::worker("gtt-scan");
-                match load_all(range, apps, models, false, page, force_views) {
+                match load_all(range, apps, models, false, force_views) {
                     Ok(s) => Msg::Loaded(s),
                     Err(e) => Msg::Failed(e),
                 }
             });
         }
+    }
+
+    /// Schedule the next chart-mount step, or finish the stagger (all
+    /// charts allowed, and always so off the Overview page — nothing to mount).
+    fn arm_canvas_stage(&mut self, context: &ComponentContext<Self>) {
+        // trend + 4 donuts
+        const CHARTS: usize = 5;
+        if self.page != Page::Overview || self.canvas_ready >= CHARTS {
+            self.canvas_ready = usize::MAX;
+            return;
+        }
+        context.spawn_background(|_| {
+            power::name_thread("gtt-anim");
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            Msg::CanvasStage
+        });
+    }
+
+    /// Kick a light table query for a lazy page. One in flight per page; a
+    /// request that arrives meanwhile re-runs once on completion, so the
+    /// table always ends up reflecting the newest ledger state.
+    fn load_page_data(&mut self, page: Page, context: &ComponentContext<Self>) {
+        let Some(slot) = lazy_slot(page) else {
+            return;
+        };
+        if self.page_loading[slot] {
+            self.page_again[slot] = true;
+            return;
+        }
+        self.page_loading[slot] = true;
+        context.spawn_background(move |_| {
+            power::worker("gtt-page");
+            Msg::PageData(page, load_page(page))
+        });
     }
 }
 
