@@ -420,14 +420,23 @@ fn overview_widget(
                     |v| fmt::tokens_compact(v as u64),
                 ),
             ];
-            let cells: Vec<View> = columns
-                .iter()
-                .map(|(title, slices, f)| {
-                    let total: f64 = slices.iter().map(|s| s.1).sum();
-                    let center = f(total);
-                    w::donut_cell(theme, title.clone(), slices, center, *f)
-                })
-                .collect();
+            let mut cells: Vec<View> = Vec::with_capacity(columns.len());
+            for (i, (title, slices, f)) in columns.iter().enumerate() {
+                let total: f64 = slices.iter().map(|s| s.1).sum();
+                let center = f(total);
+                cells.push(w::donut_cell(
+                    theme,
+                    title.clone(),
+                    w::DonutSpec {
+                        slices,
+                        center,
+                        fmt_v: *f,
+                        key: i as u8,
+                        handle: &args.donuts[i],
+                    },
+                    ctx,
+                ));
+            }
             // Donuts stretch across the measured width: 4→3→2→1 columns.
             Some(w::card(
                 theme,
@@ -871,6 +880,8 @@ pub struct OverviewArgs<'a> {
     pub cols: usize,
     /// Bound to the 1-DIP ruler panel mounted on this page.
     pub ruler: &'a ElementRef<SwapChainPanel>,
+    /// Hover state per share-donut column (pointer → Msg → invalidation).
+    pub donuts: &'a [w::DonutHandle; 4],
 }
 
 pub fn overview_page(

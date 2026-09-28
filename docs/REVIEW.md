@@ -688,3 +688,12 @@
 - **实测**（PrintWindow）：1600px → 4 卡铺满全宽；800px → 2×2 撑满；560px → 单列满宽。S54 的固定单元留白问题消除。
 - **取舍**：尺子只在总览页挂载（其他页未自适应）；列数变化是离散跳变而非连续插值（网格重排本就离散）。`SwapChainPanel` 空面板不渲染内容，开销≈一个空元素。
 - **验证**：60 测试全过、clippy `-D warnings` 0；改动区 fmt 干净（仓库遗留漂移照旧不动）。
+
+## S56 占比环扇区悬停详情 ✅
+
+- **需求**：鼠标悬停饼图扇区显示对应分类详情。
+- **方案**（沿用趋势图 hover 管线）：扇区 canvas 包 `Border`（透明背景保命中）→ `on_pointer_moved/exited` → `Msg::DonutHover(col, Option<idx>)` → Shell 写 `DonutShared.hover` + `Invalidator` 重绘。命中测试 `donut_hit`：指针坐标→环形距离判定 + 顺时针角累积区间（12 点起算，与绘制几何同参）。
+- **悬停表现**：当前扇区外扩 2.5px、其余压暗至 32% alpha；中心文字由合计切换为 `名称 / xx.x% · 值`（主题色两行）。移出环孔/边界 → None 还原。
+- **基础设施**：`DonutHandle`(shared+inv) ×4 存 Shell；`DonutSpec` 打包 slices/center/fmt/key/handle 避参数上限；`GTT_DONUTTEST=<col>,<idx>` 强制悬停（注入指针到不了 content island，与 GTT_TIPTEST 同理）。
+- **实测**（PrintWindow）：`GTT_DONUTTEST=0,1` → 第 1 环显示 `Claude 39.1%·$2896`+他区压暗；`=2,0` → 第 3 环 `Codex 35.8%·59亿`。
+- **验证**：`donut_hit` 单测 2 个（角度区间归属/环孔外空拒绝）共 62 全过；clippy `-D warnings` 0；改动区 fmt 干净。

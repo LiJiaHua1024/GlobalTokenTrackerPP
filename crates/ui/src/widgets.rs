@@ -4,7 +4,7 @@
 
 use crate::i18n::tr;
 use crate::theme::Theme;
-use crate::{Msg, Shell, t, tf};
+use crate::{t, tf, Msg, Shell};
 use globaltokentracker_core::viewmodel::fmt;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -181,6 +181,29 @@ impl Default for TrendHandle {
     fn default() -> Self {
         Self {
             shared: Rc::new(TrendShared::default()),
+            inv: Invalidator::new(),
+        }
+    }
+}
+
+/// Per-donut hover state — pointer callbacks write it via a Msg round trip,
+/// the draw pass reads it every invalidated frame.
+#[derive(Default)]
+pub struct DonutShared {
+    pub hover: Cell<Option<usize>>,
+}
+
+/// Owned by `Shell`; one per share-grid column, cloned into each render.
+#[derive(Clone)]
+pub struct DonutHandle {
+    pub shared: Rc<DonutShared>,
+    pub inv: Invalidator,
+}
+
+impl Default for DonutHandle {
+    fn default() -> Self {
+        Self {
+            shared: Rc::new(DonutShared::default()),
             inv: Invalidator::new(),
         }
     }
@@ -407,19 +430,59 @@ pub fn slice_brush(theme: &Theme, i: usize) -> Brush {
 /// pre-folded (top-N + 其他); `center` is the label inside the hole.
 /// Each donut gets its own Invalidator — sharing one across canvases draws
 /// only the first (demand canvases attach once per render anyway).
-fn donut(theme: &Theme, slices: &[(String, f64)], center: String) -> View {
+/// Everything a share-donut needs beyond `theme`/`ctx` — bundles the cell
+/// data with its hover wiring so `donut`/`donut_cell` stay under the arg cap.
+pub struct DonutSpec<'a> {
+    /// Pre-folded slices (top-N + 其他), already zero-filtered.
+    pub slices: &'a [(String, f64)],
+    /// Label inside the hole (usually the formatted total).
+    pub center: String,
+    /// Raw-value formatter for legend + hover detail tails.
+    pub fmt_v: fn(f64) -> String,
+    /// Column index — the Msg key matching `Shell.donuts[key]`.
+    pub key: u8,
+    /// Hover state + repaint handle owned by `Shell`.
+    pub handle: &'a DonutHandle,
+}
+
+fn donut(theme: &Theme, spec: DonutSpec<'_>, ctx: &mut ViewContext<Shell>) -> View {
+    let DonutSpec {
+        slices,
+        center,
+        fmt_v,
+        key,
+        handle,
+    } = spec;
     let slices: Vec<(String, f64)> = slices.to_vec();
     let total: f64 = slices.iter().map(|s| s.1).sum();
     let accent = theme.accent_cf;
     let subtle = theme.subtle_cf;
     let family = theme.font_family.clone();
     let body_pt = theme.body_size as f32;
+    let label_pt = theme.label_size as f32;
+    let shared = handle.shared.clone();
+    // Angular hit-test mirrors the draw geometry — the element is fixed-size
+    // so pointer-local coords map straight onto the drawn ring.
+    let hit_vals: Vec<f64> = slices.iter().map(|s| s.1).collect();
+    // GTT_DONUTTEST=<col>,<idx> forces a hover in test builds — injected
+    // pointer input never reaches WinUI3's content island (same workaround
+    // as the trend tooltip's GTT_TIPTEST).
+    let hover_test: Option<(u8, usize)> = std::env::var("GTT_DONUTTEST").ok().and_then(|v| {
+        let (c, i) = v.split_once(',')?;
+        Some((c.trim().parse().ok()?, i.trim().parse().ok()?))
+    });
     Border::new()
         .width(150.0)
         .height(132.0)
         .horizontal_alignment(HorizontalAlignment::Center)
+        // Transparent (not null) Background keeps the canvas hit-testable.
+        .background(Brush::Solid(Color::argb(0, 0, 0, 0)))
+        .on_pointer_moved(ctx.callback(move |e: PointerEventInfo| {
+            Msg::DonutHover(key, donut_hit(e.x, e.y, 150.0, 132.0, &hit_vals, total))
+        }))
+        .on_pointer_exited(ctx.callback(move |_| Msg::DonutHover(key, None)))
         .content(windows_canvas::canvas_invalidated(
-            &Invalidator::new(),
+            &handle.inv,
             move |ctx| {
                 use windows_canvas::{
                     ColorF, ParagraphAlignment, PathBuilder, Rect, TextAlignment, TextFormat,
@@ -433,6 +496,11 @@ fn donut(theme: &Theme, slices: &[(String, f64)], center: String) -> View {
                 let (cx, cy) = (w * 0.5, h * 0.5);
                 let r_out = (w.min(h) * 0.5 - 4.0).max(1.0);
                 let r_in = r_out * 0.62;
+                let hovered = hover_test
+                    .filter(|(c, _)| *c == key)
+                    .map(|(_, i)| i)
+                    .or_else(|| shared.hover.get())
+                    .filter(|&i| i < slices.len());
                 let gap = if slices.len() > 1 { 0.016f32 } else { 0.0 };
                 let mut a = -std::f32::consts::FRAC_PI_2;
                 for (i, (_, v)) in slices.iter().enumerate() {
@@ -440,53 +508,121 @@ fn donut(theme: &Theme, slices: &[(String, f64)], center: String) -> View {
                     let a1 = a + span;
                     let (a0, a1c) = (a + gap, (a1 - gap).max(a + gap));
                     if a1c > a0 {
+                        // Hovered slice pops +2.5px; siblings dim when a hover
+                        // is active so the focus reads instantly.
+                        let lit = hovered == Some(i);
+                        let ro = if lit { r_out + 2.5 } else { r_out };
                         let n =
                             (((a1c - a0) / (std::f32::consts::TAU / 120.0)).ceil() as usize).max(2);
                         let mut pts = Vec::with_capacity(2 * (n + 1));
                         for k in 0..=n {
                             let t = a0 + (a1c - a0) * k as f32 / n as f32;
-                            pts.push(Vector2::new(cx + r_out * t.cos(), cy + r_out * t.sin()));
+                            pts.push(Vector2::new(cx + ro * t.cos(), cy + ro * t.sin()));
                         }
                         for k in (0..=n).rev() {
                             let t = a0 + (a1c - a0) * k as f32 / n as f32;
                             pts.push(Vector2::new(cx + r_in * t.cos(), cy + r_in * t.sin()));
                         }
                         let path = PathBuilder::new(ctx.device())?.polygon(pts)?;
-                        let color = if i == 0 {
+                        let mut color = if i == 0 {
                             accent
                         } else {
                             let (r, g, b) = SLICE_PALETTE[(i - 1) % SLICE_PALETTE.len()];
                             ColorF::from_rgb8(r, g, b)
                         };
+                        if hovered.is_some() && !lit {
+                            color.a *= 0.32;
+                        }
                         ctx.fill_path(&path, &ctx.create_solid_brush(color)?);
                     }
                     a = a1;
                 }
-                let tf = TextFormat::new_bold(&family, body_pt)?
-                    .with_alignment(TextAlignment::Center)
-                    .with_paragraph_alignment(ParagraphAlignment::Center);
                 let ink = ctx.create_solid_brush(subtle)?;
-                ctx.draw_text(
-                    &center,
-                    &tf,
-                    &Rect::new(cx - r_in + 2.0, cy - r_in, cx + r_in - 2.0, cy + r_in),
-                    &ink,
-                );
+                if let Some(i) = hovered {
+                    // Hover swaps the total for the slice's own detail.
+                    let (name, v) = &slices[i];
+                    let short: String = if name.chars().count() > 9 {
+                        crate::tf!("{}…", name.chars().take(8).collect::<String>())
+                    } else {
+                        name.clone()
+                    };
+                    let detail = format!("{:.1}% · {}", v / total * 100.0, fmt_v(*v));
+                    let tf_name = TextFormat::new_bold(&family, label_pt + 1.0)?
+                        .with_alignment(TextAlignment::Center)
+                        .with_paragraph_alignment(ParagraphAlignment::Bottom);
+                    let tf_val = TextFormat::new(&family, label_pt)?
+                        .with_alignment(TextAlignment::Center)
+                        .with_paragraph_alignment(ParagraphAlignment::Top);
+                    let name_ink = ctx.create_solid_brush(accent)?;
+                    ctx.draw_text(
+                        &short,
+                        &tf_name,
+                        &Rect::new(cx - r_in + 2.0, cy - r_in, cx + r_in - 2.0, cy - 1.0),
+                        &name_ink,
+                    );
+                    ctx.draw_text(
+                        &detail,
+                        &tf_val,
+                        &Rect::new(cx - r_in + 2.0, cy - 1.0, cx + r_in - 2.0, cy + r_in),
+                        &ink,
+                    );
+                } else {
+                    let tf = TextFormat::new_bold(&family, body_pt)?
+                        .with_alignment(TextAlignment::Center)
+                        .with_paragraph_alignment(ParagraphAlignment::Center);
+                    ctx.draw_text(
+                        &center,
+                        &tf,
+                        &Rect::new(cx - r_in + 2.0, cy - r_in, cx + r_in - 2.0, cy + r_in),
+                        &ink,
+                    );
+                }
                 Ok(())
             },
         ))
 }
 
+/// Ring hit-test: pointer-local (x,y) in the `w×h` donut box — outside the
+/// ring or in the hole → `None`; inside a slice's angular span → its index.
+/// Zero angle is 12 o'clock going clockwise, matching the draw pass.
+fn donut_hit(x: f64, y: f64, w: f64, h: f64, vals: &[f64], total: f64) -> Option<usize> {
+    let (dx, dy) = (x - w * 0.5, y - h * 0.5);
+    let dist = (dx * dx + dy * dy).sqrt();
+    let r_out = (w.min(h) * 0.5 - 4.0).max(1.0);
+    let r_in = r_out * 0.62;
+    if dist < r_in || dist > r_out || total <= 0.0 {
+        return None;
+    }
+    let a = (dy.atan2(dx) + std::f64::consts::FRAC_PI_2).rem_euclid(std::f64::consts::TAU);
+    let mut acc = 0.0;
+    for (i, v) in vals.iter().enumerate() {
+        acc += (v / total).max(0.0) * std::f64::consts::TAU;
+        if a < acc {
+            return Some(i);
+        }
+    }
+    // Float tail: the last sliver owns the rounding remainder.
+    vals.len()
+        .checked_sub(1)
+        .filter(|_| a < std::f64::consts::TAU)
+}
+
 /// One share column: title + donut + compact legend (`■ name … 42.0% · $x`).
-/// `fmt_v` renders each slice's raw value for the legend tail; `center` is
-/// the donut-hole label. Zero-total data renders an honest empty note.
+/// `spec` bundles slices/hole label/formatter/hover wiring.
+/// Zero-total data renders an honest empty note.
 pub fn donut_cell(
     theme: &Theme,
     title: String,
-    slices: &[(String, f64)],
-    center: String,
-    fmt_v: fn(f64) -> String,
+    spec: DonutSpec<'_>,
+    ctx: &mut ViewContext<Shell>,
 ) -> View {
+    let DonutSpec {
+        slices,
+        center,
+        fmt_v,
+        key,
+        handle,
+    } = spec;
     let total: f64 = slices.iter().map(|s| s.1).sum();
     let body: View = if total <= 0.0 {
         TextBlock::new()
@@ -535,7 +671,17 @@ pub fn donut_cell(
             .orientation(Orientation::Vertical)
             .spacing(6.0)
             .children([
-                donut(theme, slices, center),
+                donut(
+                    theme,
+                    DonutSpec {
+                        slices,
+                        center,
+                        fmt_v,
+                        key,
+                        handle,
+                    },
+                    ctx,
+                ),
                 StackPanel::new()
                     .orientation(Orientation::Vertical)
                     .spacing(3.0)
@@ -583,4 +729,31 @@ pub fn key_value_row(theme: &Theme, left: String, right: String) -> View {
                 divider,
             )),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::donut_hit;
+
+    // 150×132 donut box → r_out=62, r_in≈38.4, center (75,66).
+    #[test]
+    fn hit_resolves_ring_to_slice_index() {
+        let vals = [50.0, 30.0, 20.0];
+        // Right of center: slice 0 owns the first 50% of the circle.
+        assert_eq!(donut_hit(120.0, 66.0, 150.0, 132.0, &vals, 100.0), Some(0));
+        // Just clockwise of 12 o'clock → slice 0; just counterclockwise →
+        // last slice owns the rounding tail.
+        assert_eq!(donut_hit(76.0, 8.0, 150.0, 132.0, &vals, 100.0), Some(0));
+        assert_eq!(donut_hit(74.0, 8.0, 150.0, 132.0, &vals, 100.0), Some(2));
+        // Bottom center: slice 0 ended at 6 o'clock → slice 1.
+        assert_eq!(donut_hit(75.0, 120.0, 150.0, 132.0, &vals, 100.0), Some(1));
+    }
+
+    #[test]
+    fn hit_rejects_hole_outside_and_empty() {
+        let vals = [50.0, 50.0];
+        assert_eq!(donut_hit(75.0, 66.0, 150.0, 132.0, &vals, 100.0), None); // hole
+        assert_eq!(donut_hit(5.0, 5.0, 150.0, 132.0, &vals, 100.0), None); // outside
+        assert_eq!(donut_hit(120.0, 66.0, 150.0, 132.0, &vals, 0.0), None); // no data
+    }
 }

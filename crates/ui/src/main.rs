@@ -82,6 +82,8 @@ pub struct Shell {
     tray: Option<tray_icon::TrayIcon>,
     /// Trend-chart hover state + repaint handle (shared with the D2D closure).
     trend: widgets::TrendHandle,
+    /// Share-donut hover states — one per share-grid column (4 max).
+    donuts: [widgets::DonutHandle; 4],
     /// Vendor quota channels poll at this cadence (network calls stay rare).
     quota_at: Option<std::time::Instant>,
     /// Overview statistics window (persisted in ui.json).
@@ -136,6 +138,8 @@ pub enum Msg {
     /// Dwell timer fired for bar `usize` — arms the tooltip if still hovering.
     TrendTip(usize),
     TrendLeave,
+    /// Share-donut pointer hover: (column index, hovered slice or None).
+    DonutHover(u8, Option<usize>),
     /// Statistics range changed — resolved to `Range` at the selector so
     /// localized labels never leak into state handling.
     SetRange(Range),
@@ -450,6 +454,7 @@ impl Component for Shell {
             editing: std::env::var("GTT_EDIT").is_ok(),
             tray,
             trend: widgets::TrendHandle::default(),
+            donuts: std::array::from_fn(|_| widgets::DonutHandle::default()),
             quota_at: None,
             open_menu: None,
             quota_collapsed: std::collections::BTreeSet::new(),
@@ -863,6 +868,15 @@ impl Component for Shell {
                     self.trend.inv.invalidate();
                 }
             }
+            Msg::DonutHover(k, idx) => {
+                if let Some(h) = self.donuts.get_mut(k as usize) {
+                    // Unchanged → no repaint churn during pointer jitter.
+                    if h.shared.hover.get() != idx {
+                        h.shared.hover.set(idx);
+                        h.inv.invalidate();
+                    }
+                }
+            }
             Msg::QuotaDone(n, errs) => {
                 diag!("[quota] {} rows, {} errors", n, errs.len());
                 if n > 0 {
@@ -930,6 +944,7 @@ impl Component for Shell {
                     trend: &self.trend,
                     cols: self.overview_cols,
                     ruler: &self.ruler,
+                    donuts: &self.donuts,
                 },
             ),
             Page::Detail => detail_page(snap, theme, context),
