@@ -9,6 +9,7 @@
 
 mod autostart;
 mod config;
+mod fonts;
 mod i18n;
 mod pages;
 mod theme;
@@ -160,10 +161,11 @@ pub enum Msg {
     SetThemeMode(&'static str),
     /// Settings: accent override — "" restores the theme default.
     SetAccent(&'static str),
-    /// Settings: D2D chart font family — "" restores Segoe UI.
-    SetFontFamily(&'static str),
-    /// Settings: size preset — "compact" | "standard" | "large".
-    SetFontScale(&'static str),
+    /// Settings: D2D chart font family — "" restores Segoe UI. `String`
+    /// because the picker lists system fonts discovered at runtime.
+    SetFontFamily(String),
+    /// Settings: body font size (pt); title/h2/label derive from it.
+    SetFontSize(f64),
     /// Settings: UI language — "zh" | "en".
     SetLang(&'static str),
     /// Settings: Run-key launch-at-login toggle; arg is the switch's new state.
@@ -697,25 +699,18 @@ impl Component for Shell {
                 self.config.save();
             }
             Msg::SetFontFamily(v) => {
-                self.config.theme.font_family = if v.is_empty() {
-                    None
-                } else {
-                    Some(v.to_string())
-                };
+                self.config.theme.font_family = if v.is_empty() { None } else { Some(v) };
                 self.theme = Theme::resolve(&self.config.theme);
                 self.config.save();
             }
-            Msg::SetFontScale(v) => {
-                let (title, h2, body, label) = match v {
-                    "compact" => (20.0, 13.0, 11.0, 10.0),
-                    "large" => (24.0, 15.0, 13.0, 12.0),
-                    _ => (22.0, 14.0, 12.0, 11.0),
-                };
+            Msg::SetFontSize(body) => {
+                // Slider range is 9–18; title/h2/label keep their offsets.
+                let body = body.clamp(9.0, 18.0);
                 let t = &mut self.config.theme;
-                t.title_size = Some(title);
-                t.h2_size = Some(h2);
                 t.body_size = Some(body);
-                t.label_size = Some(label);
+                t.title_size = Some(body + 10.0);
+                t.h2_size = Some(body + 2.0);
+                t.label_size = Some(body - 1.0);
                 self.theme = Theme::resolve(&self.config.theme);
                 self.config.save();
             }

@@ -10,6 +10,10 @@ notify = "8.2.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tray-icon = "0.25.1"
+windows = { version = "0.62.2", features = [
+    "Win32_Globalization",
+    "Win32_Graphics_DirectWrite",
+] }
 windows-canvas = { version = "0.100.0", features = ["reactor"] }
 windows-sys = { version = "0.60.2", features = [
     "Win32_Foundation",

@@ -649,3 +649,11 @@
 - **强制层（不依赖自觉）**：`.githooks/commit-msg` 正则拒绝 `Generated with`/`Co-Authored-By: <AI|bot>`/`Signed-off-by: <AI|bot>`/`🤖` 等署名；`core.hooksPath` 已指向 `.githooks`——实测带尾注提交被拒（exit 1）、干净提交放行。
 - **声明层（多入口覆盖）**：AGENTS.md / CLAUDE.md / `.github/copilot-instructions.md` / 全局 `~/.claude/CLAUDE.md` 均写入同一硬性规则。
 - **如实限制**：钩子是本地机制——新克隆需 `git config core.hooksPath .githooks` 激活一次（已写进 AGENTS.md）；对**其他仓库**不生效，全局 hooksPath 会劫持已有钩子的项目，故未启用，靠全局 CLAUDE.md 规则兜底。
+
+## S51 字体枚举 + 字号滑块 ✅
+
+- **字体下拉**：`fonts.rs` 用 DirectWrite `GetSystemFontCollection` 枚举本机全部字体家族（与图表渲染同引擎，名字保证可解析）；优先用户 UI 语言、回落 en-US、再回落首条；进程内 OnceLock 缓存。实测下拉列出真实安装字体（含用户装的 "Aa可爱の日系中文"），UIA 选 "Bahnschrift" → `ui.json` 写入成功。
+- **字号滑块**：替代原 3 档预设，Slider 9–18pt、步进 0.5（19 档连续），拖动实时预览+持久化；title/h2/label 保持 +10/+2/−1 偏移。`Msg::SetFontScale` → `SetFontSize(f64)`。
+- **旧数据兼容**：`ui.json` 里已存的 4 个绝对字号字段原样保留，滑块按 `body_size` 读当前值。
+- **验证**：UIA 实测 slider SetValue(12→15) 回读 `body_size:15/title:25`；枚举测试断言 >10 家族且含 Segoe UI；60 测试全绿、clippy 0、触及文件 fmt 净。
+- **如实限制**：字体仍只作用于 D2D 图表文字（reactor 0.100 无 XAML font setter），行内注释保留。

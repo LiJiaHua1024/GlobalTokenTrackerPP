@@ -1525,13 +1525,6 @@ const ACCENT_OPTIONS: &[(&str, &str)] = &[
     ("#e8853d", "橙色"),
     ("#d84d5b", "红色"),
 ];
-const FONT_OPTIONS: &[(&str, &str)] = &[
-    ("", "默认（Segoe UI）"),
-    ("Microsoft YaHei", "微软雅黑"),
-    ("DengXian", "等线"),
-];
-const SCALE_OPTIONS: &[(&str, &str)] =
-    &[("compact", "紧凑"), ("standard", "标准"), ("large", "较大")];
 const LANG_OPTIONS: &[(&str, &str)] = &[("zh", "中文"), ("en", "English")];
 
 /// Dropdown picker for one setting row. ComboBox reports the selected
@@ -1599,20 +1592,56 @@ fn setting_row(
         ])
 }
 
-/// Current size preset derived from the resolved theme — a hand-edited
-/// ui.json simply shows no selection instead of a stale marker.
-fn current_scale(theme: &Theme) -> &'static str {
-    match (
-        theme.title_size,
-        theme.h2_size,
-        theme.body_size,
-        theme.label_size,
-    ) {
-        (20.0, 13.0, 11.0, 10.0) => "compact",
-        (24.0, 15.0, 13.0, 12.0) => "large",
-        (22.0, 14.0, 12.0, 11.0) => "standard",
-        _ => "",
-    }
+/// Font picker listing every DirectWrite family installed on the machine.
+/// Index 0 is the default entry; `i` maps to `families()[i-1]`. Names are
+/// shown as-is — they're already localized family names, not zh UI strings.
+fn font_dropdown(current: &str, ctx: &mut ViewContext<Shell>) -> View {
+    let families = crate::fonts::families();
+    let selected = if current.is_empty() {
+        Some(0)
+    } else {
+        families.iter().position(|f| f == current).map(|i| i + 1)
+    };
+    let labels: Vec<String> = std::iter::once(tr("默认（Segoe UI）").to_string())
+        .chain(families.iter().cloned())
+        .collect();
+    ComboBox::new()
+        .items_source(labels)
+        .selected_index(selected)
+        .min_width(220.0)
+        .on_selection_changed(ctx.callback(|idx: Option<usize>| {
+            Msg::SetFontFamily(
+                idx.and_then(|i| crate::fonts::families().get(i.wrapping_sub(1)))
+                    .filter(|_| idx.is_some_and(|i| i > 0))
+                    .cloned()
+                    .unwrap_or_default(),
+            )
+        }))
+        .into()
+}
+
+/// Body-size slider — title/h2/label keep their offsets (see `SetFontSize`),
+/// so one drag rescales the whole interface. Live-previews as it moves.
+fn size_control(theme: &Theme, ctx: &mut ViewContext<Shell>) -> View {
+    let slider: View = Slider::new()
+        .minimum(9.0)
+        .maximum(18.0)
+        .step_frequency(0.5)
+        .value(theme.body_size.clamp(9.0, 18.0))
+        .width(220.0)
+        .vertical_alignment(VerticalAlignment::Center)
+        .on_value_changed(ctx.callback(Msg::SetFontSize))
+        .into();
+    let readout: View = TextBlock::new()
+        .text(format!("{:.1}", theme.body_size))
+        .font_size(theme.body_size)
+        .min_width(30.0)
+        .vertical_alignment(VerticalAlignment::Center)
+        .into();
+    StackPanel::new()
+        .orientation(Orientation::Horizontal)
+        .spacing(12.0)
+        .children([slider, readout])
 }
 
 pub fn settings_page(config: &UiConfig, theme: &Theme, ctx: &mut ViewContext<Shell>) -> View {
@@ -1645,19 +1674,9 @@ pub fn settings_page(config: &UiConfig, theme: &Theme, ctx: &mut ViewContext<She
         theme,
         "字体",
         Some("仅作用于图表文字；界面控件字体跟随系统"),
-        setting_dropdown(
-            FONT_OPTIONS,
-            config.theme.font_family.as_deref().unwrap_or(""),
-            ctx,
-            Msg::SetFontFamily,
-        ),
+        font_dropdown(config.theme.font_family.as_deref().unwrap_or(""), ctx),
     );
-    let scale_row = setting_row(
-        theme,
-        "界面字号",
-        None,
-        setting_dropdown(SCALE_OPTIONS, current_scale(theme), ctx, Msg::SetFontScale),
-    );
+    let scale_row = setting_row(theme, "界面字号", None, size_control(theme, ctx));
     let lang_row = setting_row(
         theme,
         "语言",
