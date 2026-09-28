@@ -428,9 +428,9 @@ pub fn slice_brush(theme: &Theme, i: usize) -> Brush {
 }
 
 /// Donut canvas — annular sectors approximated by polygon paths (~3° steps;
-/// a real arc primitive isn't exposed on 0.100). The hollow center passes the
-/// card through, so no guess-the-background hole painting. `slices` arrive
-/// pre-folded (top-N + 其他); `center` is the label inside the hole.
+/// a real arc primitive isn't exposed on 0.100). The ring parks in the left
+/// h×h square of a wider box so the hover bubble has room beside it;
+/// `slices` arrive pre-folded (top-N + 其他); `center` is the label in the hole.
 /// Each donut gets its own Invalidator — sharing one across canvases draws
 /// only the first (demand canvases attach once per render anyway).
 /// Everything a share-donut needs beyond `theme`/`ctx` — bundles the cell
@@ -479,7 +479,8 @@ fn donut(theme: &Theme, spec: DonutSpec<'_>, ctx: &mut ViewContext<Shell>) -> Vi
         Some((c.trim().parse().ok()?, i.trim().parse().ok()?))
     });
     Border::new()
-        .width(150.0)
+        // Wider than the ring: the band right of it hosts the hover bubble.
+        .width(200.0)
         .height(132.0)
         // Left edge aligns with the legend rows below — centering floated
         // the ring right of the text column.
@@ -487,7 +488,7 @@ fn donut(theme: &Theme, spec: DonutSpec<'_>, ctx: &mut ViewContext<Shell>) -> Vi
         // Transparent (not null) Background keeps the canvas hit-testable.
         .background(Brush::Solid(Color::argb(0, 0, 0, 0)))
         .on_pointer_moved(ctx.callback(move |e: PointerEventInfo| {
-            Msg::DonutHover(key, donut_hit(e.x, e.y, 150.0, 132.0, &hit_vals, total))
+            Msg::DonutHover(key, donut_hit(e.x, e.y, 200.0, 132.0, &hit_vals))
         }))
         .on_pointer_exited(ctx.callback(move |_| Msg::DonutHover(key, None)))
         .content(windows_canvas::canvas_invalidated(
@@ -502,9 +503,10 @@ fn donut(theme: &Theme, spec: DonutSpec<'_>, ctx: &mut ViewContext<Shell>) -> Vi
                 if w < 40.0 || total <= 0.0 {
                     return Ok(());
                 }
-                let (cx, cy) = (w * 0.5, h * 0.5);
-                let r_out = (w.min(h) * 0.5 - 4.0).max(1.0);
-                let r_in = r_out * 0.62;
+                // Ring parks inside the left h×h square — `donut_geom` is the
+                // single source the pointer hit-test mirrors.
+                let (cx, cy, r_out, r_in) = donut_geom(w as f64, h as f64);
+                let (cx, cy, r_out, r_in) = (cx as f32, cy as f32, r_out as f32, r_in as f32);
                 let hovered = hover_test
                     .filter(|(c, _)| *c == key)
                     .map(|(_, i)| i)
@@ -512,8 +514,12 @@ fn donut(theme: &Theme, spec: DonutSpec<'_>, ctx: &mut ViewContext<Shell>) -> Vi
                     .filter(|&i| i < slices.len());
                 let gap = if slices.len() > 1 { 0.016f32 } else { 0.0 };
                 let mut a = -std::f32::consts::FRAC_PI_2;
+                let mut hover_am = None;
                 for (i, (_, v)) in slices.iter().enumerate() {
                     let span = (*v / total).max(0.0) as f32 * std::f32::consts::TAU;
+                    if hovered == Some(i) {
+                        hover_am = Some(a + span * 0.5);
+                    }
                     let a1 = a + span;
                     let (a0, a1c) = (a + gap, (a1 - gap).max(a + gap));
                     if a1c > a0 {
@@ -547,42 +553,76 @@ fn donut(theme: &Theme, spec: DonutSpec<'_>, ctx: &mut ViewContext<Shell>) -> Vi
                     a = a1;
                 }
                 let ink = ctx.create_solid_brush(subtle)?;
+                // Center always shows the total — hover detail lives in the
+                // bubble, which has room the hole never did.
+                let tf = TextFormat::new_bold(&family, body_pt)?
+                    .with_alignment(TextAlignment::Center)
+                    .with_paragraph_alignment(ParagraphAlignment::Center);
+                ctx.draw_text(
+                    &center,
+                    &tf,
+                    &Rect::new(cx - r_in + 2.0, cy - r_in, cx + r_in - 2.0, cy + r_in),
+                    &ink,
+                );
+                // Hover bubble anchored on the ring's outer edge at the slice
+                // mid-angle, clamped inside the canvas — same Fluent dark
+                // card idiom as the trend tooltip.
                 if let Some(i) = hovered {
-                    // Hover swaps the total for the slice's own detail.
                     let (name, v) = &slices[i];
-                    let short: String = if name.chars().count() > 9 {
-                        crate::tf!("{}…", name.chars().take(8).collect::<String>())
+                    let am = hover_am.unwrap_or(-std::f32::consts::FRAC_PI_2);
+                    let ar = r_out + 16.0;
+                    let (bx, by) = (cx + ar * am.cos(), cy + ar * am.sin());
+                    let (pw, ph) = (150.0f32, 58.0f32);
+                    let px = (bx - pw * 0.5).clamp(4.0, (w - pw - 4.0).max(4.0));
+                    let py = (by - ph * 0.5).clamp(4.0, (h - ph - 4.0).max(4.0));
+                    let panel = windows_canvas::RoundedRect::new(
+                        Rect::new(px, py, px + pw, py + ph),
+                        7.0,
+                        7.0,
+                    );
+                    let bg = ctx.create_solid_brush(ColorF::from_rgba8(28, 28, 30, 242))?;
+                    let frame = ctx.create_solid_brush(ColorF::from_rgba8(255, 255, 255, 36))?;
+                    ctx.fill_rounded_rect(&panel, &bg);
+                    ctx.draw_rounded_rect(&panel, &frame, 1.0);
+                    let short: String = if name.chars().count() > 18 {
+                        crate::tf!("{}…", name.chars().take(17).collect::<String>())
                     } else {
                         name.clone()
                     };
                     let detail = format!("{:.1}% · {}", v / total * 100.0, fmt_v(*v));
-                    let tf_name = TextFormat::new_bold(&family, label_pt + 1.0)?
-                        .with_alignment(TextAlignment::Center)
-                        .with_paragraph_alignment(ParagraphAlignment::Bottom);
-                    let tf_val = TextFormat::new(&family, label_pt)?
-                        .with_alignment(TextAlignment::Center)
-                        .with_paragraph_alignment(ParagraphAlignment::Top);
+                    let rank = crate::tf!("第 {} / {} 项", i + 1, slices.len());
+                    let tf_name = TextFormat::new_bold(&family, label_pt + 1.0)?;
+                    let tf_val = TextFormat::new(&family, label_pt)?;
                     let name_ink = ctx.create_solid_brush(accent)?;
+                    let body_ink =
+                        ctx.create_solid_brush(ColorF::from_rgba8(235, 235, 235, 255))?;
+                    let lh = label_pt + 4.0;
                     ctx.draw_text(
                         &short,
                         &tf_name,
-                        &Rect::new(cx - r_in + 2.0, cy - r_in, cx + r_in - 2.0, cy - 1.0),
+                        &Rect::new(px + 10.0, py + 6.0, px + pw - 10.0, py + 6.0 + lh),
                         &name_ink,
                     );
                     ctx.draw_text(
                         &detail,
                         &tf_val,
-                        &Rect::new(cx - r_in + 2.0, cy - 1.0, cx + r_in - 2.0, cy + r_in),
-                        &ink,
+                        &Rect::new(
+                            px + 10.0,
+                            py + 6.0 + lh,
+                            px + pw - 10.0,
+                            py + 6.0 + lh * 2.0,
+                        ),
+                        &body_ink,
                     );
-                } else {
-                    let tf = TextFormat::new_bold(&family, body_pt)?
-                        .with_alignment(TextAlignment::Center)
-                        .with_paragraph_alignment(ParagraphAlignment::Center);
                     ctx.draw_text(
-                        &center,
-                        &tf,
-                        &Rect::new(cx - r_in + 2.0, cy - r_in, cx + r_in - 2.0, cy + r_in),
+                        &rank,
+                        &tf_val,
+                        &Rect::new(
+                            px + 10.0,
+                            py + 6.0 + lh * 2.0,
+                            px + pw - 10.0,
+                            py + 6.0 + lh * 3.0,
+                        ),
                         &ink,
                     );
                 }
@@ -591,14 +631,26 @@ fn donut(theme: &Theme, spec: DonutSpec<'_>, ctx: &mut ViewContext<Shell>) -> Vi
         ))
 }
 
+/// Ring geometry inside the `w×h` canvas — the ring occupies the left
+/// h×h square so the right band is free for the hover bubble. Shared by the
+/// draw pass and the pointer hit-test so they can never disagree.
+fn donut_geom(w: f64, h: f64) -> (f64, f64, f64, f64) {
+    let side = w.min(h);
+    let cx = side * 0.5;
+    let cy = h * 0.5;
+    let r_out = (side * 0.5 - 4.0).max(1.0);
+    let r_in = r_out * 0.62;
+    (cx, cy, r_out, r_in)
+}
+
 /// Ring hit-test: pointer-local (x,y) in the `w×h` donut box — outside the
 /// ring or in the hole → `None`; inside a slice's angular span → its index.
 /// Zero angle is 12 o'clock going clockwise, matching the draw pass.
-fn donut_hit(x: f64, y: f64, w: f64, h: f64, vals: &[f64], total: f64) -> Option<usize> {
-    let (dx, dy) = (x - w * 0.5, y - h * 0.5);
+fn donut_hit(x: f64, y: f64, w: f64, h: f64, vals: &[f64]) -> Option<usize> {
+    let (cx, cy, r_out, r_in) = donut_geom(w, h);
+    let (dx, dy) = (x - cx, y - cy);
     let dist = (dx * dx + dy * dy).sqrt();
-    let r_out = (w.min(h) * 0.5 - 4.0).max(1.0);
-    let r_in = r_out * 0.62;
+    let total: f64 = vals.iter().sum();
     if dist < r_in || dist > r_out || total <= 0.0 {
         return None;
     }
@@ -744,25 +796,27 @@ pub fn key_value_row(theme: &Theme, left: String, right: String) -> View {
 mod tests {
     use super::donut_hit;
 
-    // 150×132 donut box → r_out=62, r_in≈38.4, center (75,66).
+    // 200×132 donut box → ring parks in the left 132×132 square:
+    // r_out=62, r_in≈38.4, center (66,66); x>132 is bubble territory.
     #[test]
     fn hit_resolves_ring_to_slice_index() {
         let vals = [50.0, 30.0, 20.0];
         // Right of center: slice 0 owns the first 50% of the circle.
-        assert_eq!(donut_hit(120.0, 66.0, 150.0, 132.0, &vals, 100.0), Some(0));
+        assert_eq!(donut_hit(120.0, 66.0, 200.0, 132.0, &vals), Some(0));
         // Just clockwise of 12 o'clock → slice 0; just counterclockwise →
         // last slice owns the rounding tail.
-        assert_eq!(donut_hit(76.0, 8.0, 150.0, 132.0, &vals, 100.0), Some(0));
-        assert_eq!(donut_hit(74.0, 8.0, 150.0, 132.0, &vals, 100.0), Some(2));
-        // Bottom center: slice 0 ended at 6 o'clock → slice 1.
-        assert_eq!(donut_hit(75.0, 120.0, 150.0, 132.0, &vals, 100.0), Some(1));
+        assert_eq!(donut_hit(67.0, 8.0, 200.0, 132.0, &vals), Some(0));
+        assert_eq!(donut_hit(65.0, 8.0, 200.0, 132.0, &vals), Some(2));
+        // Bottom-left: slice 0 ended at 6 o'clock → slice 1.
+        assert_eq!(donut_hit(30.0, 110.0, 200.0, 132.0, &vals), Some(1));
     }
 
     #[test]
     fn hit_rejects_hole_outside_and_empty() {
         let vals = [50.0, 50.0];
-        assert_eq!(donut_hit(75.0, 66.0, 150.0, 132.0, &vals, 100.0), None); // hole
-        assert_eq!(donut_hit(5.0, 5.0, 150.0, 132.0, &vals, 100.0), None); // outside
-        assert_eq!(donut_hit(120.0, 66.0, 150.0, 132.0, &vals, 0.0), None); // no data
+        assert_eq!(donut_hit(66.0, 66.0, 200.0, 132.0, &vals), None); // hole
+        assert_eq!(donut_hit(190.0, 66.0, 200.0, 132.0, &vals), None); // right band
+        assert_eq!(donut_hit(5.0, 5.0, 200.0, 132.0, &vals), None); // outside
+        assert_eq!(donut_hit(120.0, 66.0, 200.0, 132.0, &[0.0, 0.0]), None); // no data
     }
 }
