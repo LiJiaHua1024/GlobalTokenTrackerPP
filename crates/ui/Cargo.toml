@@ -26,6 +26,7 @@ windows-sys = { version = "0.60.2", features = [
 ] }
 windows-reactor = "=0.100.0"
 windows-time = { version = "0.100.0", default-features = false }
+windows-composition = { version = "0.100.0", default-features = false, features = ["reactor"] }
 
 [build-dependencies]
 winresource = "0.1"

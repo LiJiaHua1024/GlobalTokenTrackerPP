@@ -2,6 +2,7 @@
 //! title and icon. `UiConfig` orders/hides them; pages render them via `render`.
 //! Adding a widget = one registry entry + one match arm.
 
+use crate::gpu_slide::{MAX_SLIDE, Slide};
 use crate::i18n::tr;
 use crate::theme::Theme;
 use crate::{Msg, Shell, t, tf};
@@ -41,146 +42,25 @@ pub fn registry_ids() -> Vec<&'static str> {
     OVERVIEW_WIDGETS.iter().map(|(id, _, _)| *id).collect()
 }
 
-// ---------------------------------------------------------------- nav anim
+// ------------------------------------------------------------------ slide
 
-/// Page-switch slide state — closed-form spring, evaluated at paint time.
-/// `dir` +1 = forward nav (new page enters from the right, old exits left).
-pub struct NavAnim {
-    pub from: crate::Page,
-    pub dir: f64,
-    /// Wall-clock start — only the hard end-of-flight cap and diagnostics
-    /// read it; motion follows `clock`.
-    pub t0: std::time::Instant,
-    /// Animation time (secs), advanced once per tick by the frame delta
-    /// clamped to `MAX_DT`. A UI-thread stall (mounting the new page, a
-    /// swapchain being created) then pauses the motion instead of letting
-    /// the wall clock leap the springs forward — the "jump" that read as
-    /// stutter.
-    pub clock: std::cell::Cell<f64>,
-    /// Page content built once when the flight begins — without it every
-    /// ~16ms tick rebuilds two whole pages (every TextBlock/format!/canvas
-    /// closure), which is what made the slide drop frames. `View` clones
-    /// are Rc-cheap, so a tick then only allocates the ~15 margin wrappers.
-    /// Filled lazily on the first animated `view()` (needs `ViewContext`).
-    pub cache: std::cell::RefCell<Option<NavCache>>,
-    /// Rendered frames — logged once at settle under `GTT_DEBUG` so the
-    /// effective animation frame rate is observable.
-    pub frames: std::cell::Cell<u32>,
-    /// Frame-pacing probe (GTT_DEBUG only reads it): when the previous tick
-    /// was handled, the worst tick-to-tick gap, and the slowest `view()`.
-    pub last_tick: std::cell::Cell<std::time::Instant>,
-    pub first_gap_ms: std::cell::Cell<u128>,
-    pub max_gap_ms: std::cell::Cell<u128>,
-    pub max_view_ms: std::cell::Cell<u128>,
-}
-
-/// Built-once page trees for one nav flight.
-pub struct NavCache {
-    /// Entering page's raw top-level blocks — `slide_children` re-wraps
-    /// them each frame so per-block springs still move.
-    pub enter_blocks: Rc<Vec<View>>,
-    /// Leaving page fully assembled at rest — only its layer margin and
-    /// opacity change, never its content.
-    pub leave: View,
-}
-
-/// Underdamped spring position at `t` (secs): x(0)=x0, v(0)=0, target 0.
-/// ζ<1 gives the slight overshoot that reads as "springy"; ζ≥1 uses the
-/// critically-damped closed form.
-fn spring(t: f64, x0: f64, zeta: f64, omega: f64) -> f64 {
-    if t <= 0.0 {
-        return x0;
-    }
-    if zeta >= 1.0 {
-        return x0 * (-omega * t).exp() * (1.0 + omega * t);
-    }
-    let wd = omega * (1.0 - zeta * zeta).sqrt();
-    x0 * (-zeta * omega * t).exp() * ((wd * t).cos() + (zeta * omega / wd) * (wd * t).sin())
-}
-
-impl NavAnim {
-    /// Animation-time length — every spring has settled well before this.
-    const DONE_S: f64 = 0.6;
-    /// Wall-clock backstop: a pathologically slow machine still ends the
-    /// flight (the clamped clock alone would stretch it without bound).
-    const HARD_CAP_MS: u128 = 1500;
-    /// Largest animation-time step per tick (~2 vsyncs): normal frame-rate
-    /// wobble stays real-time, a genuine stall is absorbed.
-    const MAX_DT: f64 = 0.032;
-    /// Blocks beyond this animate instantly (long tables stay tables).
-    const MAX_SLIDE: usize = 10;
-
-    /// Whole-layer offset for the entering page — the big "new page slides
-    /// in from the side" motion. Per-block springs stack on top of this.
-    /// ω=15/ζ=0.97: ~240ms of travel, near-critical so the layer snaps in
-    /// instead of bouncing.
-    pub fn enter_layer(&self) -> f64 {
-        let t = self.clock.get();
-        self.dir * 430.0 * spring(t, 1.0, 0.97, 15.0)
-    }
-
-    /// Extra horizontal offset for entering block `i` — later blocks start
-    /// later, travel farther, and ride a softer spring. Blocks stay opaque:
-    /// the incoming page covers the outgoing one, so the pass reads as a
-    /// slide rather than a see-through crossfade.
-    pub fn block(&self, i: usize) -> f64 {
-        if i >= Self::MAX_SLIDE {
-            return 0.0;
-        }
-        let t = self.clock.get() - 0.012 * i as f64;
-        if t <= 0.0 {
-            return self.dir * (34.0 + 10.0 * i as f64);
-        }
-        let k = (180.0 - 13.0 * i as f64).max(60.0);
-        let zeta = 0.82 + 0.008 * i as f64;
-        spring(t, self.dir * (34.0 + 10.0 * i as f64), zeta, k.sqrt())
-    }
-
-    /// Opacity for the leaving page, `None` once it is fully faded (caller
-    /// then drops the layer so its subtree stops costing layout per tick).
-    /// Opacity-only by design: it is a compositor property — a margin would
-    /// re-arrange the whole outgoing page every frame for no visual gain.
-    /// ~250ms tail backs the strip the new page hasn't covered yet.
-    pub fn exit(&self) -> Option<f64> {
-        let t = self.clock.get();
-        let op = 1.0 - t * 4.0;
-        (op > 0.0).then_some(op)
-    }
-
-    pub fn done(&self) -> bool {
-        self.clock.get() >= Self::DONE_S || self.t0.elapsed().as_millis() >= Self::HARD_CAP_MS
-    }
-
-    /// Step the clock for one tick and record the pacing probe. Called from
-    /// the tick handler only — `view()` just reads `clock`, so every render
-    /// between ticks sees one consistent animation time.
-    pub fn advance(&self) {
-        let now = std::time::Instant::now();
-        let gap = now.duration_since(self.last_tick.replace(now));
-        if self.frames.get() == 0 {
-            self.first_gap_ms.set(gap.as_millis());
-        } else {
-            self.max_gap_ms
-                .set(self.max_gap_ms.get().max(gap.as_millis()));
-        }
-        self.clock
-            .set(self.clock.get() + gap.as_secs_f64().min(Self::MAX_DT));
-    }
-}
-
-/// Wrap each top-level page block in a slide driver — the margin trick
-/// (`left=+off, right=-off`) translates without changing width. The Border
-/// wraps unconditionally so the anim→rest transition diffs margins instead
-/// of remounting subtrees (canvas swapchains would flash on settle).
-pub fn slide_children(children: Vec<View>, anim: Option<&NavAnim>) -> Vec<View> {
+/// Wrap each top-level page block so it can be moved on its own. The wrapper
+/// is always a `Grid` (rest and flight alike) so nothing remounts when a
+/// flight starts or ends — canvas swapchains would flash.
+///
+/// The motion itself is compositor-driven (`gpu_slide`): the first
+/// `MAX_SLIDE` wrappers of a page are bound to `LayerHost`s whose Visuals get
+/// key-frame animations when that page enters. Layout is never touched.
+pub fn slide_children(children: Vec<View>, slide: &Slide) -> Vec<View> {
     children
         .into_iter()
         .enumerate()
         .map(|(i, v)| {
-            let off = anim.map(|a| a.block(i)).unwrap_or(0.0);
-            Border::new()
-                .margin(Thickness::new(off, 0.0, -off, 0.0))
-                .content(v)
+            let mut wrap = Grid::new();
+            if i < MAX_SLIDE {
+                wrap = wrap.element_ref(&slide.hosts[i].r);
+            }
+            wrap.keyed_children([KeyedView::new("c", v)])
         })
         .collect()
 }
@@ -991,72 +871,5 @@ mod tests {
         assert_eq!(donut_hit(190.0, 66.0, 200.0, 132.0, &vals), None); // right band
         assert_eq!(donut_hit(5.0, 5.0, 200.0, 132.0, &vals), None); // outside
         assert_eq!(donut_hit(120.0, 66.0, 200.0, 132.0, &[0.0, 0.0]), None); // no data
-    }
-}
-
-#[cfg(test)]
-mod nav_clock_tests {
-    use super::*;
-    use std::cell::{Cell, RefCell};
-    use std::time::{Duration, Instant};
-
-    /// A flight whose previous tick was handled `since_tick` ago and which
-    /// started `since_start` ago (wall clock).
-    fn anim(since_tick: Duration, since_start: Duration) -> NavAnim {
-        let now = Instant::now();
-        NavAnim {
-            from: crate::Page::Overview,
-            dir: 1.0,
-            t0: now.checked_sub(since_start).expect("instant underflow"),
-            clock: Cell::new(0.0),
-            cache: RefCell::new(None),
-            frames: Cell::new(1),
-            last_tick: Cell::new(now.checked_sub(since_tick).expect("instant underflow")),
-            first_gap_ms: Cell::new(0),
-            max_gap_ms: Cell::new(0),
-            max_view_ms: Cell::new(0),
-        }
-    }
-
-    #[test]
-    fn a_ui_stall_moves_the_clock_by_one_capped_step_only() {
-        // 400ms hitch (mounting a page, creating a GPU device…) must not
-        // leap the springs forward by 400ms.
-        let a = anim(Duration::from_millis(400), Duration::from_millis(400));
-        a.advance();
-        assert!(
-            (a.clock.get() - NavAnim::MAX_DT).abs() < 1e-9,
-            "{}",
-            a.clock.get()
-        );
-        assert!(a.max_gap_ms.get() >= 400);
-    }
-
-    #[test]
-    fn a_normal_frame_gap_stays_real_time() {
-        let a = anim(Duration::from_millis(12), Duration::from_millis(12));
-        a.advance();
-        let c = a.clock.get();
-        assert!((0.012..NavAnim::MAX_DT).contains(&c), "{c}");
-    }
-
-    #[test]
-    fn done_follows_animation_time_not_just_wall_time() {
-        let a = anim(Duration::ZERO, Duration::from_millis(100));
-        assert!(!a.done());
-        a.clock.set(NavAnim::DONE_S);
-        assert!(a.done());
-    }
-
-    #[test]
-    fn wall_clock_backstop_ends_a_starved_flight() {
-        // Every tick clamped and the machine crawling: animation time never
-        // reaches DONE_S, but the flight must still end.
-        let a = anim(
-            Duration::ZERO,
-            Duration::from_millis(NavAnim::HARD_CAP_MS as u64 + 50),
-        );
-        assert!(a.clock.get() < NavAnim::DONE_S);
-        assert!(a.done());
     }
 }

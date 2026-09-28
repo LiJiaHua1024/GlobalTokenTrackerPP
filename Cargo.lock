@@ -814,6 +814,7 @@ dependencies = [
  "tray-icon",
  "windows",
  "windows-canvas",
+ "windows-composition",
  "windows-reactor",
  "windows-sys 0.60.2",
  "windows-time",
@@ -2545,6 +2546,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e884f6b14b3c101363efab151e89271b4da599d1e29d945023f92656b23020c2"
 dependencies = [
  "windows-core 0.100.0",
+]
+
+[[package]]
+name = "windows-composition"
+version = "0.100.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdb573bf9a0bd555256a62ef2a1ddf024387b02378d8080272d29c17f6bd67f4"
+dependencies = [
+ "windows-collections 0.100.0",
+ "windows-core 0.100.0",
+ "windows-numerics 0.100.0",
+ "windows-time",
 ]
 
 [[package]]

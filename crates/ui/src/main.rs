@@ -11,6 +11,7 @@ mod autostart;
 mod close_hook;
 mod config;
 mod fonts;
+mod gpu_slide;
 mod i18n;
 mod pages;
 mod theme;
@@ -25,6 +26,7 @@ use globaltokentracker_core::store::{EventRow, PriceRow, SourceHealth, default_d
 use globaltokentracker_core::viewmodel::fmt;
 use globaltokentracker_core::viewmodel::{Range, day_start_ms};
 use globaltokentracker_core::{Engine, OverviewVm, Store};
+use gpu_slide::{Flight, LayerHost, MAX_SLIDE, Phase, Slide};
 use i18n::tr;
 use pages::*;
 use std::path::PathBuf;
@@ -150,10 +152,22 @@ pub struct Shell {
     /// Overview reflow column count — driven by the width ruler's
     /// Metrics events (4 until the first measurement lands).
     overview_cols: usize,
-    /// Page-switch slide mid-flight — the new page's top-level blocks spring
-    /// in horizontally (each with its own damping/velocity) while the old
-    /// page slides out on a second layer. `None` when at rest.
-    nav_anim: Option<widgets::NavAnim>,
+    /// Page-switch in progress — the new page's top-level blocks spring in
+    /// (each with its own damping/velocity) while the old page is pushed out
+    /// on a second layer; all of it runs on the compositor (`gpu_slide`).
+    /// `None` when at rest.
+    flight: Option<Flight>,
+    flight_seq: u64,
+    /// Two page layers take turns showing the page: `rest_idx` is the one
+    /// showing it at rest; a flight mounts the new page in the other, slides
+    /// both, then the old one unmounts (see `view`). Each layer has its
+    /// composition host and one host per block wrapper (first `MAX_SLIDE`).
+    layer_hosts: [LayerHost; 2],
+    block_hosts: [[LayerHost; MAX_SLIDE]; 2],
+    rest_idx: usize,
+    /// Blocks in the current page's last build (how many block hosts must be
+    /// ready before a flight can start).
+    block_count: std::cell::Cell<usize>,
     /// Close prompt dialog open (title-bar X swallowed by close_hook).
     close_prompt: bool,
     /// "记住我的选择" checkbox inside the close prompt — persists whichever
@@ -226,8 +240,11 @@ pub enum Msg {
     SetTableWidth(f64),
     /// Post-slide stagger: let the next Overview chart mount.
     CanvasStage,
-    /// One animation frame of the nav slide — chained until NavAnim::done.
-    NavAnimTick,
+    /// Flight `id`: new page is mounted — start the compositor animations
+    /// (polled until every host's visual has resolved).
+    NavGo(u64),
+    /// Flight `id` has run its course — drop the leaving layer.
+    NavSettled(u64),
     /// Event sink for RadioButton uncheck transitions — nothing to do.
     Noop,
     /// Settings: window theme — "system" | "light" | "dark".
@@ -260,6 +277,19 @@ pub enum Msg {
 }
 
 const DETAIL_PAGE_SIZE: i64 = 200;
+/// Effect / element keys for the two page layers and their block hosts.
+const LAYER_HOST_KEYS: [&str; 2] = ["host-l0", "host-l1"];
+const LAYER_KEYS: [&str; 2] = ["layer0", "layer1"];
+const BLOCK_HOST_KEYS: [[&str; MAX_SLIDE]; 2] = [
+    [
+        "host-0b0", "host-0b1", "host-0b2", "host-0b3", "host-0b4", "host-0b5", "host-0b6",
+        "host-0b7", "host-0b8", "host-0b9",
+    ],
+    [
+        "host-1b0", "host-1b1", "host-1b2", "host-1b3", "host-1b4", "host-1b5", "host-1b6",
+        "host-1b7", "host-1b8", "host-1b9",
+    ],
+];
 /// Local-day range math is 24h-aligned (same convention as `day_start_ms`).
 const DAY_MS: i64 = 86_400_000;
 /// Spec §6.9: quota polling is low-frequency by design.
@@ -554,7 +584,12 @@ impl Component for Shell {
             prices_refreshing: false,
             views_stale: true,
             overview_cols: 4,
-            nav_anim: None,
+            flight: None,
+            flight_seq: 0,
+            layer_hosts: std::array::from_fn(|_| LayerHost::default()),
+            block_hosts: std::array::from_fn(|_| std::array::from_fn(|_| LayerHost::default())),
+            rest_idx: 0,
+            block_count: std::cell::Cell::new(0),
             close_prompt: false,
             close_remember: false,
             ruler: ElementRef::new(),
@@ -564,7 +599,7 @@ impl Component for Shell {
     fn update(&mut self, message: Msg, context: &ComponentContext<Self>) {
         match message {
             Msg::Loaded(outcome) => {
-                let (mut fresh, mut first_snapshot) = (false, false);
+                let mut fresh = false;
                 let price_due = match outcome {
                     LoadOutcome::Fresh(s) => {
                         diag!("[scan] loaded, pending_rescan={}", self.pending_rescan);
@@ -592,7 +627,6 @@ impl Component for Shell {
                             }
                         }
                         let price_due = s.price_due;
-                        first_snapshot = self.snap.is_none();
                         fresh = true;
                         self.snap = Some(*s);
                         // Test hook: GTT_NAVTEST=<nav label> fires one page
@@ -646,14 +680,6 @@ impl Component for Shell {
                 };
                 self.last_error = None;
                 self.scanning = false;
-                // A slide in flight keeps its frozen page cache: rebuilding
-                // both pages mid-flight is exactly the hitch we avoid, and
-                // the fresh data shows at settle. The one exception is the
-                // very first snapshot — the cache then holds only the
-                // "scanning…" placeholder, so it must refresh at once.
-                if first_snapshot && let Some(a) = &self.nav_anim {
-                    *a.cache.borrow_mut() = None;
-                }
                 // Tables load off their own light queries, never the scan:
                 // prefetch both once (so the first visit is instant), then
                 // keep the open one current when new data lands.
@@ -930,41 +956,16 @@ impl Component for Shell {
                 self.config.save();
             }
             Msg::Noop => {}
-            Msg::NavAnimTick => {
-                // One msg per frame — step the (stall-clamped) animation
-                // clock; the view() rebuild re-evaluates each block's
-                // closed-form spring at the new animation time.
-                if let Some(a) = &self.nav_anim {
-                    a.advance();
-                }
-                if self.nav_anim.as_ref().is_none_or(|a| a.done()) {
-                    if let Some(a) = self.nav_anim.take() {
-                        // Charts were held back for the flight — bring them
-                        // in one per frame so no single UI turn eats 5 GPU
-                        // device creations at once.
-                        self.arm_canvas_stage(context);
-                        diag!(
-                            "[nav] anim settled: {} frames in {}ms (first gap {}ms, worst gap {}ms, worst view() {}ms)",
-                            a.frames.get(),
-                            a.t0.elapsed().as_millis(),
-                            a.first_gap_ms.get(),
-                            a.max_gap_ms.get(),
-                            a.max_view_ms.get()
-                        );
-                    }
-                } else {
-                    if let Some(a) = &self.nav_anim {
-                        a.frames.set(a.frames.get() + 1);
-                    }
-                    // 8ms sleep + ~4ms thin rebuild lands ~12ms cadence —
-                    // a fresh frame is ready for every 60Hz vsync. Named but
-                    // deliberately NOT efficiency-marked: frame cadence is
-                    // latency-sensitive, stays on the P-core side.
-                    context.spawn_background(|_| {
-                        power::name_thread("gtt-anim");
-                        std::thread::sleep(std::time::Duration::from_millis(8));
-                        Msg::NavAnimTick
-                    });
+            Msg::NavGo(id) => self.nav_go(id, context),
+            Msg::NavSettled(id) => {
+                if self.flight.as_ref().is_some_and(|f| f.id == id)
+                    && let Some(f) = self.flight.take()
+                {
+                    diag!(
+                        "[nav] flight settled after {}ms",
+                        f.t0.elapsed().as_millis()
+                    );
+                    self.commit_flight(false);
                 }
             }
             // Width-ruler metrics → reflow column count changed. The
@@ -972,10 +973,15 @@ impl Component for Shell {
             Msg::SetOverviewCols(n) => self.overview_cols = n.clamp(1, 4),
             Msg::SetTableWidth(w) => self.table_w = w,
             Msg::CanvasStage => {
-                // A new slide owns the charts again — its settle re-arms us.
-                if self.nav_anim.is_none() {
+                // Not before the animation has started: the incoming page is
+                // still hidden and its visuals unresolved.
+                if self
+                    .flight
+                    .as_ref()
+                    .is_none_or(|f| f.phase == Phase::Running)
+                {
                     self.canvas_ready = self.canvas_ready.saturating_add(1);
-                    self.arm_canvas_stage(context);
+                    self.arm_canvas_stage(context, 16);
                 }
             }
             Msg::WatchFired => {
@@ -1024,32 +1030,8 @@ impl Component for Shell {
                     _ => prev,
                 };
                 if self.page != prev {
-                    diag!("[nav] {prev:?} → {:?} (anim start)", self.page);
-                    // Forward nav → new page springs in from the right while
-                    // the old page exits left; backward flips the direction.
-                    self.canvas_ready = 0;
-                    let now = std::time::Instant::now();
-                    self.nav_anim = Some(widgets::NavAnim {
-                        from: prev,
-                        dir: if (self.page as u8) > (prev as u8) {
-                            1.0
-                        } else {
-                            -1.0
-                        },
-                        t0: now,
-                        clock: std::cell::Cell::new(0.0),
-                        cache: std::cell::RefCell::new(None),
-                        frames: std::cell::Cell::new(0),
-                        last_tick: std::cell::Cell::new(now),
-                        first_gap_ms: std::cell::Cell::new(0),
-                        max_gap_ms: std::cell::Cell::new(0),
-                        max_view_ms: std::cell::Cell::new(0),
-                    });
-                    context.spawn_background(|_| {
-                        power::name_thread("gtt-anim");
-                        std::thread::sleep(std::time::Duration::from_millis(8));
-                        Msg::NavAnimTick
-                    });
+                    diag!("[nav] {prev:?} → {:?}", self.page);
+                    self.start_flight(prev, context);
                 }
                 // Sources/Prices tables: the prefetched copy renders at once
                 // (stale-while-revalidate); this light query only tops it up.
@@ -1085,27 +1067,12 @@ impl Component for Shell {
                         self.load_page_data(page, context);
                     }
                 }
-                let was_empty = match page {
-                    Page::Sources => self.sources.is_none(),
-                    _ => self.prices.is_none(),
-                };
                 match res {
                     Ok(PageData::Sources(rows)) => self.sources = Some(rows),
                     Ok(PageData::Prices(t)) => self.prices = Some(t),
                     Err(e) => {
                         diag!("[page] {page:?} load failed: {e}");
-                        return;
                     }
-                }
-                // Landed mid-slide onto a still-empty entering page (only
-                // possible before the prefetch finished): refresh the frozen
-                // cache so the table shows now rather than at settle. A
-                // top-up of an already-shown table stays frozen until settle.
-                if was_empty
-                    && page == self.page
-                    && let Some(a) = &self.nav_anim
-                {
-                    *a.cache.borrow_mut() = None;
                 }
             }
             Msg::ToggleEdit => {
@@ -1206,7 +1173,6 @@ impl Component for Shell {
     }
 
     fn view(&self, _input: &(), context: &mut ViewContext<Self>) -> View {
-        let t_view = std::time::Instant::now();
         // Publish the render locale before any `tr`/`tf!` resolves text.
         i18n::set_lang(i18n::Lang::from_config(&self.config.lang));
         // WM_CLOSE → Msg::CloseRequested (idempotent once the HWND exists).
@@ -1228,63 +1194,52 @@ impl Component for Shell {
         let snap = self.snap.as_ref();
         let theme = &self.theme;
 
-        // Slide-in-flight renders BOTH pages on stacked Grid layers: the
-        // outgoing page stays alive (springs out under the incoming one)
-        // instead of unmounting instantly. "enter" keeps its key across the
-        // transition so a settled view is never re-mounted — canvas panels
-        // (trend/donut swapchains) would otherwise flicker on every nav.
-        let mut layers: Vec<KeyedView> = Vec::with_capacity(2);
-        // While a slide is in flight both pages' content is built ONCE into
-        // the NavAnim cache — each ~16ms tick then only allocates the thin
-        // margin wrappers instead of two whole page trees (this was the
-        // frame-cost that made the slide stutter).
-        let mut cached_enter: Option<std::rc::Rc<Vec<View>>> = None;
-        if let Some(a) = &self.nav_anim {
-            if a.cache.borrow().is_none() {
-                let built = widgets::NavCache {
-                    enter_blocks: std::rc::Rc::new(self.page_blocks(self.page, snap, context)),
-                    leave: self.page_view(a.from, snap, context, None),
-                };
-                *a.cache.borrow_mut() = Some(built);
+        // Two page layers take turns. At rest one (`rest_idx`) shows the page.
+        // A flight mounts the new page in the OTHER layer — hidden until its
+        // composition visuals resolve — while the old page stays exactly where
+        // it is (the same mounted tree: real charts, scroll position intact)
+        // and the two slide as one push. Afterwards the old layer unmounts and
+        // the new one simply becomes the resting layer, so a settled page is
+        // never re-mounted (canvas swapchains would flash). Layers and the
+        // blocks of each page are composition hosts: their motion runs on the
+        // compositor, not through this view.
+        for (i, host) in self.layer_hosts.iter().enumerate() {
+            host.attach(context, LAYER_HOST_KEYS[i]);
+            for (j, b) in self.block_hosts[i].iter().enumerate() {
+                b.attach(context, BLOCK_HOST_KEYS[i][j]);
             }
-            let cache = a.cache.borrow();
-            let c = cache.as_ref().expect("nav cache filled above");
-            // exit() → None once fully faded: drop the layer entirely so the
-            // remaining ~350ms of flight pays zero leave-subtree diff/layout.
-            if let Some(op) = a.exit() {
-                layers.push(KeyedView::new(
-                    "leave",
-                    Border::new()
-                        .grid_row(0)
-                        .opacity(op)
-                        .content(c.leave.clone()),
-                ));
-            }
-            cached_enter = Some(c.enter_blocks.clone());
         }
-        // Border wraps unconditionally — keeps the enter layer's element
-        // type identical across the anim→rest boundary (no remount flash).
-        let off = self
-            .nav_anim
-            .as_ref()
-            .map(|a| a.enter_layer())
-            .unwrap_or(0.0);
-        let enter_page = match cached_enter {
-            // Cached blocks — only the margin wrappers are new this frame.
-            Some(b) => pages::frame_page(
-                theme,
-                self.page_gap(self.page),
-                (*b).clone(),
-                self.nav_anim.as_ref(),
-            ),
-            None => self.page_view(self.page, snap, context, None),
+        let rest = self.rest_idx;
+        let layer = |idx: usize, page: View, hidden: bool| {
+            KeyedView::new(
+                LAYER_KEYS[idx],
+                Grid::new()
+                    .element_ref(&self.layer_hosts[idx].r)
+                    .grid_row(0)
+                    // Layout never changes during a flight — the compositor
+                    // moves the visuals on top of it. Until the animation has
+                    // started (`Phase::Prepare`) the incoming layer is simply
+                    // not shown, so the new page can't flash at rest first;
+                    // it is revealed in the same commit the animation starts
+                    // in. (Not a fade: opacity goes 0 → 1 in one step.)
+                    .opacity(if hidden { 0.0 } else { 1.0 })
+                    .keyed_children([KeyedView::new("page", page)]),
+            )
         };
-        layers.push(KeyedView::new(
-            "enter",
-            Border::new()
-                .margin(Thickness::new(off, 0.0, -off, 0.0))
-                .content(enter_page),
-        ));
+        let mut layers: Vec<KeyedView> = Vec::with_capacity(2);
+        match &self.flight {
+            None => {
+                let page = self.page_view(self.page, rest, snap, context, self.canvas_ready);
+                layers.push(layer(rest, page, false));
+            }
+            Some(f) => {
+                let old = self.page_view(f.from, rest, snap, context, f.from_ready);
+                layers.push(layer(rest, old, false));
+                let inc = 1 - rest;
+                let new = self.page_view(self.page, inc, snap, context, self.canvas_ready);
+                layers.push(layer(inc, new, f.phase == Phase::Prepare));
+            }
+        }
         let content: View = Grid::new()
             .rows([GridLength::STAR])
             .grid_row(2)
@@ -1411,7 +1366,7 @@ impl Component for Shell {
         // Root must be a Grid: a vertical StackPanel offers children infinite
         // height, which makes the page ScrollViewer measure at full content
         // size and never scroll. Star row bounds the scroll area.
-        let root: View = Grid::new()
+        Grid::new()
             .rows([GridLength::Auto, GridLength::Auto, GridLength::STAR])
             .keyed_children([
                 KeyedView::new(
@@ -1433,12 +1388,7 @@ impl Component for Shell {
                 ),
                 KeyedView::new("overlay", overlay),
                 KeyedView::new("closedlg", close_dialog),
-            ]);
-        if let Some(a) = &self.nav_anim {
-            let ms = t_view.elapsed().as_millis();
-            a.max_view_ms.set(a.max_view_ms.get().max(ms));
-        }
-        root
+            ])
     }
 }
 
@@ -1450,13 +1400,15 @@ impl Shell {
         let _ = context.window().request_close();
     }
 
-    /// Raw top-level blocks of one page — cached per nav flight so ticks
-    /// only re-wrap them, then assembled by `page_view`/`frame_page`.
+    /// Raw top-level blocks of one page, assembled by `page_view`/`frame_page`.
+    /// `canvas_ready`: how many Overview charts may be mounted (see
+    /// `OverviewArgs`).
     fn page_blocks(
         &self,
         page: Page,
         snap: Option<&Snapshot>,
         context: &mut ViewContext<Self>,
+        canvas_ready: usize,
     ) -> Vec<View> {
         let theme = &self.theme;
         match page {
@@ -1472,7 +1424,7 @@ impl Shell {
                     cols: self.overview_cols,
                     ruler: &self.ruler,
                     donuts: &self.donuts,
-                    canvas_ready: self.canvas_ready,
+                    canvas_ready,
                 },
             ),
             Page::Detail => detail_page(
@@ -1508,22 +1460,154 @@ impl Shell {
         }
     }
 
-    /// Assemble one page for the stacked-layer host. `anim` is `Some` only
-    /// on the entering layer — the leaving layer renders at rest (its
-    /// whole-page offset comes from the layer wrapper, not block springs).
+    /// Assemble one page for page layer `layer` — its blocks bind to that
+    /// layer's block hosts.
     fn page_view(
         &self,
         page: Page,
+        layer: usize,
         snap: Option<&Snapshot>,
         context: &mut ViewContext<Self>,
-        anim: Option<&widgets::NavAnim>,
+        canvas_ready: usize,
     ) -> View {
+        let blocks = self.page_blocks(page, snap, context, canvas_ready);
+        if page == self.page {
+            self.block_count.set(blocks.len());
+        }
         pages::frame_page(
             &self.theme,
             self.page_gap(page),
-            self.page_blocks(page, snap, context),
-            anim,
+            blocks,
+            &Slide {
+                hosts: &self.block_hosts[layer],
+            },
         )
+    }
+
+    /// Begin a page switch. Needs the resting layer's composition visual (its
+    /// width is the slide distance); until that has resolved — the very first
+    /// moments after launch — or when the GPU slide is off, the page just
+    /// switches instantly.
+    fn start_flight(&mut self, from: Page, context: &ComponentContext<Self>) {
+        // A flight still gliding: the page that was arriving becomes the
+        // resting one (snapped home) and this switch starts from it.
+        if self.flight.take().is_some() {
+            self.commit_flight(true);
+        }
+        let rest = self.rest_idx;
+        let inc = 1 - rest;
+        let w = self.layer_hosts[rest].width().filter(|w| *w >= 1.0);
+        let Some(w) = w.filter(|_| gpu_slide::enabled()) else {
+            diag!("[nav] gpu slide unavailable — instant switch");
+            self.canvas_ready = usize::MAX;
+            return;
+        };
+        // Forward nav → new page enters from the right and the old one is
+        // pushed out to the left; backward flips the direction.
+        let dir = if (self.page as u8) > (from as u8) {
+            1.0
+        } else {
+            -1.0
+        };
+        // The incoming layer is a fresh element: forget stale visuals so
+        // `nav_go` waits for its own.
+        self.layer_hosts[inc].reset();
+        self.block_hosts[inc].iter().for_each(LayerHost::reset);
+        let from_ready = std::mem::replace(&mut self.canvas_ready, 0);
+        self.flight_seq += 1;
+        let id = self.flight_seq;
+        self.flight = Some(Flight {
+            id,
+            from,
+            dir,
+            w,
+            phase: Phase::Prepare,
+            from_ready,
+            waited: 0,
+            t0: std::time::Instant::now(),
+        });
+        self.arm_nav_go(id, context);
+    }
+
+    /// The arriving page becomes the resting layer; the leaving layer's
+    /// element unmounts on the next `view()`. `snap`: it may still be
+    /// gliding (interrupted flight) — pull it home.
+    fn commit_flight(&mut self, snap: bool) {
+        let old = self.rest_idx;
+        let new = 1 - old;
+        if snap {
+            self.layer_hosts[new].snap_home();
+            self.block_hosts[new].iter().for_each(LayerHost::snap_home);
+        }
+        self.layer_hosts[old].reset();
+        self.block_hosts[old].iter().for_each(LayerHost::reset);
+        self.rest_idx = new;
+    }
+
+    /// One frame's wait before checking the new page's visuals.
+    fn arm_nav_go(&self, id: u64, context: &ComponentContext<Self>) {
+        context.spawn_background(move |_| {
+            power::name_thread("gtt-anim");
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            Msg::NavGo(id)
+        });
+    }
+
+    /// The new page is mounted: start the compositor animations. Visuals of
+    /// freshly mounted elements resolve one composition commit after mount,
+    /// so poll a few frames for them; whatever is still missing then simply
+    /// rides its layer (no per-block spring) rather than delaying the slide.
+    fn nav_go(&mut self, id: u64, context: &ComponentContext<Self>) {
+        let n = self.block_count.get().min(MAX_SLIDE);
+        let (rest, inc) = (self.rest_idx, 1 - self.rest_idx);
+        let Some(f) = self.flight.as_mut().filter(|f| f.id == id) else {
+            return;
+        };
+        if f.phase != Phase::Prepare {
+            return;
+        }
+        f.waited += 1;
+        let ready = self.layer_hosts[inc].visual().is_some()
+            && self.layer_hosts[rest].visual().is_some()
+            && self.block_hosts[inc][..n]
+                .iter()
+                .all(|h| h.visual().is_some());
+        if !ready && f.waited < 8 {
+            self.arm_nav_go(id, context);
+            return;
+        }
+        let (dir, w) = (f.dir, f.w);
+        let total = std::time::Duration::from_secs_f64(gpu_slide::FLIGHT_S);
+        // Start the incoming layer first: without it moving there is nothing
+        // to show, so give up and switch instantly.
+        if !self.layer_hosts[inc].slide_x(&gpu_slide::enter_frames(dir, w), total) {
+            diag!("[nav] incoming layer not animatable — instant switch");
+            self.flight = None;
+            self.commit_flight(false);
+            self.canvas_ready = usize::MAX;
+            return;
+        }
+        let left = self.layer_hosts[rest].slide_x(&gpu_slide::leave_frames(dir, w), total);
+        let blocks = (0..n)
+            .filter(|&i| self.block_hosts[inc][i].slide_x(&gpu_slide::block_frames(i, dir), total))
+            .count();
+        f.phase = Phase::Running;
+        diag!(
+            "[nav] gpu flight: w={w:.0} leave={left} blocks={blocks}/{n} after {}ms",
+            f.t0.elapsed().as_millis()
+        );
+        // Charts mount in the slide's back half, one per frame: the page is
+        // nearly in place by then, and the compositor keeps the motion smooth
+        // while the UI thread pays for the GPU devices — so no single turn eats
+        // all five, and nothing waits for the flight to end.
+        self.arm_canvas_stage(context, gpu_slide::CHARTS_AFTER_MS);
+        context.spawn_background(move |_| {
+            power::name_thread("gtt-anim");
+            std::thread::sleep(std::time::Duration::from_secs_f64(
+                gpu_slide::SETTLE_AFTER_S,
+            ));
+            Msg::NavSettled(id)
+        });
     }
 
     /// Low-frequency vendor quota poll (spec §6.9) — `GTT_NO_QUOTA` disables.
@@ -1596,18 +1680,19 @@ impl Shell {
         }
     }
 
-    /// Schedule the next chart-mount step, or finish the stagger (all
-    /// charts allowed, and always so off the Overview page — nothing to mount).
-    fn arm_canvas_stage(&mut self, context: &ComponentContext<Self>) {
+    /// Schedule the next chart-mount step in `delay_ms`, or finish the
+    /// stagger (all charts allowed, and always so off the Overview page —
+    /// nothing to mount).
+    fn arm_canvas_stage(&mut self, context: &ComponentContext<Self>, delay_ms: u64) {
         // trend + 4 donuts
         const CHARTS: usize = 5;
         if self.page != Page::Overview || self.canvas_ready >= CHARTS {
             self.canvas_ready = usize::MAX;
             return;
         }
-        context.spawn_background(|_| {
+        context.spawn_background(move |_| {
             power::name_thread("gtt-anim");
-            std::thread::sleep(std::time::Duration::from_millis(16));
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
             Msg::CanvasStage
         });
     }

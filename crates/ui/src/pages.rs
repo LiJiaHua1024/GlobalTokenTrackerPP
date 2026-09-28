@@ -3,6 +3,7 @@
 //! reorder/hide them (persisted in ui.json) without touching code.
 
 use crate::config::{REFRESH_OPTIONS, UiConfig, refresh_label};
+use crate::gpu_slide::Slide;
 use crate::i18n::{self, tr};
 use crate::theme::Theme;
 use crate::widgets as w;
@@ -215,17 +216,10 @@ fn page_frame(theme: &Theme, body: View) -> View {
 }
 
 /// Assemble raw top-level blocks into the scrolled page — each block gets a
-/// margin wrapper so it can ride its own spring during a nav slide (rest
-/// state uses the same wrappers at margin 0, so settling never remounts).
-/// Pages return raw blocks so a nav flight can cache them once and
-/// re-wrap per frame without rebuilding page content.
-pub fn frame_page(
-    theme: &Theme,
-    gap: f64,
-    blocks: Vec<View>,
-    anim: Option<&w::NavAnim>,
-) -> View {
-    page_frame(theme, vstack(gap, w::slide_children(blocks, anim)))
+/// wrapper so it can ride its own compositor spring during a nav slide (rest
+/// state uses the same wrappers, so settling never remounts).
+pub fn frame_page(theme: &Theme, gap: f64, blocks: Vec<View>, slide: &Slide) -> View {
+    page_frame(theme, vstack(gap, w::slide_children(blocks, slide)))
 }
 
 // ---------------------------------------------------------------- overview
@@ -899,10 +893,11 @@ pub struct OverviewArgs<'a> {
     /// Hover state per share-donut column (pointer → Msg → invalidation).
     pub donuts: &'a [w::DonutHandle; 4],
     /// How many of the page's D2D charts may be mounted yet (trend = 1st,
-    /// then one donut per stage). Held at 0 through a slide and stepped up
-    /// one per ~16ms after it settles (`Msg::CanvasStage`); the rest of the
-    /// time it sits at `usize::MAX`. Anything not yet allowed renders as a
-    /// same-size placeholder (`widgets::defer_slot`).
+    /// then one donut per stage). Held at 0 while a slide starts, then
+    /// stepped up one per ~16ms from the slide's back half
+    /// (`Msg::CanvasStage`); the rest of the time it sits at `usize::MAX`.
+    /// Anything not yet allowed renders as a same-size placeholder
+    /// (`widgets::defer_slot`).
     pub canvas_ready: usize,
 }
 
