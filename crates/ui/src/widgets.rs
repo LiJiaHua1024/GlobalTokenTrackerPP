@@ -86,16 +86,17 @@ fn spring(t: f64, x0: f64, zeta: f64, omega: f64) -> f64 {
 
 impl NavAnim {
     /// Hard cap — every spring has settled well before this.
-    const DONE_MS: u128 = 950;
+    const DONE_MS: u128 = 700;
     /// Blocks beyond this animate instantly (long tables stay tables).
     const MAX_SLIDE: usize = 10;
 
     /// Whole-layer offset for the entering page — the big "new page slides
     /// in from the side" motion. Per-block springs stack on top of this.
-    /// ω=8.5/ζ=0.95: ~400ms of readable travel with a barely-there settle.
+    /// ω=13.5/ζ=0.97: ~280ms of travel, near-critical so the layer snaps in
+    /// instead of bouncing.
     pub fn enter_layer(&self) -> f64 {
         let t = self.t0.elapsed().as_secs_f64();
-        self.dir * 460.0 * spring(t, 1.0, 0.95, 8.5)
+        self.dir * 460.0 * spring(t, 1.0, 0.97, 13.5)
     }
 
     /// Extra horizontal offset for entering block `i` — later blocks start
@@ -106,23 +107,24 @@ impl NavAnim {
         if i >= Self::MAX_SLIDE {
             return 0.0;
         }
-        let t = self.t0.elapsed().as_secs_f64() - 0.024 * i as f64;
+        let t = self.t0.elapsed().as_secs_f64() - 0.014 * i as f64;
         if t <= 0.0 {
-            return self.dir * (46.0 + 15.0 * i as f64);
+            return self.dir * (38.0 + 11.0 * i as f64);
         }
-        let k = (150.0 - 10.0 * i as f64).max(60.0);
-        let zeta = 0.80 + 0.012 * i as f64;
-        spring(t, self.dir * (46.0 + 15.0 * i as f64), zeta, k.sqrt())
+        let k = (170.0 - 12.0 * i as f64).max(60.0);
+        let zeta = 0.82 + 0.010 * i as f64;
+        spring(t, self.dir * (38.0 + 11.0 * i as f64), zeta, k.sqrt())
     }
 
     /// (offset, opacity) for the leaving page — slides against `dir` while
-    /// fading out under the incoming (opaque) layer. The ~500ms tail keeps
-    /// it backing the region the new page hasn't covered yet (otherwise the
-    /// Mica backdrop shows through to the desktop mid-flight).
+    /// fading out under the incoming (opaque) layer. ~310ms tail: just long
+    /// enough to back the strip the new page hasn't covered yet (otherwise
+    /// the Mica backdrop shows through to the desktop mid-flight), short
+    /// enough that the pass reads as a slide, not a crossfade.
     pub fn exit(&self) -> (f64, f64) {
         let t = self.t0.elapsed().as_secs_f64();
-        let p = 1.0 - spring(t, 1.0, 0.9, 15.0);
-        (-self.dir * 120.0 * p, (1.0 - t * 2.0).max(0.0))
+        let p = 1.0 - spring(t, 1.0, 0.9, 20.0);
+        (-self.dir * 90.0 * p, (1.0 - t * 3.2).max(0.0))
     }
 
     pub fn done(&self) -> bool {
