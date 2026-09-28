@@ -24,6 +24,14 @@ fn cell(col: i32, v: View) -> View {
     Border::new().grid_column(col).content(v)
 }
 
+/// Wrap-grid cell: right+bottom margin supplies the gap a Grid's
+/// `column_spacing` would (VariableSizedWrapGrid has no spacing property).
+fn wrap_cell(gap: f64, v: View) -> View {
+    Border::new()
+        .margin(Thickness::new(0.0, 0.0, gap, gap))
+        .content(v)
+}
+
 /// Quota row where the percent earns a tone badge (>=50% only — sparingly).
 fn quota_row_badged(
     theme: &Theme,
@@ -257,18 +265,15 @@ fn overview_widget(
     let vm = &s.vm;
     let rl = tr(vm.range.label());
     match id {
+        // VariableSizedWrapGrid reflows the cards: 4-across at normal width,
+        // 3/2/1 columns as the window narrows — no fixed-column squeeze.
         "stats" => Some(
-            Grid::new()
-                .columns([
-                    GridLength::STAR,
-                    GridLength::STAR,
-                    GridLength::STAR,
-                    GridLength::STAR,
-                ])
-                .column_spacing(theme.gap)
-                .children([
-                    cell(
-                        0,
+            VariableSizedWrapGrid::new()
+                .orientation(Orientation::Horizontal)
+                .item_width(250.0)
+                .keyed_children(keyed(vec![
+                    wrap_cell(
+                        theme.gap,
                         w::stat_card(
                             theme,
                             Symbol::Calculator,
@@ -279,8 +284,8 @@ fn overview_widget(
                             None,
                         ),
                     ),
-                    cell(
-                        1,
+                    wrap_cell(
+                        theme.gap,
                         w::stat_card(
                             theme,
                             Symbol::Tag,
@@ -291,8 +296,8 @@ fn overview_widget(
                             Some((t!("估算"), w::BadgeTone::Accent)),
                         ),
                     ),
-                    cell(
-                        2,
+                    wrap_cell(
+                        theme.gap,
                         w::stat_card(
                             theme,
                             Symbol::SyncFolder,
@@ -303,8 +308,8 @@ fn overview_widget(
                             None,
                         ),
                     ),
-                    cell(
-                        3,
+                    wrap_cell(
+                        theme.gap,
                         w::stat_card(
                             theme,
                             Symbol::CalendarWeek,
@@ -322,7 +327,7 @@ fn overview_widget(
                             None,
                         ),
                     ),
-                ]),
+                ])),
         ),
         "trend" => {
             let trend_title: String = match vm.range {
@@ -404,21 +409,18 @@ fn overview_widget(
                     |v| fmt::tokens_compact(v as u64),
                 ),
             ];
-            let cells: Vec<KeyedView> = columns
+            let cells: Vec<View> = columns
                 .iter()
-                .enumerate()
-                .map(|(i, (title, slices, f))| {
+                .map(|(title, slices, f)| {
                     let total: f64 = slices.iter().map(|s| s.1).sum();
                     let center = f(total);
-                    KeyedView::new(
-                        i as u64,
-                        cell(
-                            i as i32,
-                            w::donut_cell(theme, title.clone(), slices, center, *f),
-                        ),
+                    wrap_cell(
+                        theme.gap,
+                        w::donut_cell(theme, title.clone(), slices, center, *f),
                     )
                 })
                 .collect();
+            // Donuts reflow 4→3→2→1 across as the window narrows.
             Some(w::card(
                 theme,
                 StackPanel::new()
@@ -426,10 +428,10 @@ fn overview_widget(
                     .spacing(10.0)
                     .children((
                         w::section_header(theme, Symbol::Target, &tf!("{rl} · 占比分布", rl)),
-                        Grid::new()
-                            .columns([GridLength::STAR; 4])
-                            .column_spacing(theme.gap)
-                            .keyed_children(cells),
+                        VariableSizedWrapGrid::new()
+                            .orientation(Orientation::Horizontal)
+                            .item_width(250.0)
+                            .keyed_children(keyed(cells)),
                     )),
             ))
         }

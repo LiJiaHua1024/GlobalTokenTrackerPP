@@ -672,3 +672,11 @@
 - **结构**：`donut_cell(title, slices, center, fmt_v)` 组件化；`Grid STAR×4` 列均分。维度切换器退役（四口径同屏展示），`share_dim`/`SetShareDim` 移除。
 - **修的 bug**：4 个 canvas 共享一个 `Invalidator` 时只有第一个绘制——改为每环自建 Invalidator（donut 无悬停重绘需求，重建即刷新），注释说明原因。
 - **实测**：4 环全部渲染，中心合计 `$7416`/`164.5亿` 与统计卡一致；图例百分比单位正确（修过 tf! 不支持 `{:.1}` 的问题）。
+
+## S54 总览自适应折行布局 ✅
+
+- **需求**：总览元素随窗口宽度自适应，不固定死 4 列。
+- **方案**：统计卡与占比环从 `Grid STAR×4` 换成 `VariableSizedWrapGrid`（`Orientation::Horizontal`，`item_width=250`），单元间距改由 `wrap_cell` 的 right+bottom margin（wrap grid 无 spacing 属性）。
+- **实测**（PrintWindow 抓图）：1196px → 4 列；800px → 统计卡 2×2、环图 2 列起排；560px → 统计卡单列堆叠。趋势图本就 STAR 拉伸不受影响。
+- **取舍**：单元宽度固定 250（卡片不随窗拉伸铺满——比固定列数挤压更可读）；窗口 < ~300px 仍会裁切（win 最小尺寸之下，可接受）。顶栏导航在极窄窗与品牌文字重叠是既有问题，不在本次范围。
+- **验证**：60 测试全过、clippy `-D warnings` 0；pages.rs 存在仓库级 rustfmt 漂移（非本次引入），本次改动区域 fmt 干净。
