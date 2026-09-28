@@ -49,8 +49,6 @@ pub struct UiConfig {
     /// Periodic refresh cadence in seconds; `0` = file-watch only.
     #[serde(default = "default_refresh_secs")]
     pub refresh_secs: u64,
-    /// Share-pie dimension on the overview: "model" (default) | "app".
-    pub share_dim: String,
     /// UI language: "zh" (default) | "en".
     pub lang: String,
     /// Window theme: "" | "system" | "light" | "dark" — drives
@@ -77,7 +75,6 @@ impl Default for UiConfig {
             apps: None,
             models: None,
             refresh_secs: DEFAULT_REFRESH_SECS,
-            share_dim: String::new(),
             lang: String::new(),
             window_theme: String::new(),
             autostart: false,

@@ -253,7 +253,7 @@ fn overview_widget(
     args: &OverviewArgs,
     ctx: &mut ViewContext<Shell>,
 ) -> Option<View> {
-    let (trend, config) = (args.trend, args.config);
+    let trend = args.trend;
     let vm = &s.vm;
     let rl = tr(vm.range.label());
     match id {
@@ -343,117 +343,93 @@ fn overview_widget(
             ))
         }
         "share" => {
-            let by_model = config.share_dim != "app";
-            let items: Vec<(String, f64)> = if by_model {
-                vm.by_model
-                    .iter()
-                    .map(|r| (r.name.clone(), r.cost_usd))
-                    .collect()
-            } else {
-                vm.by_app
-                    .iter()
-                    .map(|a| (app_display(&a.app).to_string(), a.cost_usd))
-                    .collect()
-            };
-            // Zero-cost slices can't draw a wedge — drop honestly.
-            let mut items: Vec<(String, f64)> =
-                items.into_iter().filter(|(_, v)| *v > 0.0).collect();
-            items.sort_by(|a, b| b.1.total_cmp(&a.1));
-            let total: f64 = items.iter().map(|i| i.1).sum();
-            let mut slices: Vec<(String, f64)> = items.iter().take(6).cloned().collect();
-            let rest: f64 = items.iter().skip(6).map(|i| i.1).sum();
-            if rest > 0.0 {
-                slices.push((t!("其他").to_string(), rest));
-            }
-            let dim_sel: View = SelectorBar::new()
-                .on_selected_text_changed(ctx.callback(|t: Option<String>| {
-                    Msg::SetShareDim(if t.unwrap_or_default() == tr("按工具") {
-                        "app"
-                    } else {
-                        "model"
-                    })
-                }))
-                .collection_slot(
-                    SelectorBarSlot::Items,
-                    [
-                        KeyedView::new(
-                            "model",
-                            SelectorBarItem::new()
-                                .text(tr("按模型"))
-                                .is_selected(by_model),
-                        ),
-                        KeyedView::new(
-                            "app",
-                            SelectorBarItem::new()
-                                .text(tr("按工具"))
-                                .is_selected(!by_model),
-                        ),
-                    ],
-                );
-            let body: View = if total <= 0.0 {
-                TextBlock::new()
-                    .text(t!("所选范围暂无可计价费用"))
-                    .font_size(theme.body_size)
-                    .foreground(theme.subtle)
-                    .into()
-            } else {
-                let mut legend: Vec<View> = Vec::new();
-                for (i, (name, v)) in slices.iter().enumerate() {
-                    let pct = format!("{:.1}", v / total * 100.0);
-                    let name_short: String = if name.chars().count() > 26 {
-                        tf!("{}…", name.chars().take(25).collect::<String>())
-                    } else {
-                        name.clone()
-                    };
-                    let swatch: View = Border::new()
-                        .width(10.0)
-                        .height(10.0)
-                        .corner_radius(CornerRadius::uniform(2.0))
-                        .background(w::slice_brush(theme, i))
-                        .vertical_alignment(VerticalAlignment::Center)
-                        .into();
-                    legend.push(
-                        StackPanel::new()
-                            .orientation(Orientation::Horizontal)
-                            .spacing(8.0)
-                            .children([
-                                swatch,
-                                TextBlock::new()
-                                    .text(name_short)
-                                    .font_size(theme.label_size)
-                                    .vertical_alignment(VerticalAlignment::Center)
-                                    .into(),
-                                Border::new().width(4.0).into(),
-                                TextBlock::new()
-                                    .text(tf!("{}%  ·  {}", pct, fmt::usd(*v)))
-                                    .font_size(theme.label_size)
-                                    .foreground(theme.subtle)
-                                    .vertical_alignment(VerticalAlignment::Center)
-                                    .into(),
-                            ]),
-                    );
+            /// Top-`keep` slices by value + 其他 fold; zero-value rows can't
+            /// draw a wedge so they're dropped honestly before folding.
+            fn fold(mut items: Vec<(String, f64)>, keep: usize) -> Vec<(String, f64)> {
+                items.retain(|(_, v)| *v > 0.0);
+                items.sort_by(|a, b| b.1.total_cmp(&a.1));
+                let rest: f64 = items.iter().skip(keep).map(|i| i.1).sum();
+                items.truncate(keep);
+                if rest > 0.0 {
+                    items.push((t!("其他").to_string(), rest));
                 }
-                StackPanel::new()
-                    .orientation(Orientation::Horizontal)
-                    .spacing(18.0)
-                    .children([
-                        w::share_donut(theme, &slices, args.share_inv),
-                        StackPanel::new()
-                            .orientation(Orientation::Vertical)
-                            .spacing(6.0)
-                            .vertical_alignment(VerticalAlignment::Center)
-                            .keyed_children(keyed(legend)),
-                    ])
+                items
+            }
+            let app_tok = |a: &globaltokentracker_core::store::AppSummary| {
+                a.input_tokens + a.output_tokens + a.cache_read_tokens
             };
+            let columns = [
+                (
+                    tf!("{} · {}", tr("按工具"), tr("费用")),
+                    fold(
+                        vm.by_app
+                            .iter()
+                            .map(|a| (app_display(&a.app).to_string(), a.cost_usd))
+                            .collect(),
+                        4,
+                    ),
+                    fmt::usd as fn(f64) -> String,
+                ),
+                (
+                    tf!("{} · {}", tr("按模型"), tr("费用")),
+                    fold(
+                        vm.by_model
+                            .iter()
+                            .map(|r| (r.name.clone(), r.cost_usd))
+                            .collect(),
+                        4,
+                    ),
+                    fmt::usd,
+                ),
+                (
+                    tf!("{} · Tokens", tr("按工具")),
+                    fold(
+                        vm.by_app
+                            .iter()
+                            .map(|a| (app_display(&a.app).to_string(), app_tok(a) as f64))
+                            .collect(),
+                        4,
+                    ),
+                    |v| fmt::tokens_compact(v as u64),
+                ),
+                (
+                    tf!("{} · Tokens", tr("按模型")),
+                    fold(
+                        vm.by_model
+                            .iter()
+                            .map(|r| (r.name.clone(), r.tokens as f64))
+                            .collect(),
+                        4,
+                    ),
+                    |v| fmt::tokens_compact(v as u64),
+                ),
+            ];
+            let cells: Vec<KeyedView> = columns
+                .iter()
+                .enumerate()
+                .map(|(i, (title, slices, f))| {
+                    let total: f64 = slices.iter().map(|s| s.1).sum();
+                    let center = f(total);
+                    KeyedView::new(
+                        i as u64,
+                        cell(
+                            i as i32,
+                            w::donut_cell(theme, title.clone(), slices, center, *f),
+                        ),
+                    )
+                })
+                .collect();
             Some(w::card(
                 theme,
                 StackPanel::new()
                     .orientation(Orientation::Vertical)
                     .spacing(10.0)
                     .children((
-                        w::section_header(theme, Symbol::Target, &tf!("{rl} · 费用占比", rl)),
-                        dim_sel,
-                        body,
+                        w::section_header(theme, Symbol::Target, &tf!("{rl} · 占比分布", rl)),
+                        Grid::new()
+                            .columns([GridLength::STAR; 4])
+                            .column_spacing(theme.gap)
+                            .keyed_children(cells),
                     )),
             ))
         }
@@ -884,8 +860,6 @@ pub struct OverviewArgs<'a> {
     pub config: &'a UiConfig,
     pub editing: bool,
     pub trend: &'a w::TrendHandle,
-    /// Repaint handle for the share donut's demand canvas.
-    pub share_inv: &'a windows_canvas::Invalidator,
 }
 
 pub fn overview_page(
