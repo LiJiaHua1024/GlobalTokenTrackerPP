@@ -19,8 +19,8 @@ mod widgets;
 use config::{REFRESH_OPTIONS, UiConfig};
 use globaltokentracker_core::adapters;
 use globaltokentracker_core::store::{EventRow, PriceRow, SourceHealth, default_db_path};
-use globaltokentracker_core::viewmodel::Range;
 use globaltokentracker_core::viewmodel::fmt;
+use globaltokentracker_core::viewmodel::{Range, day_start_ms};
 use globaltokentracker_core::{Engine, OverviewVm, Store};
 use pages::*;
 use std::path::PathBuf;
@@ -132,6 +132,12 @@ pub enum Msg {
     /// Statistics range changed — resolved to `Range` at the selector so
     /// localized labels never leak into state handling.
     SetRange(Range),
+    /// "自定义" selector item picked — adopt stored bounds (else last 7 days).
+    PickCustomRange,
+    /// Calendar picker: custom start day (local start-of-day, epoch ms).
+    SetCustomStart(i64),
+    /// Calendar picker: custom end day (local start-of-day, INCLUSIVE day).
+    SetCustomEnd(i64),
     /// Tool checkbox toggled (app name, new checked state).
     ToggleApp(String, bool),
     /// Bulk tool-scope set from the filter flyout — `None` = all tools,
@@ -170,6 +176,8 @@ pub enum Msg {
 }
 
 const DETAIL_PAGE_SIZE: i64 = 200;
+/// Local-day range math is 24h-aligned (same convention as `day_start_ms`).
+const DAY_MS: i64 = 86_400_000;
 /// Spec §6.9: quota polling is low-frequency by design.
 const QUOTA_POLL_SECS: u64 = 30 * 60;
 
@@ -371,7 +379,7 @@ impl Component for Shell {
         // The registry is authoritative — ui.json only mirrors the last write
         // (a fresh install or manual removal clears the flag honestly).
         config.autostart = autostart::enabled();
-        let range = Range::from_key(&config.range);
+        let range = Range::from_config(&config.range, config.range_start_ms, config.range_end_ms);
         let app_filter = config.apps.clone();
         let model_filter = config.models.clone();
         let page = match std::env::var("GTT_PAGE").as_deref() {
@@ -536,16 +544,35 @@ impl Component for Shell {
             }
             Msg::SetRange(r) => {
                 self.open_menu = None;
-                if r != self.range {
-                    self.range = r;
-                    self.config.range = r.key().to_string();
-                    self.config.save();
-                    // New aggregates needed — reload through the normal scan
-                    // path (data hit is small; totals/by_app are indexed).
-                    self.views_stale = true;
-                    self.scanning = false;
-                    self.start_scan(context);
-                }
+                self.set_range(r, context);
+            }
+            Msg::PickCustomRange => {
+                self.open_menu = None;
+                let (s, e) = match self.range {
+                    Range::Custom { start_ms, end_ms } => (start_ms, end_ms),
+                    _ => self
+                        .config
+                        .range_start_ms
+                        .zip(self.config.range_end_ms)
+                        .unwrap_or_else(|| (day_start_ms(6), day_start_ms(-1))),
+                };
+                self.set_range(Range::custom(s, e), context);
+            }
+            Msg::SetCustomStart(day_ms) => {
+                let e = match self.range {
+                    Range::Custom { end_ms, .. } => end_ms,
+                    _ => self.config.range_end_ms.unwrap_or(day_ms + DAY_MS),
+                };
+                self.set_range(Range::custom(day_ms, e.max(day_ms + DAY_MS)), context);
+            }
+            Msg::SetCustomEnd(day_ms) => {
+                // The picked day is inclusive → store start-of-next-day.
+                let e = day_ms + DAY_MS;
+                let s = match self.range {
+                    Range::Custom { start_ms, .. } => start_ms,
+                    _ => self.config.range_start_ms.unwrap_or(day_ms),
+                };
+                self.set_range(Range::custom(s.min(day_ms), e), context);
             }
             Msg::ToggleApp(app, on) => {
                 let all: Vec<String> = self
@@ -1030,6 +1057,24 @@ impl Shell {
             }
             Msg::QuotaDone(n, errs)
         });
+    }
+
+    /// Apply + persist a range pick, then reload aggregates (totals/by_app
+    /// are indexed; the rescan path is cheap).
+    fn set_range(&mut self, r: Range, context: &ComponentContext<Self>) {
+        if r == self.range {
+            return;
+        }
+        self.range = r;
+        self.config.range = r.key().to_string();
+        if let Range::Custom { start_ms, end_ms } = r {
+            self.config.range_start_ms = Some(start_ms);
+            self.config.range_end_ms = Some(end_ms);
+        }
+        self.config.save();
+        self.views_stale = true;
+        self.scanning = false;
+        self.start_scan(context);
     }
 
     fn start_scan(&mut self, context: &ComponentContext<Self>) {

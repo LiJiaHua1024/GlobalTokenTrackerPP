@@ -34,8 +34,12 @@ pub fn refresh_label(secs: u64) -> &'static str {
 #[serde(default)]
 pub struct UiConfig {
     pub theme: ThemeConfig,
-    /// Overview statistics range key: today|week|month|all ("" = week).
+    /// Overview statistics range key: today|week|month|all|custom ("" = week).
     pub range: String,
+    /// `custom` range bounds — local start-of-day epoch ms; `end` is the
+    /// exclusive day AFTER the last picked day. Ignored unless range=custom.
+    pub range_start_ms: Option<i64>,
+    pub range_end_ms: Option<i64>,
     /// Checked tool names for the app filter; `None`/absent = all tools.
     /// `Some(empty)` = user unchecked everything (an honest empty view).
     pub apps: Option<Vec<String>>,
@@ -66,6 +70,8 @@ impl Default for UiConfig {
         Self {
             theme: ThemeConfig::default(),
             range: String::new(),
+            range_start_ms: None,
+            range_end_ms: None,
             apps: None,
             models: None,
             refresh_secs: DEFAULT_REFRESH_SECS,

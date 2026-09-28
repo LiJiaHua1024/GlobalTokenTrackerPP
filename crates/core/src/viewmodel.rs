@@ -5,7 +5,8 @@ use crate::store::{AppSummary, EventRow, QuotaRow, Store, Totals};
 use anyhow::Result;
 
 /// Statistics window selected on the overview page. Persisted as `key` in
-/// ui.json so the choice survives restarts.
+/// ui.json so the choice survives restarts (`Custom` bounds persist
+/// separately as epoch-ms fields).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Range {
     Today,
@@ -13,10 +14,29 @@ pub enum Range {
     Week,
     Month,
     All,
+    /// Arbitrary local-day-aligned `[start_ms, end_ms)` window picked on the
+    /// calendar controls (end is exclusive = start-of-day after the last day).
+    Custom {
+        start_ms: i64,
+        end_ms: i64,
+    },
 }
 
 impl Range {
     pub const LIST: [Range; 4] = [Self::Today, Self::Week, Self::Month, Self::All];
+
+    /// Ordered, non-empty custom window (swaps inverted ends).
+    pub fn custom(start_ms: i64, end_ms: i64) -> Self {
+        let (s, e) = if start_ms <= end_ms {
+            (start_ms, end_ms)
+        } else {
+            (end_ms, start_ms)
+        };
+        Self::Custom {
+            start_ms: s,
+            end_ms: e.max(s + 1),
+        }
+    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -24,6 +44,7 @@ impl Range {
             Self::Week => "近 7 天",
             Self::Month => "近 30 天",
             Self::All => "全部",
+            Self::Custom { .. } => "自定义",
         }
     }
 
@@ -33,7 +54,18 @@ impl Range {
             Self::Week => "week",
             Self::Month => "month",
             Self::All => "all",
+            Self::Custom { .. } => "custom",
         }
+    }
+
+    /// Rebuild from persisted config: `"custom"` needs its bounds.
+    pub fn from_config(key: &str, start_ms: Option<i64>, end_ms: Option<i64>) -> Self {
+        if key == "custom"
+            && let (Some(s), Some(e)) = (start_ms, end_ms)
+        {
+            return Self::custom(s, e);
+        }
+        Self::from_key(key)
     }
 
     pub fn from_key(s: &str) -> Self {
@@ -54,14 +86,57 @@ impl Range {
     }
 
     /// Window start (epoch ms); `None` = unbounded ("all").
-    fn start_ms(self) -> Option<i64> {
+    pub fn start_ms(self) -> Option<i64> {
         match self {
             Self::Today => Some(day_start_ms(0)),
             Self::Week => Some(day_start_ms(6)),
             Self::Month => Some(day_start_ms(29)),
             Self::All => None,
+            Self::Custom { start_ms, .. } => Some(start_ms),
         }
     }
+
+    /// Window end (epoch ms, exclusive); `None` = open-ended.
+    pub fn end_ms(self) -> Option<i64> {
+        match self {
+            Self::Custom { end_ms, .. } => Some(end_ms),
+            _ => None,
+        }
+    }
+}
+
+/// Local start-of-day `days_ago` days back, epoch ms (0 = today).
+pub fn day_start_ms(days_ago: i64) -> i64 {
+    let now = jiff::Zoned::now();
+    now.start_of_day()
+        .and_then(|d| d.checked_sub(jiff::SignedDuration::from_hours(days_ago * 24)))
+        .map(|d| d.timestamp().as_millisecond())
+        .unwrap_or_default()
+}
+
+/// A calendar picker's day (encoded as UTC-midnight epoch ms) → that civil
+/// date's LOCAL start-of-day epoch ms — the range unit is "local days".
+pub fn utc_day_to_local_start(ms: i64) -> i64 {
+    let Ok(t) = jiff::Timestamp::from_millisecond(ms) else {
+        return ms;
+    };
+    let date = t.to_zoned(jiff::tz::TimeZone::UTC).date();
+    date.to_zoned(jiff::tz::TimeZone::system())
+        .map(|z| z.timestamp().as_millisecond())
+        .unwrap_or(ms)
+}
+
+/// Local start-of-day of the epoch-ms instant (day-align a picker value).
+pub fn start_of_local_day(ms: i64) -> i64 {
+    jiff::Timestamp::from_millisecond(ms)
+        .ok()
+        .and_then(|t| {
+            t.to_zoned(jiff::tz::TimeZone::system())
+                .start_of_day()
+                .ok()
+                .map(|d| d.timestamp().as_millisecond())
+        })
+        .unwrap_or(ms)
 }
 
 /// One trend bar's data: `date` is "YYYY-MM-DD" (or "HH:00" for the Today
@@ -183,14 +258,6 @@ pub fn local_utc_offset() -> String {
     format!("{sign}{:02}:{:02}", a / 3600, (a % 3600) / 60)
 }
 
-fn day_start_ms(days_ago: i64) -> i64 {
-    let now = jiff::Zoned::now();
-    now.start_of_day()
-        .and_then(|d| d.checked_sub(jiff::SignedDuration::from_hours(days_ago * 24)))
-        .map(|d| d.timestamp().as_millisecond())
-        .unwrap_or_default()
-}
-
 impl Store {
     pub fn overview(
         &self,
@@ -200,12 +267,13 @@ impl Store {
     ) -> Result<OverviewVm> {
         let t0 = day_start_ms(0);
         let start = range.start_ms();
+        let end = range.end_ms();
         let tz = local_utc_offset();
         // Per-bucket × model rows fold into trend buckets carrying the
         // tooltip payload (events + top-3 models by tokens).
         let mut buckets: std::collections::BTreeMap<String, TrendBucket> =
             std::collections::BTreeMap::new();
-        for r in self.bucket_models(start, range == Range::Today, &tz, apps, models)? {
+        for r in self.bucket_models(start, end, range == Range::Today, &tz, apps, models)? {
             let key = r.bucket.clone();
             let b = buckets.entry(key.clone()).or_insert_with(|| TrendBucket {
                 date: key,
@@ -227,14 +295,14 @@ impl Store {
                 b
             })
             .collect();
-        let span = self.totals(start, None, apps, models)?;
+        let span = self.totals(start, end, apps, models)?;
         let quotas = self.latest_quotas()?;
         Ok(OverviewVm {
             today: self.totals(Some(t0), None, apps, models)?,
             span,
             all: self.totals(None, None, apps, models)?,
             range,
-            by_app: self.by_app(start, None, apps, models)?,
+            by_app: self.by_app(start, end, apps, models)?,
             daily,
             apps: self.app_names()?,
             models: self.model_names(apps)?,
@@ -317,10 +385,7 @@ pub mod fmt {
     }
 
     pub fn tokens_total(t: &crate::store::Totals) -> u64 {
-        t.input_tokens
-            + t.output_tokens
-            + t.cache_read_tokens
-            + t.cache_write_tokens
+        t.input_tokens + t.output_tokens + t.cache_read_tokens + t.cache_write_tokens
     }
 
     /// epoch ms → "MM-DD HH:MM" local.
@@ -331,6 +396,17 @@ pub mod fmt {
         };
         t.to_zoned(jiff::tz::TimeZone::system())
             .strftime("%m-%d %H:%M")
+            .to_string()
+    }
+
+    /// epoch ms → "YYYY-MM-DD" local (custom-range bounds display).
+    pub fn day(ms: Option<i64>) -> String {
+        let Some(ms) = ms else { return "—".into() };
+        let Ok(t) = jiff::Timestamp::from_millisecond(ms) else {
+            return "—".into();
+        };
+        t.to_zoned(jiff::tz::TimeZone::system())
+            .strftime("%Y-%m-%d")
             .to_string()
     }
 

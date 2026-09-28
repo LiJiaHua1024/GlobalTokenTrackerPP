@@ -627,3 +627,17 @@
   - Claude `output_tokens_details.thinking_tokens`→reasoning 是 output 的子集展示列，汇总口径为分列展示（趋势约定 input+output+cache_read 不叠加 reasoning）——无重复计。
 - **理论边角（观察未修）**：Cline dedup 用行 `ts`（ms）——同毫秒多请求完成会撞 key，subagent 扇出理论上可能；Claude message.id 全局去重假定跨文件同 id 即同消息（fork 重写场景设计如此）。
 - **验证**：新增 3 个 zcode 测试（迟到行不漏/时间戳游标迁移/running 行不封顶），57 core + 2 ui 全过，clippy `-D warnings` 0，zcode.rs fmt 净；临时诊断 example 已删。
+
+## S50 自定义日期范围（日历选择器）✅
+
+- **需求**：统计区间原来只有 今日/近7天/近30天/全部 四个预设，参照 cc-switch 增加日历式自选日期。
+- **实现**：
+  - `Range` 新增 `Custom{start_ms,end_ms}`（Copy 保持，`[start,end)` 本地日界对齐）；预设 `end_ms=None`，Custom 带独占右端。
+  - UI：范围选择器加第 5 项"自定义"；选中后标题下出现两个 `CalendarDatePicker`（WinUI 原生月历弹层，ccswitch 同款体验）+ 当前区间文本回显。`reactor 0.100` 的 CalendarDatePicker **无 `date` setter**——不回显控件内选中值，靠旁边 `YYYY-MM-DD → YYYY-MM-DD` 文本展示当前窗口（代码注明）。
+  - 日期换算：picker 回报 UTC 午夜的 `windows_time::DateTime`（1601 纪元 100ns），`utc_day_to_local_start` 转成该 civil 日的**本地** start-of-day，窗口语义=本地日历日。
+  - 语义：截止日为**含当日**（存 end=sod(次日)）；起止倒置时 clamp 到单日；点"自定义"无历史 bounds 时默认最近 7 天窗口。
+  - 持久化：`ui.json` `range="custom"` + `range_start_ms/range_end_ms`（Option<i64> epoch ms，serde 默认兼容旧配置）；`Range::from_config` 重建。
+  - 查询链：`bucket_models` 补 `to_ms` 参数，`totals`/`by_app` 本来就有——Custom 窗口对趋势图、卡片合计、按工具分布同步生效；明细页不受 range 约束（原设计）。
+- **实测（GUI）**：选"自定义"→ 默认近7天窗口（09-22→09-28，2.76B tok/11,490 事件）；点开"起始日期"弹原生月历（2026年9月网格，今天高亮），选 25 日 → 控件回显 2026/9/25、区间文本 09-25→09-28、合计降至 1.51B/6,909、趋势/按工具同步收窄；`ui.json` 正确写入 custom 双 bound；切回"近 7 天"恢复。
+- **i18n**：新增 自定义/自定义·按天/从/至/起始日期/截止日期 六词条。
+- **验证**：59 测试全过、clippy `-D warnings` 0、触碰文件 fmt 净（query.rs 漂移已分离未混入）。

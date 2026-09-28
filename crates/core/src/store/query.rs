@@ -274,6 +274,7 @@ impl super::Store {
     pub fn bucket_models(
         &self,
         from_ms: Option<i64>,
+        to_ms: Option<i64>,
         hourly: bool,
         utc_offset: &str,
         apps: Option<&[String]>,
@@ -288,7 +289,7 @@ impl super::Store {
             "invalid utc_offset: {utc_offset}"
         );
         let fmt = if hourly { "%H:00" } else { "%Y-%m-%d" };
-        let (w, p) = scope_where(from_ms, None, apps, models);
+        let (w, p) = scope_where(from_ms, to_ms, apps, models);
         let mut st = self.conn().prepare(&format!(
             "SELECT strftime('{fmt}', ts_start/1000, 'unixepoch', '{utc_offset}') AS k,
                     {MODEL_EXPR},

@@ -109,6 +109,69 @@ fn header(theme: &Theme, title: &str, actions: Vec<View>) -> View {
         ])
 }
 
+/// WinUI `CalendarDatePicker` reports the picked day as UTC-midnight
+/// `DateTime` (100ns ticks since 1601); translate to the local day's
+/// start-of-day epoch ms so the window follows local calendar dates.
+fn picked_day_ms(d: Option<windows_time::DateTime>) -> Option<i64> {
+    let ms = (d?.universal_time - 116_444_736_000_000_000) / 10_000;
+    Some(globaltokentracker_core::viewmodel::utc_day_to_local_start(
+        ms,
+    ))
+}
+
+/// `自定义` range chrome: two calendar pickers (start day / last day) plus a
+/// text echo of the resolved window — CalendarDatePicker has no `date`
+/// setter in reactor 0.100, so the picked value is shown alongside.
+fn custom_range_row(
+    theme: &Theme,
+    ctx: &mut ViewContext<Shell>,
+    start_ms: i64,
+    end_ms: i64,
+) -> View {
+    let day_label = |v: &str| {
+        TextBlock::new()
+            .text(v)
+            .font_size(theme.body_size)
+            .foreground(theme.subtle)
+            .vertical_alignment(VerticalAlignment::Center)
+            .into()
+    };
+    // end_ms is exclusive — echo the last INCLUDED day.
+    let echo = format!(
+        "{} → {}",
+        fmt::day(Some(start_ms)),
+        fmt::day(Some(end_ms - 1))
+    );
+    let from: View = CalendarDatePicker::new()
+        .placeholder_text(tr("起始日期"))
+        .on_date_changed(
+            ctx.callback(|d: Option<windows_time::DateTime>| match picked_day_ms(d) {
+                Some(ms) => Msg::SetCustomStart(ms),
+                None => Msg::Noop,
+            }),
+        )
+        .into();
+    let to: View = CalendarDatePicker::new()
+        .placeholder_text(tr("截止日期"))
+        .on_date_changed(
+            ctx.callback(|d: Option<windows_time::DateTime>| match picked_day_ms(d) {
+                Some(ms) => Msg::SetCustomEnd(ms),
+                None => Msg::Noop,
+            }),
+        )
+        .into();
+    StackPanel::new()
+        .orientation(Orientation::Horizontal)
+        .spacing(10.0)
+        .children([
+            day_label(tr("从")),
+            from,
+            day_label(tr("至")),
+            to,
+            day_label(&echo),
+        ])
+}
+
 fn page_frame(theme: &Theme, body: View) -> View {
     let mut frame = Border::new().padding(Thickness::xy(24.0, 16.0));
     if let Some(bg) = &theme.page_bg {
@@ -264,6 +327,7 @@ fn overview_widget(
             let trend_title: String = match vm.range {
                 Range::Today => t!("今日 · 按小时").into(),
                 Range::All => t!("全部 · 按天（近 60 桶）").into(),
+                Range::Custom { .. } => t!("自定义 · 按天").into(),
                 _ => tf!("{rl}趋势", rl),
             };
             Some(w::card(
@@ -727,11 +791,15 @@ pub fn overview_page(
             .text(tr(label))
             .is_selected(s.vm.range == r)
     };
+    let is_custom = matches!(s.vm.range, Range::Custom { .. });
     let range_sel: View = SelectorBar::new()
         .on_selected_text_changed(ctx.callback(|t: Option<String>| {
             // SelectorBarItem carries only text — map the localized label
             // back to the semantic value (works in either UI language).
             let want = t.unwrap_or_default();
+            if want == tr("自定义") {
+                return Msg::PickCustomRange;
+            }
             let r = Range::LIST
                 .iter()
                 .find(|r| tr(r.label()) == want)
@@ -746,6 +814,12 @@ pub fn overview_page(
                 KeyedView::new("week", range_item("近 7 天", Range::Week)),
                 KeyedView::new("month", range_item("近 30 天", Range::Month)),
                 KeyedView::new("all", range_item("全部", Range::All)),
+                KeyedView::new(
+                    "custom",
+                    SelectorBarItem::new()
+                        .text(tr("自定义"))
+                        .is_selected(is_custom),
+                ),
             ],
         );
 
@@ -775,6 +849,10 @@ pub fn overview_page(
         .into_iter()
         .collect(),
     )];
+
+    if let Range::Custom { start_ms, end_ms } = s.vm.range {
+        col.push(custom_range_row(theme, ctx, start_ms, end_ms));
+    }
 
     for id in order.iter() {
         let id_static: &'static str = match registry.iter().find(|r| **r == id) {
