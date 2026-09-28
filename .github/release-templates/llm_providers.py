@@ -8,6 +8,11 @@
     RELEASE_NOTES_LLM_<N>_BASE_URL  可选；anthropic 默认 https://api.anthropic.com，
                                     openai 默认 https://api.openai.com/v1；私有代理地址应放 Secret
     RELEASE_NOTES_LLM_<N>_MODEL     anthropic 默认 claude-opus-5；openai 必填
+    RELEASE_NOTES_LLM_<N>_RESPONSE_FORMAT
+                                    可选；auto（默认，逐级降级）、json_object（仅 openai，跳过 json_schema）
+                                    或 none（只靠提示词约束 JSON）。已知两种格式都会拒的接口设为 none，
+                                    省掉每次注定失败的请求（DeepSeek 思考模式两种格式均返回
+                                    "This response_format type is unavailable now"）
 
 结构化输出参数不被代理或兼容接口支持时自动逐级降级为纯提示词 JSON；所有密钥只进请求头，
 不写日志。
@@ -27,6 +32,7 @@ from dataclasses import dataclass
 
 
 SLOT_COUNT = 3
+RESPONSE_FORMATS = {"anthropic": ("auto", "none"), "openai": ("auto", "json_object", "none")}
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 DEFAULT_ANTHROPIC_MODEL = "claude-opus-5"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
@@ -52,6 +58,7 @@ class ProviderSlot:
     base_url: str
     model: str
     api_key: str
+    response_format: str = "auto"
 
     @property
     def label(self) -> str:
@@ -82,7 +89,15 @@ def load_slots(environ: dict[str, str] | None = None) -> tuple[list[ProviderSlot
         else:
             problems.append(f"槽位 {index} 的 PROTOCOL={protocol!r} 无法识别，已跳过")
             continue
-        slots.append(ProviderSlot(index, protocol, base_url, model, api_key))
+        response_format = (env.get(prefix + "RESPONSE_FORMAT", "").strip() or "auto").lower()
+        allowed = RESPONSE_FORMATS[protocol]
+        if response_format not in allowed:
+            problems.append(
+                f"槽位 {index} 的 RESPONSE_FORMAT={response_format!r} 不适用于 {protocol} 协议"
+                f"（可选：{'、'.join(allowed)}），按 auto 处理"
+            )
+            response_format = "auto"
+        slots.append(ProviderSlot(index, protocol, base_url, model, api_key, response_format))
     return slots, problems
 
 
@@ -204,19 +219,27 @@ def complete(slot: ProviderSlot, system: str, messages: list[dict], schema: dict
         raise ProviderError(redact(str(error), slot)) from None
 
 
-def _complete(slot: ProviderSlot, system: str, messages: list[dict], schema: dict) -> str:
-    """结构化输出参数被拒时逐级降级，最终仍依赖提示词约束 JSON。"""
+def format_chain(slot: ProviderSlot, schema: dict) -> list:
+    """按槽位的 RESPONSE_FORMAT 给出依次尝试的格式参数；None 表示不带格式参数。"""
     if slot.protocol == "anthropic":
-        formats: list = [schema, None]
-        call = _anthropic_complete
+        chain: list = [schema, None]
     else:
-        formats = [
+        chain = [
             {"type": "json_schema", "json_schema": {"name": "release_notes", "schema": schema, "strict": True}},
             {"type": "json_object"},
             None,
         ]
-        call = _openai_complete
-    for option in formats:
+    if slot.response_format == "none":
+        return [None]
+    if slot.response_format == "json_object":
+        return chain[1:]
+    return chain
+
+
+def _complete(slot: ProviderSlot, system: str, messages: list[dict], schema: dict) -> str:
+    """结构化输出参数被拒时逐级降级，最终仍依赖提示词约束 JSON。"""
+    call = _anthropic_complete if slot.protocol == "anthropic" else _openai_complete
+    for option in format_chain(slot, schema):
         try:
             return call(slot, system, messages, option)
         except _RetryWithoutFormat as rejection:

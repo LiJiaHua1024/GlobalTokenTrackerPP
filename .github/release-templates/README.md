@@ -27,5 +27,6 @@
 | `RELEASE_NOTES_LLM_<N>_PROTOCOL` | Variable | `anthropic`（默认）或 `openai` |
 | `RELEASE_NOTES_LLM_<N>_BASE_URL` | Secret 或 Variable | 接口地址 |
 | `RELEASE_NOTES_LLM_<N>_MODEL` | Variable | 模型名 |
+| `RELEASE_NOTES_LLM_<N>_RESPONSE_FORMAT` | Variable | `auto`（默认，json_schema → json_object → 纯提示词逐级降级）、`json_object`（仅 openai）或 `none`（纯提示词）。DeepSeek 两种格式都会拒，设为 `none` |
 
 `release_notes_config.json` 控制产品语境、禁用术语、路径过滤与输出上限。

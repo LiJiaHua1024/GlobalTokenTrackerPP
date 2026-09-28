@@ -22,8 +22,13 @@ on:
         type: string
 
 concurrency:
-  group: alpha-build-${{ github.ref }}
-  cancel-in-progress: true
+  # push 构建之间新的取消旧的；手动发布单独一组，不会被随后的 push 取消。
+  group: alpha-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+env:
+  # Windows runner 的标准输出默认 cp1252，打印中文警告会 UnicodeEncodeError 并让发布步骤失败。
+  PYTHONUTF8: "1"
 
 jobs:
   verify:
@@ -296,10 +301,12 @@ jobs:
           RELEASE_NOTES_LLM_1_PROTOCOL: ${{ vars.RELEASE_NOTES_LLM_1_PROTOCOL }}
           RELEASE_NOTES_LLM_1_BASE_URL: ${{ secrets.RELEASE_NOTES_LLM_1_BASE_URL || vars.RELEASE_NOTES_LLM_1_BASE_URL }}
           RELEASE_NOTES_LLM_1_MODEL: ${{ vars.RELEASE_NOTES_LLM_1_MODEL }}
+          RELEASE_NOTES_LLM_1_RESPONSE_FORMAT: ${{ vars.RELEASE_NOTES_LLM_1_RESPONSE_FORMAT }}
           RELEASE_NOTES_LLM_2_API_KEY: ${{ secrets.RELEASE_NOTES_LLM_2_API_KEY }}
           RELEASE_NOTES_LLM_2_PROTOCOL: ${{ vars.RELEASE_NOTES_LLM_2_PROTOCOL }}
           RELEASE_NOTES_LLM_2_BASE_URL: ${{ secrets.RELEASE_NOTES_LLM_2_BASE_URL || vars.RELEASE_NOTES_LLM_2_BASE_URL }}
           RELEASE_NOTES_LLM_2_MODEL: ${{ vars.RELEASE_NOTES_LLM_2_MODEL }}
+          RELEASE_NOTES_LLM_2_RESPONSE_FORMAT: ${{ vars.RELEASE_NOTES_LLM_2_RESPONSE_FORMAT }}
         run: |
           set -euo pipefail
 
