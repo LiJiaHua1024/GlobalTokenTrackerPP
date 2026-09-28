@@ -335,6 +335,7 @@ jobs:
           fi
 
       - name: Create GitHub Stable Release
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ inputs.release_tag }}
