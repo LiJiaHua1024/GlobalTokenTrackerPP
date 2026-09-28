@@ -641,3 +641,11 @@
 - **实测（GUI）**：选"自定义"→ 默认近7天窗口（09-22→09-28，2.76B tok/11,490 事件）；点开"起始日期"弹原生月历（2026年9月网格，今天高亮），选 25 日 → 控件回显 2026/9/25、区间文本 09-25→09-28、合计降至 1.51B/6,909、趋势/按工具同步收窄；`ui.json` 正确写入 custom 双 bound；切回"近 7 天"恢复。
 - **i18n**：新增 自定义/自定义·按天/从/至/起始日期/截止日期 六词条。
 - **验证**：59 测试全过、clippy `-D warnings` 0、触碰文件 fmt 净（query.rs 漂移已分离未混入）。
+
+## S51 提交署名强制拦截 ✅
+
+- **起因**：历史提交混入 `Generated with Devin`/`Co-Authored-By` 尾注（提交模板默认值，未得用户许可）——用户明确要求杜绝复发并拦截其他 agent。
+- **清理**：重写 `6e539a1`/`e1e38b2` 两个提交去掉尾注 + force-push（cherry-pick 保序重放，重写前后树 diff 为空验证零代码变化）；全库 10 个最近提交 trailer 已全空。
+- **强制层（不依赖自觉）**：`.githooks/commit-msg` 正则拒绝 `Generated with`/`Co-Authored-By: <AI|bot>`/`Signed-off-by: <AI|bot>`/`🤖` 等署名；`core.hooksPath` 已指向 `.githooks`——实测带尾注提交被拒（exit 1）、干净提交放行。
+- **声明层（多入口覆盖）**：AGENTS.md / CLAUDE.md / `.github/copilot-instructions.md` / 全局 `~/.claude/CLAUDE.md` 均写入同一硬性规则。
+- **如实限制**：钩子是本地机制——新克隆需 `git config core.hooksPath .githooks` 激活一次（已写进 AGENTS.md）；对**其他仓库**不生效，全局 hooksPath 会劫持已有钩子的项目，故未启用，靠全局 CLAUDE.md 规则兜底。
