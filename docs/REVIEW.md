@@ -593,3 +593,37 @@
 - **schema 守卫**：`session`/`message` 缺一即报 `unsupported opencode schema`（计入数据源健康），不静默吞零。
 - **实机验证**：`scan opencode` → 488 事件入账（24 条零量中止调用被计量门槛正确跳过），总量守恒（in 38,925,612 / out 136,254 / cacheR 213,744,974 / $4.76 与源库逐分不差）；按日分布修正为 8/23–29 七天、按模型拆出 8 个 provider/model 组；旧 `opencode:session:*` 行清零，游标 `msg-v2`。
 - **验证**：54 core + 2 ui 测试全过（新增 4 个：消息级事件/迁移清除/更新重扫/schema 守卫），clippy `-D warnings` 0，触碰文件 fmt 净。
+
+## S49 跨适配器计数审计 + ZCode 水位线修正 ✅
+
+- **范围**：对照 OpenCode 三类失真（事件粒度≠计费粒度 / ts_start≠真实调用时间 / 累计值当增量）审计全部 14 个适配器，并实证核查水位线语义。
+- **审计矩阵结论**：
+  | 适配器 | 粒度 | token 语义 | 水位 | 结论 |
+  |---|---|---|---|---|
+  | Claude | 消息级（message.id 末行收编流式） | 每请求 | jsonl 字节 | ✅ |
+  | Codex | 每调用 `last_token_usage` | 增量/累计显式区分 + PrevLine 去重 | 字节+state | ✅ |
+  | Devin | 每请求 request_id（快照合并） | 每请求；会话累计字段显式不映射 | row_id 自增 | ✅ |
+  | Cursor | 每用户气泡 | 元数据级（无 token，诚实不编造） | rowid | ✅ |
+  | Qoder | 每段文件 | 元数据级 | 字节 | ✅ |
+  | OpenCode | 消息级（S48 已修） | 每消息 | time_updated+state | ✅ |
+  | Grok | 每 (prompt_id, model) | per-turn 含 nano-USD | 字节 | ✅ |
+  | WorkBuddy | 每 rawUsage/messageId | 每请求多 provider 缓存字段变体取 max | 字节 | ✅ |
+  | CodeBuddy | 快照 delta | 累计→分量差分（正确姿势） | state cum | ✅ |
+  | MiniMax | 每 LLM 调用行 | 每调用 vendor 成本 | id 自增 | ✅ |
+  | Kimi | 每 usage.record | 每调用 delta | 字节 | ✅ |
+  | Cline | 每 api_req（started/finished 配对） | 每请求；deleted_api_reqs 仅首扫 | {len,mtime} | ✅ |
+  | CommandCode | 每 assistant message | 每请求；1h/5m 缓存拆分正确 | 字节 | ✅ |
+  | **ZCode** | 每 (lrid, attempt) | 每请求 | ~~started_at~~→**rowid** | 🔧 已修 |
+- **ZCode 实锤缺陷（与 OpenCode 同族，方向相反——不是虚增是漏计）**：
+  - `model_usage` 行在**请求完成时**才写入，`started_at` 回填原始开始时刻；水位线却用 `started_at`。
+  - 真实库实测：4829 行中 **780 行迟到插入**（≤10s:267 / ≤60s:382 / >60s:131），最差 **772 秒**——长请求（实测有 189K token 的 70s+ 子代理调用）在水位推过后落库即被 `WHERE started_at > mark` 永久漏掉；1s 重叠完全不够。
+  - 修复：水位改 `rowid`（单调插入序），`adapter_state="rowid-v2"` 一次性迁移——旧时间戳游标归零全量重扫，dedup key 不变幂等合并；`status='running'` 行不封顶水位（完成后重扫补入）。
+  - 实机验证：`scan zcode` → +4773 事件、merged 0（幂等重灌无重复）、账本总量不变；源库 4829 行 = 4773 计费 + 29 cancelled + 25 error + 2 零量 completed。
+- **其余适配器的深检记录**（非 bug，存档备查）：
+  - Devin `row_id` 自增水位正确——`message_nodes` 单行单调；`sessions.metadata.total_acu_cost` 会话累计刻意不映射事件（映射会重复计）。
+  - CodeBuddy 的 `statsSnapshot` 是**会话累计计数器**——但实现恰是分量差分（`snap - persisted_cum`），delta 挂到当前消息时间戳；总量守恒、粒度打包为 Estimate 如实标注。
+  - Store upsert 语义确认：`completeness >=` 等值即覆盖 → 同维度的流式更新后写赢，最终快照必然落账（Claude/Devin 依赖此性质）。
+  - ZCode provider 排除名单与真实数据核对：库里 provider 全为 `new-provider*`/`builtin:bigmodel-start-plan`/`account:*`/UUID，无 anthropic/openai/google 行被误排。
+  - Claude `output_tokens_details.thinking_tokens`→reasoning 是 output 的子集展示列，汇总口径为分列展示（趋势约定 input+output+cache_read 不叠加 reasoning）——无重复计。
+- **理论边角（观察未修）**：Cline dedup 用行 `ts`（ms）——同毫秒多请求完成会撞 key，subagent 扇出理论上可能；Claude message.id 全局去重假定跨文件同 id 即同消息（fork 重写场景设计如此）。
+- **验证**：新增 3 个 zcode 测试（迟到行不漏/时间戳游标迁移/running 行不封顶），57 core + 2 ui 全过，clippy `-D warnings` 0，zcode.rs fmt 净；临时诊断 example 已删。
