@@ -839,3 +839,15 @@
   - **外部可见**：`Get-Process` 读运行实例——`--minimized` 隐藏态 `PriorityClass=Idle`（与任务管理器显示一致）
 - **设计说明**：IDLE 基优先级 + EcoQoS 下托盘驻留的扫描/拉取变慢是特性不是缺陷——正是效率模式语义；`gtt-tray` 空闲优先级线程在用户点击时照常唤醒（idle≠挂起）。线程级 `efficiency_thread` 保持仅 EXECUTION_SPEED（线程类无 IGNORE_TIMER_RES 常量）。
 - **验证**：67 测试全过（+1）、clippy 0、fmt 干净。
+
+## S68 切页动画再提速：退场纯淡出早摘层 + tick 加密 ✅
+
+- **复盘定位**：再次确认合成器平移无路——bindings vtable 中 `SetTranslation`/`SetTranslationTransition` 槽位被裁为 `usize` 占位，`request_*` 命令式通道只有 composition-host/swapchain/webview/native-source，**拿不到已挂载元素的属性直写**。margin 是唯一杠杆，优化转向「减少每帧布局工作量」。
+- **结构性优化**：
+  - **退场层 margin→纯 opacity**：opacity 是合成级属性不走布局，原来每帧 margin 位移让整个旧页树 arrange 纯浪费——现在淡出期间旧页树零布局开销
+  - **淡出归零即摘层**：`exit()` 返回 `Option<f64>`，opacity≤0 时不再 push "leave" 层——原来 opacity=0 的子树还在 tree 里白占 ~400ms 的每帧 diff+布局
+  - 两笔叠加：旧页树的每帧成本从「margin+opacity 双写+arrange」降到「一个 opacity 属性写」，且 250ms 后彻底消失
+- **提速参数**：`DONE_MS` 700→600；进层 ω 13.5→15、行程 460→430px；块级延迟 14i→12i、行程 38+11i→34+10i、k 170−12i→180−13i；退场淡出 312→250ms（`1−4t`）；tick sleep 10→8ms（两处 spawn 同步）。
+- **实测**（GTT_NAVTEST 交替切页 + 帧数统计）：38–48 帧/600ms ≈ **63–80fps**（debug 构建），飞行时长再 −14%；中段截图确认进层不透明盖入、无重影、无桌面透出（250ms 时新页已覆盖 ~97%）。
+- **已知上限**（如实）：margin 布局路径的每帧 arrange 无法完全消除——XAML `Translation`（GPU 路径）的 vtable 槽位存在但绑定被裁；除非上游放开 `ElementCompositionPreview::GetElementVisual` 或补 `SetTranslation` 绑定，否则已到本框架内极限。剩余可调项只有弹簧参数与 DONE_MS。
+- **验证**：67 测试全过、clippy `-D warnings` 0、改动区 fmt 干净。

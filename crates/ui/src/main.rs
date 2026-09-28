@@ -867,13 +867,13 @@ impl Component for Shell {
                     if let Some(a) = &self.nav_anim {
                         a.frames.set(a.frames.get() + 1);
                     }
-                    // 10ms sleep + ~4ms thin rebuild lands ~14ms cadence —
+                    // 8ms sleep + ~4ms thin rebuild lands ~12ms cadence —
                     // a fresh frame is ready for every 60Hz vsync. Named but
                     // deliberately NOT efficiency-marked: frame cadence is
                     // latency-sensitive, stays on the P-core side.
                     context.spawn_background(|_| {
                         power::name_thread("gtt-anim");
-                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        std::thread::sleep(std::time::Duration::from_millis(8));
                         Msg::NavAnimTick
                     });
                 }
@@ -943,7 +943,7 @@ impl Component for Shell {
                     });
                     context.spawn_background(|_| {
                         power::name_thread("gtt-anim");
-                        std::thread::sleep(std::time::Duration::from_millis(16));
+                        std::thread::sleep(std::time::Duration::from_millis(8));
                         Msg::NavAnimTick
                     });
                 }
@@ -1116,15 +1116,17 @@ impl Component for Shell {
             }
             let cache = a.cache.borrow();
             let c = cache.as_ref().expect("nav cache filled above");
-            let (off, op) = a.exit();
-            layers.push(KeyedView::new(
-                "leave",
-                Border::new()
-                    .grid_row(0)
-                    .margin(Thickness::new(off, 0.0, -off, 0.0))
-                    .opacity(op)
-                    .content(c.leave.clone()),
-            ));
+            // exit() → None once fully faded: drop the layer entirely so the
+            // remaining ~350ms of flight pays zero leave-subtree diff/layout.
+            if let Some(op) = a.exit() {
+                layers.push(KeyedView::new(
+                    "leave",
+                    Border::new()
+                        .grid_row(0)
+                        .opacity(op)
+                        .content(c.leave.clone()),
+                ));
+            }
             cached_enter = Some(c.enter_blocks.clone());
         }
         // Border wraps unconditionally — keeps the enter layer's element
