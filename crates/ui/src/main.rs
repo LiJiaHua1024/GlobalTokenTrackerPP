@@ -836,10 +836,21 @@ impl Component for Shell {
                 // One msg per frame — the view() rebuild re-evaluates each
                 // block's closed-form spring at the new elapsed time.
                 if self.nav_anim.as_ref().is_none_or(|a| a.done()) {
-                    self.nav_anim = None;
+                    if let Some(a) = self.nav_anim.take() {
+                        diag!(
+                            "[nav] anim settled: {} frames in {}ms",
+                            a.frames.get(),
+                            a.t0.elapsed().as_millis()
+                        );
+                    }
                 } else {
+                    if let Some(a) = &self.nav_anim {
+                        a.frames.set(a.frames.get() + 1);
+                    }
+                    // 10ms sleep + ~4ms thin rebuild lands ~14ms cadence —
+                    // a fresh frame is ready for every 60Hz vsync.
                     context.spawn_background(|_| {
-                        std::thread::sleep(std::time::Duration::from_millis(16));
+                        std::thread::sleep(std::time::Duration::from_millis(10));
                         Msg::NavAnimTick
                     });
                 }
@@ -901,6 +912,8 @@ impl Component for Shell {
                             -1.0
                         },
                         t0: std::time::Instant::now(),
+                        cache: std::cell::RefCell::new(None),
+                        frames: std::cell::Cell::new(0),
                     });
                     context.spawn_background(|_| {
                         std::thread::sleep(std::time::Duration::from_millis(16));
@@ -1060,7 +1073,21 @@ impl Component for Shell {
         // transition so a settled view is never re-mounted — canvas panels
         // (trend/donut swapchains) would otherwise flicker on every nav.
         let mut layers: Vec<KeyedView> = Vec::with_capacity(2);
+        // While a slide is in flight both pages' content is built ONCE into
+        // the NavAnim cache — each ~16ms tick then only allocates the thin
+        // margin wrappers instead of two whole page trees (this was the
+        // frame-cost that made the slide stutter).
+        let mut cached_enter: Option<std::rc::Rc<Vec<View>>> = None;
         if let Some(a) = &self.nav_anim {
+            if a.cache.borrow().is_none() {
+                let built = widgets::NavCache {
+                    enter_blocks: std::rc::Rc::new(self.page_blocks(self.page, snap, context)),
+                    leave: self.page_view(a.from, snap, context, None),
+                };
+                *a.cache.borrow_mut() = Some(built);
+            }
+            let cache = a.cache.borrow();
+            let c = cache.as_ref().expect("nav cache filled above");
             let (off, op) = a.exit();
             layers.push(KeyedView::new(
                 "leave",
@@ -1068,8 +1095,9 @@ impl Component for Shell {
                     .grid_row(0)
                     .margin(Thickness::new(off, 0.0, -off, 0.0))
                     .opacity(op)
-                    .content(self.page_view(a.from, snap, context, None)),
+                    .content(c.leave.clone()),
             ));
+            cached_enter = Some(c.enter_blocks.clone());
         }
         // Border wraps unconditionally — keeps the enter layer's element
         // type identical across the anim→rest boundary (no remount flash).
@@ -1078,11 +1106,21 @@ impl Component for Shell {
             .as_ref()
             .map(|a| a.enter_layer())
             .unwrap_or(0.0);
+        let enter_page = match cached_enter {
+            // Cached blocks — only the margin wrappers are new this frame.
+            Some(b) => pages::frame_page(
+                theme,
+                self.page_gap(self.page),
+                (*b).clone(),
+                self.nav_anim.as_ref(),
+            ),
+            None => self.page_view(self.page, snap, context, None),
+        };
         layers.push(KeyedView::new(
             "enter",
             Border::new()
                 .margin(Thickness::new(off, 0.0, -off, 0.0))
-                .content(self.page_view(self.page, snap, context, self.nav_anim.as_ref())),
+                .content(enter_page),
         ));
         let content: View = Grid::new()
             .rows([GridLength::STAR])
@@ -1244,16 +1282,14 @@ impl Shell {
         let _ = context.window().request_close();
     }
 
-    /// Build one page's view for the stacked-layer host. `anim` is `Some`
-    /// only on the entering layer — the leaving layer renders at rest (its
-    /// whole-page offset comes from the layer wrapper, not block springs).
-    fn page_view(
+    /// Raw top-level blocks of one page — cached per nav flight so ticks
+    /// only re-wrap them, then assembled by `page_view`/`frame_page`.
+    fn page_blocks(
         &self,
         page: Page,
         snap: Option<&Snapshot>,
         context: &mut ViewContext<Self>,
-        anim: Option<&widgets::NavAnim>,
-    ) -> View {
+    ) -> Vec<View> {
         let theme = &self.theme;
         match page {
             Page::Overview => overview_page(
@@ -1268,15 +1304,41 @@ impl Shell {
                     cols: self.overview_cols,
                     ruler: &self.ruler,
                     donuts: &self.donuts,
-                    anim,
                 },
             ),
-            Page::Detail => detail_page(snap, theme, context, anim),
-            Page::Quota => quota_page(snap, theme, &self.quota_collapsed, context, anim),
-            Page::Sources => sources_page(snap, theme, anim),
-            Page::Prices => prices_page(snap, theme, anim),
-            Page::Settings => settings_page(&self.config, theme, context, anim),
+            Page::Detail => detail_page(snap, theme, context),
+            Page::Quota => quota_page(snap, theme, &self.quota_collapsed, context),
+            Page::Sources => sources_page(snap, theme),
+            Page::Prices => prices_page(snap, theme),
+            Page::Settings => settings_page(&self.config, theme, context),
         }
+    }
+
+    /// Top-level block spacing — Overview/Settings use the section gap,
+    /// the list pages pack tighter (10 DIP, their historical rhythm).
+    fn page_gap(&self, page: Page) -> f64 {
+        match page {
+            Page::Overview | Page::Settings => self.theme.section_gap,
+            _ => 10.0,
+        }
+    }
+
+    /// Assemble one page for the stacked-layer host. `anim` is `Some` only
+    /// on the entering layer — the leaving layer renders at rest (its
+    /// whole-page offset comes from the layer wrapper, not block springs).
+    fn page_view(
+        &self,
+        page: Page,
+        snap: Option<&Snapshot>,
+        context: &mut ViewContext<Self>,
+        anim: Option<&widgets::NavAnim>,
+    ) -> View {
+        pages::frame_page(
+            &self.theme,
+            self.page_gap(page),
+            self.page_blocks(page, snap, context),
+            anim,
+        )
     }
 
     /// Low-frequency vendor quota poll (spec §6.9) — `GTT_NO_QUOTA` disables.

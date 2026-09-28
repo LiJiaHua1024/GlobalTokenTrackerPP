@@ -214,6 +214,20 @@ fn page_frame(theme: &Theme, body: View) -> View {
         .content(frame.content(body))
 }
 
+/// Assemble raw top-level blocks into the scrolled page — each block gets a
+/// margin wrapper so it can ride its own spring during a nav slide (rest
+/// state uses the same wrappers at margin 0, so settling never remounts).
+/// Pages return raw blocks so a nav flight can cache them once and
+/// re-wrap per frame without rebuilding page content.
+pub fn frame_page(
+    theme: &Theme,
+    gap: f64,
+    blocks: Vec<View>,
+    anim: Option<&w::NavAnim>,
+) -> View {
+    page_frame(theme, vstack(gap, w::slide_children(blocks, anim)))
+}
+
 // ---------------------------------------------------------------- overview
 
 fn edit_chrome(theme: &Theme, page: &str, id: &'static str, ctx: &mut ViewContext<Shell>) -> View {
@@ -882,19 +896,19 @@ pub struct OverviewArgs<'a> {
     pub ruler: &'a ElementRef<SwapChainPanel>,
     /// Hover state per share-donut column (pointer → Msg → invalidation).
     pub donuts: &'a [w::DonutHandle; 4],
-    /// Present while a nav slide is in flight — top-level blocks spring in.
-    pub anim: Option<&'a w::NavAnim>,
 }
 
+/// Returns the page's raw top-level blocks — `frame_page` assembles them
+/// (gap + spring wrappers) so nav flights can cache the vec once.
 pub fn overview_page(
     snap: Option<&Snapshot>,
     theme: &Theme,
     ctx: &mut ViewContext<Shell>,
     args: &OverviewArgs,
-) -> View {
+) -> Vec<View> {
     let (config, editing) = (args.config, args.editing);
     let Some(s) = snap else {
-        return loading(theme, args.scanning);
+        return vec![loading(theme, args.scanning)];
     };
     let scanning = args.scanning;
 
@@ -1020,10 +1034,7 @@ pub fn overview_page(
         }
     }
 
-    page_frame(
-        theme,
-        vstack(theme.section_gap, w::slide_children(col, args.anim)),
-    )
+    col
 }
 
 // ---------------------------------------------------------------- detail
@@ -1167,10 +1178,9 @@ pub fn detail_page(
     snap: Option<&Snapshot>,
     theme: &Theme,
     ctx: &mut ViewContext<Shell>,
-    anim: Option<&w::NavAnim>,
-) -> View {
+) -> Vec<View> {
     let Some(s) = snap else {
-        return loading(theme, true);
+        return vec![loading(theme, true)];
     };
     let d = &s.detail;
     let list: Vec<View> = d
@@ -1210,34 +1220,25 @@ pub fn detail_page(
         );
     }
 
-    page_frame(
-        theme,
-        vstack(
-            10.0,
-            w::slide_children(
-                vec![
-                    header(
-                        theme,
-                        t!("明细"),
-                        vec![
-                            StackPanel::new()
-                                .orientation(Orientation::Horizontal)
-                                .spacing(8.0)
-                                .keyed_children(keyed(nav)),
-                        ],
-                    ),
-                    w::card(
-                        theme,
-                        vstack(
-                            0.0,
-                            std::iter::once(detail_header(theme)).chain(list).collect(),
-                        ),
-                    ),
-                ],
-                anim,
+    vec![
+        header(
+            theme,
+            t!("明细"),
+            vec![
+                StackPanel::new()
+                    .orientation(Orientation::Horizontal)
+                    .spacing(8.0)
+                    .keyed_children(keyed(nav)),
+            ],
+        ),
+        w::card(
+            theme,
+            vstack(
+                0.0,
+                std::iter::once(detail_header(theme)).chain(list).collect(),
             ),
         ),
-    )
+    ]
 }
 
 // ---------------------------------------------------------------- quota
@@ -1363,10 +1364,9 @@ pub fn quota_page(
     theme: &Theme,
     collapsed: &std::collections::BTreeSet<String>,
     ctx: &mut ViewContext<Shell>,
-    anim: Option<&w::NavAnim>,
-) -> View {
+) -> Vec<View> {
     let Some(s) = snap else {
-        return loading(theme, true);
+        return vec![loading(theme, true)];
     };
     let mut list: Vec<View> = Vec::new();
     for g in &s.vm.quota_groups {
@@ -1435,27 +1435,18 @@ pub fn quota_page(
                 .into(),
         );
     }
-    page_frame(
-        theme,
-        vstack(
-            10.0,
-            // Cards animate individually — flatten header+cards so each is
-            // its own spring block rather than one static list stack.
-            w::slide_children(
-                std::iter::once(header(theme, t!("配额"), vec![]))
-                    .chain(list)
-                    .collect(),
-                anim,
-            ),
-        ),
-    )
+    // Cards animate individually — flatten header+cards so each is its own
+    // spring block rather than one static list stack.
+    std::iter::once(header(theme, t!("配额"), vec![]))
+        .chain(list)
+        .collect()
 }
 
 // ---------------------------------------------------------------- sources
 
-pub fn sources_page(snap: Option<&Snapshot>, theme: &Theme, anim: Option<&w::NavAnim>) -> View {
+pub fn sources_page(snap: Option<&Snapshot>, theme: &Theme) -> Vec<View> {
     let Some(list_src) = snap.and_then(|s| s.sources.as_ref()) else {
-        return loading(theme, true);
+        return vec![loading(theme, true)];
     };
     let mut list: Vec<View> = Vec::new();
     for h in list_src {
@@ -1521,18 +1512,9 @@ pub fn sources_page(snap: Option<&Snapshot>, theme: &Theme, anim: Option<&w::Nav
                 .into(),
         );
     }
-    page_frame(
-        theme,
-        vstack(
-            10.0,
-            w::slide_children(
-                std::iter::once(header(theme, t!("数据源"), vec![]))
-                    .chain(list)
-                    .collect(),
-                anim,
-            ),
-        ),
-    )
+    std::iter::once(header(theme, t!("数据源"), vec![]))
+        .chain(list)
+        .collect()
 }
 
 // ---------------------------------------------------------------- prices
@@ -1635,12 +1617,12 @@ fn price_row(theme: &Theme, p: &globaltokentracker_core::store::PriceRow, zebra:
         .tooltip(p.model.clone())
 }
 
-pub fn prices_page(snap: Option<&Snapshot>, theme: &Theme, anim: Option<&w::NavAnim>) -> View {
+pub fn prices_page(snap: Option<&Snapshot>, theme: &Theme) -> Vec<View> {
     let Some(s) = snap else {
-        return loading(theme, true);
+        return vec![loading(theme, true)];
     };
     let Some(rows) = s.prices.as_ref() else {
-        return loading(theme, true);
+        return vec![loading(theme, true)];
     };
     let list: Vec<View> = std::iter::once(price_head(theme))
         .chain(
@@ -1650,35 +1632,26 @@ pub fn prices_page(snap: Option<&Snapshot>, theme: &Theme, anim: Option<&w::NavA
                 .map(|(i, p)| price_row(theme, p, i % 2 == 1)),
         )
         .collect();
-    page_frame(
-        theme,
-        vstack(
-            10.0,
-            w::slide_children(
-                vec![
-                    header(theme, t!("价目表（$/1M tokens）"), vec![]),
-                    TextBlock::new()
-                        .text(tf!(
-                            "{} 个模型 · 前 400 条 · {}",
-                            rows.len(),
-                            match s.prices_synced_at {
-                                Some(t) => tf!(
-                                    "联网同步于 {} 小时前",
-                                    (globaltokentracker_core::store::now_ms() - t) / 3_600_000
-                                ),
-                                None => t!("仅本地种子，尚未联网同步").to_string(),
-                            }
-                        ))
-                        .font_size(theme.body_size)
-                        .foreground(theme.subtle)
-                        .into(),
-                    // Card chrome around the table — same as the detail page.
-                    w::card(theme, vstack(0.0, list)),
-                ],
-                anim,
-            ),
-        ),
-    )
+    vec![
+        header(theme, t!("价目表（$/1M tokens）"), vec![]),
+        TextBlock::new()
+            .text(tf!(
+                "{} 个模型 · 前 400 条 · {}",
+                rows.len(),
+                match s.prices_synced_at {
+                    Some(t) => tf!(
+                        "联网同步于 {} 小时前",
+                        (globaltokentracker_core::store::now_ms() - t) / 3_600_000
+                    ),
+                    None => t!("仅本地种子，尚未联网同步").to_string(),
+                }
+            ))
+            .font_size(theme.body_size)
+            .foreground(theme.subtle)
+            .into(),
+        // Card chrome around the table — same as the detail page.
+        w::card(theme, vstack(0.0, list)),
+    ]
 }
 
 // ---------------------------------------------------------------- settings
@@ -1823,8 +1796,7 @@ pub fn settings_page(
     config: &UiConfig,
     theme: &Theme,
     ctx: &mut ViewContext<Shell>,
-    anim: Option<&w::NavAnim>,
-) -> View {
+) -> Vec<View> {
     let theme_row = setting_row(
         theme,
         "主题模式",
@@ -1892,26 +1864,17 @@ pub fn settings_page(
         ),
     );
 
-    page_frame(
-        theme,
-        vstack(
-            theme.section_gap,
-            w::slide_children(
-                vec![
-                    header(theme, tr("设置"), vec![]),
-                    w::section_header(theme, Symbol::FontColor, tr("外观")),
-                    w::card(
-                        theme,
-                        vstack(theme.gap, vec![theme_row, accent_row, font_row, scale_row]),
-                    ),
-                    w::section_header(theme, Symbol::Setting, tr("通用")),
-                    w::card(
-                        theme,
-                        vstack(theme.gap, vec![lang_row, autostart_row, close_row]),
-                    ),
-                ],
-                anim,
-            ),
+    vec![
+        header(theme, tr("设置"), vec![]),
+        w::section_header(theme, Symbol::FontColor, tr("外观")),
+        w::card(
+            theme,
+            vstack(theme.gap, vec![theme_row, accent_row, font_row, scale_row]),
         ),
-    )
+        w::section_header(theme, Symbol::Setting, tr("通用")),
+        w::card(
+            theme,
+            vstack(theme.gap, vec![lang_row, autostart_row, close_row]),
+        ),
+    ]
 }

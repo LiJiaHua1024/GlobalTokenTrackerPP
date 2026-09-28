@@ -771,3 +771,16 @@
   - 存 tray + GTT_NOTRAY → 回落弹框 ✓
 - **取舍**：托盘菜单 Quit 走同一 `quit_now()`（已由对话框路径实测验证 allow-once 放行），未单独 E2E 托盘菜单点击（原生弹出菜单 UIA 不可达）。`DefSubclassProc` 调用包在 unsafe 块内（Rust 2024 unsafe-op-in-unsafe-fn）。
 - **验证**：64 测试全过、clippy `-D warnings` 0、改动区 fmt 干净。
+
+## S63 切页动画性能：页面树缓存 + tick 提速（~46fps → ~70fps） ✅
+
+- **症状**：左右滑动的切页动画明显不流畅。
+- **定位**：每个 `NavAnimTick`（~16ms）都走 `update → view()`，view() **重建两整页**——enter 页全块 + leave 页全块，含所有 `TextBlock`/`format!`/`tr!`/canvas 闭包与概览页 5 个 swapchain 挂载描述；实测帧周期 ~21.6ms（16ms sleep + ~5.6ms 构建+diff），有效帧率仅 ~46fps，debug 下更低——这就是卡顿本源。reactor 0.100 无平移过渡/合成器杠杆（`ElementCompositionPreview::GetElementVisual` 为 pub(crate)，Translation/CanvasLeft 仅在 native 绑定层），margin 位移方案保留，问题收敛为"每帧重建太贵"。
+- **方案**：`View` 是不可变声明树（`#[derive(Clone)]`，子树 Rc 共享 clone 廉价）——把"每帧重算的几何"与"不变的页面内容"分离：
+  - 各 `*_page` 函数改为返回**原始顶层块 `Vec<View>`**（去掉 `anim` 参数与 `page_frame/vstack/slide_children` 收尾）；新增 `frame_page(theme, gap, blocks, anim)` 统一组装；`page_gap`：Overview/Settings=`section_gap`，列表页=10.0。
+  - `NavAnim` 新增 `cache: RefCell<Option<NavCache>>`——首个动画帧 view() 里懒构建一次：`enter_blocks: Rc<Vec<View>>`（新页原始块）+ `leave: View`（旧页整装）。
+  - 此后每帧 tick 只做：`Rc::clone` + `(*b).clone()` + ~15 个 margin Border + 两个层 Border——两页内容零重建；diff 走 PartialEq 深比较无分配。`enter`/`leave` 键恒定，swapchain 不重挂载。
+  - tick sleep 16→10ms：周期 ~14ms（10ms + ~4ms 薄重建），每 60Hz vsync 前都有新帧。
+- **实测**（`GTT_NAVTEST` 交替切页，`GTT_DEBUG` 日志帧数统计）：每趟飞行 950ms 内 **65–73 帧 ≈ 68–77fps**（优化前 ~44–48 帧 ≈ 46–50fps），含概览页在内的双页飞行均达标；落定后页面内容正常（缓存仅在飞行期间冻结，anim→None 后首帧即全新构建）。
+- **取舍**：飞行中（≤950ms）enter/leave 页内容冻结——期间到达的 `Loaded`/`Tick` 在落定后的首个 rest 视图统一呈现，无可感知影响；再次点 nav 会丢弃旧 cache 重建一次。`RefCell`/`Rc` 限 UI 线程，Shell 本就 !Send。
+- **验证**：64 测试全过、clippy `-D warnings` 0、改动区 fmt 干净。

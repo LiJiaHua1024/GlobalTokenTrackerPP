@@ -49,6 +49,25 @@ pub struct NavAnim {
     pub from: crate::Page,
     pub dir: f64,
     pub t0: std::time::Instant,
+    /// Page content built once when the flight begins — without it every
+    /// ~16ms tick rebuilds two whole pages (every TextBlock/format!/canvas
+    /// closure), which is what made the slide drop frames. `View` clones
+    /// are Rc-cheap, so a tick then only allocates the ~15 margin wrappers.
+    /// Filled lazily on the first animated `view()` (needs `ViewContext`).
+    pub cache: std::cell::RefCell<Option<NavCache>>,
+    /// Rendered frames — logged once at settle under `GTT_DEBUG` so the
+    /// effective animation frame rate is observable.
+    pub frames: std::cell::Cell<u32>,
+}
+
+/// Built-once page trees for one nav flight.
+pub struct NavCache {
+    /// Entering page's raw top-level blocks — `slide_children` re-wraps
+    /// them each frame so per-block springs still move.
+    pub enter_blocks: Rc<Vec<View>>,
+    /// Leaving page fully assembled at rest — only its layer margin and
+    /// opacity change, never its content.
+    pub leave: View,
 }
 
 /// Underdamped spring position at `t` (secs): x(0)=x0, v(0)=0, target 0.
