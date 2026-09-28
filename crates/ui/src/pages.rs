@@ -24,12 +24,36 @@ fn cell(col: i32, v: View) -> View {
     Border::new().grid_column(col).content(v)
 }
 
-/// Wrap-grid cell: right+bottom margin supplies the gap a Grid's
-/// `column_spacing` would (VariableSizedWrapGrid has no spacing property).
-fn wrap_cell(gap: f64, v: View) -> View {
-    Border::new()
-        .margin(Thickness::new(0.0, 0.0, gap, gap))
-        .content(v)
+/// Grid cell with an explicit row — reflow grids need both coordinates.
+fn cell_rc(col: i32, row: i32, v: View) -> View {
+    Border::new().grid_column(col).grid_row(row).content(v)
+}
+
+/// Minimum cell width for the reflow grids (stat cards + share donuts).
+const REFLOW_MIN_CELL: f64 = 250.0;
+
+/// How many `min_cell`-wide columns fit in `width` DIPs of content
+/// (clamped 1..=max; unknown width → `max`, matching the default window).
+fn fit_cols(width: f64, min_cell: f64, gap: f64, max: usize) -> usize {
+    if width <= 0.0 {
+        return max;
+    }
+    (((width + gap) / (min_cell + gap)).floor() as usize).clamp(1, max)
+}
+
+/// N items into `cols` STAR columns × Auto rows — cells stretch to fill
+/// the measured width, so wide windows get wide cards, narrow reflow.
+fn reflow_grid(theme: &Theme, items: Vec<View>, cols: usize) -> View {
+    let cols = cols.clamp(1, items.len().max(1));
+    let rows = items.len().div_ceil(cols);
+    Grid::new()
+        .columns(vec![GridLength::STAR; cols])
+        .rows(vec![GridLength::Auto; rows])
+        .column_spacing(theme.gap)
+        .row_spacing(theme.gap)
+        .keyed_children(items.into_iter().enumerate().map(|(i, v)| {
+            KeyedView::new(i as u64, cell_rc((i % cols) as i32, (i / cols) as i32, v))
+        }))
 }
 
 /// Quota row where the percent earns a tone badge (>=50% only — sparingly).
@@ -265,70 +289,57 @@ fn overview_widget(
     let vm = &s.vm;
     let rl = tr(vm.range.label());
     match id {
-        // VariableSizedWrapGrid reflows the cards: 4-across at normal width,
-        // 3/2/1 columns as the window narrows — no fixed-column squeeze.
-        "stats" => Some(
-            VariableSizedWrapGrid::new()
-                .orientation(Orientation::Horizontal)
-                .item_width(250.0)
-                .keyed_children(keyed(vec![
-                    wrap_cell(
-                        theme.gap,
-                        w::stat_card(
-                            theme,
-                            Symbol::Calculator,
-                            &tf!("{rl} Tokens", rl),
-                            fmt::tokens_exact(fmt::tokens_total(&vm.span)),
-                            tf!("事件 {}", fmt::tokens_exact(vm.span.events)),
-                            false,
-                            None,
-                        ),
+        // Reflow grid: columns stretch to the measured content width —
+        // 4 across at normal width, 3/2/1 as the window narrows.
+        "stats" => Some(reflow_grid(
+            theme,
+            vec![
+                w::stat_card(
+                    theme,
+                    Symbol::Calculator,
+                    &tf!("{rl} Tokens", rl),
+                    fmt::tokens_exact(fmt::tokens_total(&vm.span)),
+                    tf!("事件 {}", fmt::tokens_exact(vm.span.events)),
+                    false,
+                    None,
+                ),
+                w::stat_card(
+                    theme,
+                    Symbol::Tag,
+                    &tf!("{rl}估算成本", rl),
+                    fmt::usd(vm.span.cost_usd),
+                    tf!("全部 {}", fmt::usd(vm.all.cost_usd)),
+                    true,
+                    Some((t!("估算"), w::BadgeTone::Accent)),
+                ),
+                w::stat_card(
+                    theme,
+                    Symbol::SyncFolder,
+                    &tf!("{rl}缓存读", rl),
+                    fmt::tokens_exact(vm.span.cache_read_tokens),
+                    tf!("输入 {}", fmt::tokens_exact(vm.span.input_tokens)),
+                    false,
+                    None,
+                ),
+                w::stat_card(
+                    theme,
+                    Symbol::CalendarWeek,
+                    &tf!("{rl}事件", rl),
+                    fmt::tokens_exact(vm.span.events),
+                    tf!(
+                        "活跃 {}",
+                        if vm.span.active_ms > 0 {
+                            fmt::duration(Some(vm.span.active_ms as i64))
+                        } else {
+                            "—".into()
+                        }
                     ),
-                    wrap_cell(
-                        theme.gap,
-                        w::stat_card(
-                            theme,
-                            Symbol::Tag,
-                            &tf!("{rl}估算成本", rl),
-                            fmt::usd(vm.span.cost_usd),
-                            tf!("全部 {}", fmt::usd(vm.all.cost_usd)),
-                            true,
-                            Some((t!("估算"), w::BadgeTone::Accent)),
-                        ),
-                    ),
-                    wrap_cell(
-                        theme.gap,
-                        w::stat_card(
-                            theme,
-                            Symbol::SyncFolder,
-                            &tf!("{rl}缓存读", rl),
-                            fmt::tokens_exact(vm.span.cache_read_tokens),
-                            tf!("输入 {}", fmt::tokens_exact(vm.span.input_tokens)),
-                            false,
-                            None,
-                        ),
-                    ),
-                    wrap_cell(
-                        theme.gap,
-                        w::stat_card(
-                            theme,
-                            Symbol::CalendarWeek,
-                            &tf!("{rl}事件", rl),
-                            fmt::tokens_exact(vm.span.events),
-                            tf!(
-                                "活跃 {}",
-                                if vm.span.active_ms > 0 {
-                                    fmt::duration(Some(vm.span.active_ms as i64))
-                                } else {
-                                    "—".into()
-                                }
-                            ),
-                            false,
-                            None,
-                        ),
-                    ),
-                ])),
-        ),
+                    false,
+                    None,
+                ),
+            ],
+            args.cols,
+        )),
         "trend" => {
             let trend_title: String = match vm.range {
                 Range::Today => t!("今日 · 按小时").into(),
@@ -414,13 +425,10 @@ fn overview_widget(
                 .map(|(title, slices, f)| {
                     let total: f64 = slices.iter().map(|s| s.1).sum();
                     let center = f(total);
-                    wrap_cell(
-                        theme.gap,
-                        w::donut_cell(theme, title.clone(), slices, center, *f),
-                    )
+                    w::donut_cell(theme, title.clone(), slices, center, *f)
                 })
                 .collect();
-            // Donuts reflow 4→3→2→1 across as the window narrows.
+            // Donuts stretch across the measured width: 4→3→2→1 columns.
             Some(w::card(
                 theme,
                 StackPanel::new()
@@ -428,10 +436,7 @@ fn overview_widget(
                     .spacing(10.0)
                     .children((
                         w::section_header(theme, Symbol::Target, &tf!("{rl} · 占比分布", rl)),
-                        VariableSizedWrapGrid::new()
-                            .orientation(Orientation::Horizontal)
-                            .item_width(250.0)
-                            .keyed_children(keyed(cells)),
+                        reflow_grid(theme, cells, args.cols),
                     )),
             ))
         }
@@ -862,6 +867,10 @@ pub struct OverviewArgs<'a> {
     pub config: &'a UiConfig,
     pub editing: bool,
     pub trend: &'a w::TrendHandle,
+    /// Reflow column count from the width ruler (stats + share grids).
+    pub cols: usize,
+    /// Bound to the 1-DIP ruler panel mounted on this page.
+    pub ruler: &'a ElementRef<SwapChainPanel>,
 }
 
 pub fn overview_page(
@@ -943,6 +952,33 @@ pub fn overview_page(
         .into_iter()
         .collect(),
     )];
+
+    // 1-DIP full-width ruler: its surface Metrics report the real content
+    // width → column-count changes are quantized here so a resize drag
+    // only rebuilds when a column boundary is crossed.
+    let on_width = ctx.callback(|cols: usize| Msg::SetOverviewCols(cols));
+    ctx.use_effect("overview-ruler", (), {
+        let ruler = args.ruler.clone();
+        move || {
+            let last = std::cell::Cell::new(0usize);
+            let obs = ruler.observe_surface(move |event| {
+                if let SwapChainPanelEvent::Metrics { width, .. } = event {
+                    let cols = fit_cols(width, REFLOW_MIN_CELL, 12.0, 4);
+                    if cols != last.get() {
+                        last.set(cols);
+                        let _ = on_width.call(cols);
+                    }
+                }
+            });
+            Some(Box::new(move || drop(obs)))
+        }
+    });
+    col.push(
+        SwapChainPanel::new()
+            .element_ref(args.ruler)
+            .height(1.0)
+            .into(),
+    );
 
     if let Range::Custom { start_ms, end_ms } = s.vm.range {
         col.push(custom_range_row(theme, ctx, start_ms, end_ms));

@@ -680,3 +680,11 @@
 - **实测**（PrintWindow 抓图）：1196px → 4 列；800px → 统计卡 2×2、环图 2 列起排；560px → 统计卡单列堆叠。趋势图本就 STAR 拉伸不受影响。
 - **取舍**：单元宽度固定 250（卡片不随窗拉伸铺满——比固定列数挤压更可读）；窗口 < ~300px 仍会裁切（win 最小尺寸之下，可接受）。顶栏导航在极窄窗与品牌文字重叠是既有问题，不在本次范围。
 - **验证**：60 测试全过、clippy `-D warnings` 0；pages.rs 存在仓库级 rustfmt 漂移（非本次引入），本次改动区域 fmt 干净。
+
+## S55 总览列宽真自适应（宽度尺子 + STAR 网格） ✅
+
+- **需求**：S54 的 VariableSizedWrapGrid 只能固定 250 单元宽折行，卡片不随窗拉伸、右侧留白——要"横宽自适应"。
+- **方案**：reactor 无 SizeChanged 高层 API，但 `ElementRef<SwapChainPanel>::observe_surface` 会推 `Metrics{width}`。总览页挂 1-DIP 全宽尺子面板；观察回调把宽度量化成列数（`fit_cols(width, 250, 12, 4)`），**仅跨列数边界才发 `Msg::SetOverviewCols`**（resize 拖拽不刷屏）；Shell 存 `overview_cols`，`reflow_grid` 用 `STAR×N + Auto行` 重建——列宽随窗拉伸、列数随宽自适应。
+- **实测**（PrintWindow）：1600px → 4 卡铺满全宽；800px → 2×2 撑满；560px → 单列满宽。S54 的固定单元留白问题消除。
+- **取舍**：尺子只在总览页挂载（其他页未自适应）；列数变化是离散跳变而非连续插值（网格重排本就离散）。`SwapChainPanel` 空面板不渲染内容，开销≈一个空元素。
+- **验证**：60 测试全过、clippy `-D warnings` 0；改动区 fmt 干净（仓库遗留漂移照旧不动）。

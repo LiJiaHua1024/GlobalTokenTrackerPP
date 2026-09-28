@@ -101,6 +101,12 @@ pub struct Shell {
     /// Visible aggregates must rebuild even if the next scan lands nothing —
     /// set by filter/range/page changes, quota polls and repricing.
     views_stale: bool,
+    /// Overview reflow column count — driven by the width ruler's
+    /// Metrics events (4 until the first measurement lands).
+    overview_cols: usize,
+    /// 1-DIP full-width ruler panel on the overview page; its surface
+    /// metrics report the real content width for adaptive grids.
+    ruler: ElementRef<SwapChainPanel>,
 }
 
 /// Which filter-strip picker is open — `Tools`/`Models` are multi-select
@@ -155,6 +161,8 @@ pub enum Msg {
     ToggleMenu(MenuKind),
     /// Quota group header clicked — fold/unfold the app's quota windows.
     ToggleQuotaGroup(String),
+    /// Width-ruler observer: overview grids should use this many columns.
+    SetOverviewCols(usize),
     /// Event sink for RadioButton uncheck transitions — nothing to do.
     Noop,
     /// Settings: window theme — "system" | "light" | "dark".
@@ -447,6 +455,8 @@ impl Component for Shell {
             quota_collapsed: std::collections::BTreeSet::new(),
             prices_refreshing: false,
             views_stale: true,
+            overview_cols: 4,
+            ruler: ElementRef::new(),
         }
     }
 
@@ -728,6 +738,9 @@ impl Component for Shell {
                 self.config.save();
             }
             Msg::Noop => {}
+            // Width-ruler metrics → reflow column count changed. The
+            // observer already dedupes, so landing here always rebuilds.
+            Msg::SetOverviewCols(n) => self.overview_cols = n.clamp(1, 4),
             Msg::WatchFired => {
                 diag!("[watch] fired, scanning={}", self.scanning);
                 // Only 仅文件变更 mode scans on file events — in timer mode
@@ -915,6 +928,8 @@ impl Component for Shell {
                     config: &self.config,
                     editing: self.editing,
                     trend: &self.trend,
+                    cols: self.overview_cols,
+                    ruler: &self.ruler,
                 },
             ),
             Page::Detail => detail_page(snap, theme, context),
