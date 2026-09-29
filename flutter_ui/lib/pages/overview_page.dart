@@ -197,7 +197,7 @@ class _OverviewPageState extends State<OverviewPage> {
                 mainAxisSpacing: 16,
                 shrinkWrap: true,
                 physics: const NeverScrollableScrollPhysics(),
-                childAspectRatio: 1.8,
+                childAspectRatio: 1.55,
                 children: [
                   StatCard(
                     title: '累计 Token 用量',

@@ -81,8 +81,12 @@ class _PieDonutChartState extends State<PieDonutChart> {
     final theme = Theme.of(context);
     final total = widget.items.fold<double>(0.0, (sum, item) => sum + item.value);
 
-    // Filter out zero values and prepare sorted list
-    final validItems = widget.items.where((i) => i.value > 0).toList();
+    // Filter out slices that are zero or negligible (< 0.05% of total)
+    final validItems = widget.items.where((i) {
+      if (i.value <= 0.0001) return false;
+      if (total > 0 && (i.value / total * 100) < 0.05) return false;
+      return true;
+    }).toList();
     if (validItems.isEmpty || total <= 0) {
       return Card(
         child: Container(
@@ -159,15 +163,16 @@ class _PieDonutChartState extends State<PieDonutChart> {
                     PieChartData(
                       pieTouchData: PieTouchData(
                         touchCallback: (FlTouchEvent event, pieTouchResponse) {
-                          setState(() {
-                            if (!event.isInterestedForInteractions ||
-                                pieTouchResponse == null ||
-                                pieTouchResponse.touchedSection == null) {
-                              _touchedIndex = -1;
-                              return;
-                            }
-                            _touchedIndex = pieTouchResponse.touchedSection!.touchedSectionIndex;
-                          });
+                          final newIndex = (!event.isInterestedForInteractions ||
+                              pieTouchResponse == null ||
+                              pieTouchResponse.touchedSection == null)
+                              ? -1
+                              : pieTouchResponse.touchedSection!.touchedSectionIndex;
+                          if (_touchedIndex != newIndex) {
+                            setState(() {
+                              _touchedIndex = newIndex;
+                            });
+                          }
                         },
                       ),
                       startDegreeOffset: -90,
@@ -222,8 +227,12 @@ class _PieDonutChartState extends State<PieDonutChart> {
                 final percent = (item.value / total * 100).toStringAsFixed(1);
 
                 return MouseRegion(
-                  onEnter: (_) => setState(() => _touchedIndex = i),
-                  onExit: (_) => setState(() => _touchedIndex = -1),
+                  onEnter: (_) {
+                    if (_touchedIndex != i) setState(() => _touchedIndex = i);
+                  },
+                  onExit: (_) {
+                    if (_touchedIndex == i) setState(() => _touchedIndex = -1);
+                  },
                   child: FilterChip(
                     avatar: CircleAvatar(
                       backgroundColor: color,

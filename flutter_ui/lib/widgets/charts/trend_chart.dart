@@ -87,15 +87,16 @@ class _TrendChartState extends State<TrendChart> {
                       },
                     ),
                     touchCallback: (event, response) {
-                      setState(() {
-                        if (!event.isInterestedForInteractions ||
-                            response == null ||
-                            response.spot == null) {
-                          _touchedIndex = -1;
-                          return;
-                        }
-                        _touchedIndex = response.spot!.touchedBarGroupIndex;
-                      });
+                      final newIndex = (!event.isInterestedForInteractions ||
+                          response == null ||
+                          response.spot == null)
+                          ? -1
+                          : response.spot!.touchedBarGroupIndex;
+                      if (_touchedIndex != newIndex) {
+                        setState(() {
+                          _touchedIndex = newIndex;
+                        });
+                      }
                     },
                   ),
                   titlesData: FlTitlesData(
