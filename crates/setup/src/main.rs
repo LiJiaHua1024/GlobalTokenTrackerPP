@@ -456,9 +456,11 @@ fn main() -> Result<()> {
         }
 
         let self_exe = env::current_exe()?;
-        let flutter_exe = temp_dir.join(EXE_NAME);
+        let orig_flutter_exe = temp_dir.join(EXE_NAME);
+        let installer_exe = temp_dir.join("installer_ui.exe");
+        let _ = fs::copy(&orig_flutter_exe, &installer_exe);
 
-        let mut cmd = Command::new(&flutter_exe);
+        let mut cmd = Command::new(&installer_exe);
         if uninstall_flag {
             cmd.arg("--uninstall");
         } else {
@@ -466,9 +468,7 @@ fn main() -> Result<()> {
         }
         cmd.arg("--installer-source").arg(&temp_dir);
         cmd.arg("--installer-exe").arg(&self_exe);
-        if let Some(d) = dir {
-            cmd.arg("--dest").arg(d);
-        }
+        cmd.arg("--dest").arg(&dest);
 
         let _ = cmd.status();
 

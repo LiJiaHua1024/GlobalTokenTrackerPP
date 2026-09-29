@@ -54,6 +54,7 @@ class _InstallerPageState extends State<InstallerPage> {
 
   String _installerSource = '';
   String _installerExe = '';
+  String _customDest = '';
 
   @override
   void initState() {
@@ -67,11 +68,14 @@ class _InstallerPageState extends State<InstallerPage> {
       if (widget.args[i] == '--installer-exe' && i + 1 < widget.args.length) {
         _installerExe = widget.args[i + 1];
       }
+      if (widget.args[i] == '--dest' && i + 1 < widget.args.length) {
+        _customDest = widget.args[i + 1];
+      }
     }
 
     // Default install location: %LOCALAPPDATA%\Programs\GlobalTokenTrackerPP
     final localAppData = Platform.environment['LOCALAPPDATA'] ?? r'C:\Users\Default\AppData\Local';
-    final defaultDest = '$localAppData\\Programs\\GlobalTokenTrackerPP';
+    final defaultDest = _customDest.isNotEmpty ? _customDest : '$localAppData\\Programs\\GlobalTokenTrackerPP';
 
     _pathController = TextEditingController(text: defaultDest);
   }
@@ -125,12 +129,19 @@ class _InstallerPageState extends State<InstallerPage> {
     });
 
     try {
-      // 1. Terminate old running process
+      // 1. Terminate old running process (excluding current installer process)
       setState(() {
         _statusMessage = '结束正在运行的实例...';
         _progress = 0.10;
       });
-      await Process.run('taskkill', ['/F', '/IM', 'globaltokentracker_ui.exe']);
+      final myPid = pid;
+      await Process.run('taskkill', [
+        '/F',
+        '/FI',
+        'PID ne $myPid',
+        '/IM',
+        'globaltokentracker_ui.exe',
+      ]);
 
       // 2. Create destination directory
       final destDir = Directory(dest);
@@ -146,6 +157,12 @@ class _InstallerPageState extends State<InstallerPage> {
       int copiedFiles = 0;
       for (final entity in entities) {
         final relativePath = entity.path.substring(srcDir.path.length).replaceFirst(RegExp(r'^[/\\]'), '');
+        
+        // Skip installer helper launcher
+        if (relativePath.toLowerCase() == 'installer_ui.exe') {
+          continue;
+        }
+
         final targetPath = '$dest\\$relativePath';
 
         if (entity is Directory) {
@@ -170,7 +187,10 @@ class _InstallerPageState extends State<InstallerPage> {
 
       // 4. Save installer as uninstaller
       if (_installerExe.isNotEmpty && await File(_installerExe).exists()) {
-        await File(_installerExe).copy('$dest\\globaltokentrackerpp-setup.exe');
+        final targetUninstaller = '$dest\\globaltokentrackerpp-setup.exe';
+        if (_installerExe.toLowerCase() != targetUninstaller.toLowerCase()) {
+          await File(_installerExe).copy(targetUninstaller);
+        }
       }
 
       // 5. Register in Windows Uninstall
@@ -256,7 +276,8 @@ class _InstallerPageState extends State<InstallerPage> {
         _statusMessage = '安装完成';
         _progress = 1.0;
       });
-    } catch (e) {
+    } catch (e, st) {
+      debugPrint("Install error: $e\n$st");
       setState(() {
         _state = InstallState.error;
         _errorMessage = e.toString();
@@ -272,8 +293,15 @@ class _InstallerPageState extends State<InstallerPage> {
     });
 
     try {
-      // 1. Kill running instances
-      await Process.run('taskkill', ['/F', '/IM', 'globaltokentracker_ui.exe']);
+      // 1. Kill running instances (excluding current process)
+      final myPid = pid;
+      await Process.run('taskkill', [
+        '/F',
+        '/FI',
+        'PID ne $myPid',
+        '/IM',
+        'globaltokentracker_ui.exe',
+      ]);
 
       // 2. Remove shortcuts
       setState(() {
@@ -305,10 +333,11 @@ class _InstallerPageState extends State<InstallerPage> {
         _statusMessage = '删除程序文件...';
         _progress = 0.8;
       });
-      final installDir = File(Platform.resolvedExecutable).parent;
+      final dest = _pathController.text.trim();
+      final installDir = Directory(dest);
       if (await installDir.exists()) {
         // Schedule deferred deletion via cmd
-        Process.start('cmd', ['/C', 'ping 127.0.0.1 -n 2 >nul & rmdir /S /Q "${installDir.path}"'], mode: ProcessStartMode.detached);
+        Process.start('cmd', ['/C', 'ping 127.0.0.1 -n 2 >nul & rmdir /S /Q "$dest"'], mode: ProcessStartMode.detached);
       }
 
       setState(() {
@@ -316,7 +345,8 @@ class _InstallerPageState extends State<InstallerPage> {
         _statusMessage = '卸载完成';
         _progress = 1.0;
       });
-    } catch (e) {
+    } catch (e, st) {
+      debugPrint("Uninstall error: $e\n$st");
       setState(() {
         _state = InstallState.error;
         _errorMessage = e.toString();

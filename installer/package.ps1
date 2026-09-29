@@ -16,6 +16,9 @@ $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue) -and (Test-Path $cargoBin)) {
     $env:PATH = "$cargoBin;$env:PATH"
 }
+if (-not (Get-Command flutter -ErrorAction SilentlyContinue) -and (Test-Path 'F:\flutter\bin')) {
+    $env:PATH = "F:\flutter\bin;$env:PATH"
+}
 $root        = Split-Path $PSScriptRoot
 $target      = Join-Path $root 'target\release'
 $flutterUi   = Join-Path $root 'flutter_ui'
