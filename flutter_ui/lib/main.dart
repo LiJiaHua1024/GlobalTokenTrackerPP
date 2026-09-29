@@ -75,6 +75,27 @@ class GlobalTokenTrackerApp extends StatelessWidget {
       themeMode: themeProvider.themeMode,
       theme: themeProvider.lightTheme,
       darkTheme: themeProvider.darkTheme,
+      builder: (context, child) {
+        final scale = themeProvider.uiScale;
+        if (scale == 1.0 || child == null) {
+          return child ?? const SizedBox.shrink();
+        }
+        final mq = MediaQuery.of(context);
+        return MediaQuery(
+          data: mq.copyWith(
+            size: Size(mq.size.width / scale, mq.size.height / scale),
+          ),
+          child: Transform.scale(
+            scale: scale,
+            alignment: Alignment.topLeft,
+            child: SizedBox(
+              width: mq.size.width / scale,
+              height: mq.size.height / scale,
+              child: child,
+            ),
+          ),
+        );
+      },
       home: const MainShell(),
     );
   }

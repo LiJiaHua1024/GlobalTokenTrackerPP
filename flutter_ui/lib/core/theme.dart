@@ -6,9 +6,12 @@ class ThemeProvider extends ChangeNotifier {
   Color _seedColor = const Color(0xFF1A73E8); // Google Blue M3
   bool _compactNumbers = true;
 
+  double _uiScale = 1.0;
+
   ThemeMode get themeMode => _themeMode;
   Color get seedColor => _seedColor;
   bool get compactNumbers => _compactNumbers;
+  double get uiScale => _uiScale;
 
   void setThemeMode(ThemeMode mode) {
     _themeMode = mode;
@@ -22,6 +25,11 @@ class ThemeProvider extends ChangeNotifier {
 
   void setCompactNumbers(bool value) {
     _compactNumbers = value;
+    notifyListeners();
+  }
+
+  void setUiScale(double scale) {
+    _uiScale = scale.clamp(0.75, 2.0);
     notifyListeners();
   }
 
