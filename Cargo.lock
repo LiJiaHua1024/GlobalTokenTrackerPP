@@ -791,6 +791,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "globaltokentracker-ffi"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "globaltokentracker-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "globaltokentracker-setup"
 version = "0.2.0"
 dependencies = [

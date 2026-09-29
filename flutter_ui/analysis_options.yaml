@@ -1,0 +1,16 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  errors:
+    deprecated_member_use: ignore
+    camel_case_types: ignore
+    use_super_parameters: ignore
+    unused_field: ignore
+  exclude:
+    - build/**
+    - windows/**
+
+linter:
+  rules:
+    prefer_const_constructors: false
+    prefer_const_literals_to_create_immutables: false

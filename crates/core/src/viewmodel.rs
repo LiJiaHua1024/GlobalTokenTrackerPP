@@ -3,11 +3,13 @@
 
 use crate::store::{AppSummary, EventRow, QuotaRow, ShareRow, Store, Totals};
 use anyhow::Result;
+use serde::Serialize;
 
 /// Statistics window selected on the overview page. Persisted as `key` in
 /// ui.json so the choice survives restarts (`Custom` bounds persist
 /// separately as epoch-ms fields).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(tag = "type", content = "bounds", rename_all = "snake_case")]
 pub enum Range {
     Today,
     #[default]
@@ -141,7 +143,7 @@ pub fn start_of_local_day(ms: i64) -> i64 {
 
 /// One trend bar's data: `date` is "YYYY-MM-DD" (or "HH:00" for the Today
 /// range); `top` = the day's top-3 models by tokens, for the hover popup.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TrendBucket {
     pub date: String,
     pub events: u64,
@@ -150,7 +152,7 @@ pub struct TrendBucket {
     pub top: Vec<(String, u64)>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct OverviewVm {
     /// Always today — the tray tooltip and badges stay day-scoped regardless
     /// of the selected range.
@@ -182,7 +184,7 @@ pub struct OverviewVm {
 
 /// One collapsible section on the quota page: every window belonging to a
 /// single tool, newest-most-relevant first.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct QuotaGroupVm {
     pub app: String,
     /// UI-facing tool name (`workbuddy` → `WorkBuddy`).
@@ -247,7 +249,7 @@ pub fn group_quotas(rows: Vec<QuotaRow>) -> Vec<QuotaGroupVm> {
         .collect()
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DetailVm {
     pub rows: Vec<EventRow>,
     pub total_events: u64,

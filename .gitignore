@@ -1,0 +1,14 @@
+# Rust
+/target
+Cargo.lock
+
+# Flutter & Dart
+.dart_tool/
+.packages
+build/
+flutter_ui/build/
+flutter_ui/.dart_tool/
+flutter_ui/.flutter-plugins
+flutter_ui/.flutter-plugins-dependencies
+flutter_ui/globaltokentracker_ffi.dll
+*.pdb

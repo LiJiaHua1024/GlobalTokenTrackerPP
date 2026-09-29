@@ -3,8 +3,9 @@
 
 use anyhow::Result;
 use rusqlite::params;
+use serde::Serialize;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct Totals {
     pub events: u64,
     pub input_tokens: u64,
@@ -17,7 +18,7 @@ pub struct Totals {
     pub active_ms: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AppSummary {
     pub app: String,
     pub events: u64,
@@ -32,7 +33,7 @@ pub struct AppSummary {
 
 /// One share-dimension entry for the cost pie — name + the two metrics the
 /// legend shows.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ShareRow {
     pub name: String,
     pub events: u64,
@@ -41,7 +42,7 @@ pub struct ShareRow {
     pub cost_usd: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct QuotaRow {
     pub app: String,
     pub account: Option<String>,
@@ -53,7 +54,7 @@ pub struct QuotaRow {
     pub resets_at: Option<i64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct PriceRow {
     pub model: String,
     pub input: f64,
@@ -63,7 +64,7 @@ pub struct PriceRow {
     pub source: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SourceHealth {
     pub source: String,
     pub enabled: bool,
@@ -74,7 +75,7 @@ pub struct SourceHealth {
     pub cursors: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct EventRow {
     pub app: String,
     pub model: Option<String>,
