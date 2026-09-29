@@ -55,14 +55,90 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::*;
 
 // COLORREF is 0x00BBGGRR.
-const BG: u32 = 0x00202020;
-const CARD: u32 = 0x002B2B2B;
-const TEXT: u32 = 0x00E9E9E9;
-const SUBTLE: u32 = 0x009C9C9C;
-const ACCENT: u32 = 0x00FFCD60; // #60CDFF
-const ACCENT_HOT: u32 = 0x00FFDD94;
-const DANGER: u32 = 0x007D6AF9; // #F96A7D
-const LINE: u32 = 0x00363636;
+#[derive(Clone, Copy, PartialEq)]
+pub struct ThemeColors {
+    pub is_dark: bool,
+    pub bg: u32,
+    pub card: u32,
+    pub text: u32,
+    pub subtle: u32,
+    pub accent: u32,
+    pub accent_hot: u32,
+    pub danger: u32,
+    pub line: u32,
+    pub edit_border: u32,
+    pub btn_face: u32,
+    pub btn_face_pressed: u32,
+    pub btn_border: u32,
+    pub chk_border: u32,
+    pub chk_check: u32,
+    pub primary_text: u32,
+    pub secondary_text: u32,
+}
+
+impl ThemeColors {
+    pub fn dark() -> Self {
+        Self {
+            is_dark: true,
+            bg: 0x00202020,
+            card: 0x002B2B2B,
+            text: 0x00E9E9E9,
+            subtle: 0x009C9C9C,
+            accent: 0x00FFCD60, // #60CDFF
+            accent_hot: 0x00FFDD94,
+            danger: 0x007D6AF9, // #F96A7D
+            line: 0x00363636,
+            edit_border: 0x004A4A4A,
+            btn_face: 0x00333333,
+            btn_face_pressed: 0x003A3A3A,
+            btn_border: 0x00555555,
+            chk_border: 0x005A5A5A,
+            chk_check: 0x00151515,
+            primary_text: 0x00151515,
+            secondary_text: 0x00E9E9E9,
+        }
+    }
+
+    pub fn light() -> Self {
+        Self {
+            is_dark: false,
+            bg: 0x00F3F3F3,
+            card: 0x00FFFFFF,
+            text: 0x001A1A1A,
+            subtle: 0x00666666,
+            accent: 0x00D77800, // #0078D7
+            accent_hot: 0x00E88B1A,
+            danger: 0x003838D1,
+            line: 0x00E0E0E0,
+            edit_border: 0x00CCCCCC,
+            btn_face: 0x00EFEFEF,
+            btn_face_pressed: 0x00DFDFDF,
+            btn_border: 0x00CCCCCC,
+            chk_border: 0x008A8A8A,
+            chk_check: 0x00FFFFFF,
+            primary_text: 0x00FFFFFF,
+            secondary_text: 0x001A1A1A,
+        }
+    }
+
+    pub fn system() -> Self {
+        if is_system_light_mode() {
+            Self::light()
+        } else {
+            Self::dark()
+        }
+    }
+}
+
+pub fn is_system_light_mode() -> bool {
+    let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+    if let Ok(key) = hkcu.open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") {
+        if let Ok(val) = key.get_value::<u32, _>("AppsUseLightTheme") {
+            return val != 0;
+        }
+    }
+    false
+}
 
 const IDC_EDIT: i32 = 100;
 const IDC_BROWSE: i32 = 101;
@@ -195,6 +271,7 @@ struct Shared {
 
 struct Gui {
     mode: Mode,
+    theme: ThemeColors,
     dir: PathBuf,
     /// Some(v) when an existing install is being upgraded — copy reads
     /// "更新"; picking a different dir migrates (old dir auto-cleaned).
@@ -270,6 +347,7 @@ fn make_btn(
     id: i32,
     owner_drawn: bool,
     dpi: u32,
+    is_dark: bool,
 ) -> HWND {
     unsafe {
         let style = WS_CHILD | WS_VISIBLE | WINDOW_STYLE(WS_TABSTOP.0)
@@ -289,7 +367,8 @@ fn make_btn(
             None,
         )
         .unwrap_or_default();
-        let _ = SetWindowTheme(h, w!("DarkMode_Explorer"), None);
+        let theme_name = if is_dark { w!("DarkMode_Explorer") } else { w!("Explorer") };
+        let _ = SetWindowTheme(h, PCWSTR(theme_name.as_ptr()), None);
         let _ = SendMessageW(h, WM_SETFONT, Some(WPARAM(font(11.0, false, dpi).0 as usize)), Some(LPARAM(1)));
         h
     }
@@ -305,17 +384,27 @@ fn set_prog(hwnd: HWND, pct: u32) {
 extern "system" fn prog_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     match msg {
         WM_PAINT => unsafe {
+            let theme = if let Ok(parent) = GetParent(hwnd) {
+                let g = gui(parent);
+                if !g.is_null() {
+                    (*g).theme
+                } else {
+                    ThemeColors::system()
+                }
+            } else {
+                ThemeColors::system()
+            };
             let mut ps = PAINTSTRUCT::default();
             let hdc = BeginPaint(hwnd, &mut ps);
             let mut rc = RECT::default();
             let _ = GetClientRect(hwnd, &mut rc);
             let h = (rc.bottom - rc.top) as f32;
-            fill_rr(hdc, &rc, h / 2.0, CARD);
+            fill_rr(hdc, &rc, h / 2.0, theme.card);
             let pct = GetWindowLongPtrW(hwnd, GWLP_USERDATA).clamp(0, 1000) as i32;
             if pct > 0 {
                 let w = (rc.right - rc.left).max(1) * pct / 1000;
                 let fill = RECT { left: rc.left, top: rc.top, right: rc.left + w.max(h as i32), bottom: rc.bottom };
-                fill_rr(hdc, &fill, h / 2.0, ACCENT);
+                fill_rr(hdc, &fill, h / 2.0, theme.accent);
             }
             let _ = EndPaint(hwnd, &ps);
             LRESULT(0)
@@ -353,27 +442,27 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wpar: WPARAM, lpar: LPARAM) ->
             let mem = CreateCompatibleDC(Some(hdc));
             let bmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
             let old = SelectObject(mem, bmp.into());
-            let bg = CreateSolidBrush(COLORREF(BG));
+            let bg = CreateSolidBrush(COLORREF(g.theme.bg));
             FillRect(mem, &rc, bg);
             let _ = DeleteObject(bg.into());
             let _ = SetBkMode(mem, TRANSPARENT);
             let dpi = GetDpiForWindow(hwnd);
             let sx = |v: i32| sc(v, dpi);
             // Accent tick + title + subtitle (clear air between the lines).
-            let tick = CreateSolidBrush(COLORREF(ACCENT));
+            let tick = CreateSolidBrush(COLORREF(g.theme.accent));
             let tr = RECT { left: sx(28), top: sx(28), right: sx(32), bottom: sx(66) };
             FillRect(mem, &tr, tick);
             let _ = DeleteObject(tick.into());
             let title = font(20.0, true, dpi);
             let _ = SelectObject(mem, title.into());
-            let _ = SetTextColor(mem, COLORREF(TEXT));
+            let _ = SetTextColor(mem, COLORREF(g.theme.text));
             let mut r = RECT { left: sx(44), top: sx(22), right: rc.right, bottom: sx(54) };
             let mut t = w(APP);
             let n = t.len() - 1;
             DrawTextW(mem, &mut t[..n], &mut r, DT_LEFT | DT_SINGLELINE);
             let sub = font(11.5, false, dpi);
             let _ = SelectObject(mem, sub.into());
-            let _ = SetTextColor(mem, COLORREF(SUBTLE));
+            let _ = SetTextColor(mem, COLORREF(g.theme.subtle));
             let mut sub_t = w(&match g.mode {
                 Mode::Uninstall => format!("卸载程序 — v{VER}"),
                 Mode::Install => match &g.update_from {
@@ -386,7 +475,7 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wpar: WPARAM, lpar: LPARAM) ->
             let mut r2 = RECT { left: sx(44), top: sx(58), right: rc.right, bottom: sx(80) };
             DrawTextW(mem, &mut sub_t[..n2], &mut r2, DT_LEFT | DT_SINGLELINE);
             // Hairlines.
-            let ln = CreateSolidBrush(COLORREF(LINE));
+            let ln = CreateSolidBrush(COLORREF(g.theme.line));
             for y in [104, 326] {
                 let hr = RECT { left: sx(28), top: sx(y), right: rc.right - sx(28), bottom: sx(y) + 1 };
                 FillRect(mem, &hr, ln);
@@ -409,13 +498,13 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wpar: WPARAM, lpar: LPARAM) ->
                     right: pts[1].x + 1,
                     bottom: pts[1].y + 1,
                 };
-                let c = if g.edit_focus { ACCENT } else { 0x004A4A4A };
+                let c = if g.edit_focus { g.theme.accent } else { g.theme.edit_border };
                 stroke_rr(mem, &frame, sx(5) as f32, c, 1.0);
             }
             if g.mode == Mode::Uninstall {
                 let body = font(11.5, false, dpi);
                 let _ = SelectObject(mem, body.into());
-                let _ = SetTextColor(mem, COLORREF(TEXT));
+                let _ = SetTextColor(mem, COLORREF(g.theme.text));
                 let mut l1 = w(&format!("将从以下位置移除 {APP}："));
                 let n3 = l1.len() - 1;
                 let mut r3 = RECT { left: sx(32), top: sx(128), right: rc.right - sx(32), bottom: sx(150) };
@@ -423,9 +512,9 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wpar: WPARAM, lpar: LPARAM) ->
                 let mut l2 = w(&g.dir.display().to_string());
                 let n4 = l2.len() - 1;
                 let mut r4 = RECT { left: sx(32), top: sx(152), right: rc.right - sx(32), bottom: sx(174) };
-                let _ = SetTextColor(mem, COLORREF(ACCENT));
+                let _ = SetTextColor(mem, COLORREF(g.theme.accent));
                 DrawTextW(mem, &mut l2[..n4], &mut r4, DT_LEFT);
-                let _ = SetTextColor(mem, COLORREF(SUBTLE));
+                let _ = SetTextColor(mem, COLORREF(g.theme.subtle));
                 let mut l3 = w("程序文件、快捷方式与卸载注册项将被移除；用户数据目录 %USERPROFILE%\\.globaltokentracker 保留。");
                 let n5 = l3.len() - 1;
                 let mut r5 = RECT { left: sx(32), top: sx(196), right: rc.right - sx(32), bottom: sx(250) };
@@ -447,8 +536,8 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wpar: WPARAM, lpar: LPARAM) ->
         WM_CTLCOLOREDIT => unsafe {
             let g = &*gui(hwnd);
             let hdc = HDC(wpar.0 as *mut _);
-            let _ = SetTextColor(hdc, COLORREF(TEXT));
-            let _ = SetBkColor(hdc, COLORREF(CARD));
+            let _ = SetTextColor(hdc, COLORREF(g.theme.text));
+            let _ = SetBkColor(hdc, COLORREF(g.theme.card));
             LRESULT(g.field_brush.0 as isize)
         },
         WM_CTLCOLORSTATIC => unsafe {
@@ -456,14 +545,15 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wpar: WPARAM, lpar: LPARAM) ->
             // window bg brush or they'd show a lighter band behind the text.
             let g = &*gui(hwnd);
             let hdc = HDC(wpar.0 as *mut _);
-            let _ = SetTextColor(hdc, COLORREF(SUBTLE));
-            let _ = SetBkColor(hdc, COLORREF(BG));
+            let _ = SetTextColor(hdc, COLORREF(g.theme.subtle));
+            let _ = SetBkColor(hdc, COLORREF(g.theme.bg));
             LRESULT(g.bg_brush.0 as isize)
         },
         WM_CTLCOLORBTN => unsafe {
             // Checkboxes: themed face + transparent text background.
+            let g = &*gui(hwnd);
             let hdc = HDC(wpar.0 as *mut _);
-            let _ = SetTextColor(hdc, COLORREF(TEXT));
+            let _ = SetTextColor(hdc, COLORREF(g.theme.text));
             let _ = SetBkMode(hdc, TRANSPARENT);
             LRESULT(GetStockObject(NULL_BRUSH).0 as isize)
         },
@@ -482,7 +572,7 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wpar: WPARAM, lpar: LPARAM) ->
                 // Owner-drawn checkbox — same rounded/flat vocabulary as the
                 // buttons so the glyph and text match the dark surface.
                 let mut rc = di.rcItem;
-                let bg = CreateSolidBrush(COLORREF(BG));
+                let bg = CreateSolidBrush(COLORREF(g.theme.bg));
                 FillRect(di.hDC, &rc, bg);
                 let _ = DeleteObject(bg.into());
                 let checked = if di.CtlID == IDC_CHK_SHORTCUT as u32 { g.chk_shortcut } else { g.chk_path };
@@ -490,15 +580,29 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wpar: WPARAM, lpar: LPARAM) ->
                 let bx = rc.left;
                 let by = rc.top + (rc.bottom - rc.top - bs) / 2;
                 let brc = RECT { left: bx, top: by, right: bx + bs, bottom: by + bs };
-                let face = if checked { ACCENT } else if pressed { 0x003A3A3A } else { CARD };
+                let face = if checked {
+                    g.theme.accent
+                } else if pressed {
+                    if g.theme.is_dark { 0x003A3A3A } else { 0x00DFDFDF }
+                } else {
+                    g.theme.card
+                };
                 fill_rr(di.hDC, &brc, sx(4) as f32, face);
-                let edge = if checked { ACCENT } else if enabled { 0x005A5A5A } else { 0x00404040 };
+                let edge = if checked {
+                    g.theme.accent
+                } else if enabled {
+                    g.theme.chk_border
+                } else if g.theme.is_dark {
+                    0x00404040
+                } else {
+                    0x00D0D0D0
+                };
                 stroke_rr(di.hDC, &brc, sx(4) as f32, edge, 1.0);
                 if checked {
-                    draw_check(di.hDC, bx as f32, by as f32, bs as f32, 0x00151515);
+                    draw_check(di.hDC, bx as f32, by as f32, bs as f32, g.theme.chk_check);
                 }
                 let _ = SetBkMode(di.hDC, TRANSPARENT);
-                let _ = SetTextColor(di.hDC, COLORREF(if enabled { TEXT } else { SUBTLE }));
+                let _ = SetTextColor(di.hDC, COLORREF(if enabled { g.theme.text } else { g.theme.subtle }));
                 let f = font(10.5, false, dpi);
                 let _ = SelectObject(di.hDC, f.into());
                 let mut buf = [0u16; 128];
@@ -511,18 +615,24 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wpar: WPARAM, lpar: LPARAM) ->
 
             let is_primary = di.CtlID == IDC_PRIMARY as u32;
             let (fill, txt) = if is_primary {
-                let accent = if g.mode == Mode::Uninstall && !g.done_ok { DANGER } else { ACCENT };
-                let f = if !enabled { 0x00484848 } else if pressed { ACCENT_HOT } else { accent };
-                (f, if enabled { 0x00151515 } else { 0x00AAAAAA })
+                let accent = if g.mode == Mode::Uninstall && !g.done_ok { g.theme.danger } else { g.theme.accent };
+                let f = if !enabled {
+                    if g.theme.is_dark { 0x00484848 } else { 0x00CCCCCC }
+                } else if pressed {
+                    g.theme.accent_hot
+                } else {
+                    accent
+                };
+                (f, if enabled { g.theme.primary_text } else if g.theme.is_dark { 0x00AAAAAA } else { 0x00888888 })
             } else {
-                let f = if pressed { 0x003A3A3A } else { 0x00333333 };
-                (f, TEXT)
+                let f = if pressed { g.theme.btn_face_pressed } else { g.theme.btn_face };
+                (f, g.theme.secondary_text)
             };
             let mut rc = di.rcItem;
             let rad = sx(6) as f32;
             fill_rr(di.hDC, &rc, rad, fill);
             if !is_primary {
-                stroke_rr(di.hDC, &rc, rad, 0x00555555, 1.0);
+                stroke_rr(di.hDC, &rc, rad, g.theme.btn_border, 1.0);
             }
             let _ = SetBkMode(di.hDC, TRANSPARENT);
             let _ = SetTextColor(di.hDC, COLORREF(txt));
@@ -668,10 +778,40 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wpar: WPARAM, lpar: LPARAM) ->
             }
             DefWindowProcW(hwnd, msg, wpar, lpar)
         },
-        WM_DESTROY => {
-            unsafe { PostQuitMessage(0) };
+        WM_SETTINGCHANGE | WM_THEMECHANGED => unsafe {
+            let g = &mut *gui(hwnd);
+            let new_theme = ThemeColors::system();
+            if new_theme != g.theme {
+                g.theme = new_theme;
+                let _ = DeleteObject(g.bg_brush.into());
+                let _ = DeleteObject(g.field_brush.into());
+                g.bg_brush = CreateSolidBrush(COLORREF(new_theme.bg));
+                g.field_brush = CreateSolidBrush(COLORREF(new_theme.card));
+                let dark = if new_theme.is_dark { TRUE } else { FALSE };
+                let _ = DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_USE_IMMERSIVE_DARK_MODE,
+                    std::ptr::from_ref(&dark).cast(),
+                    4,
+                );
+                let theme_name = if new_theme.is_dark { w!("DarkMode_Explorer") } else { w!("Explorer") };
+                if !g.edit.0.is_null() {
+                    let _ = SetWindowTheme(g.edit, PCWSTR(theme_name.as_ptr()), None);
+                }
+                let _ = InvalidateRect(Some(hwnd), None, true);
+                if !g.prog.0.is_null() {
+                    let _ = InvalidateRect(Some(g.prog), None, true);
+                }
+            }
             LRESULT(0)
-        }
+        },
+        WM_DESTROY => unsafe {
+            let g = &*gui(hwnd);
+            let _ = DeleteObject(g.bg_brush.into());
+            let _ = DeleteObject(g.field_brush.into());
+            PostQuitMessage(0);
+            LRESULT(0)
+        },
         _ => unsafe { DefWindowProcW(hwnd, msg, wpar, lpar) },
     }
 }
@@ -805,13 +945,14 @@ pub fn run(
             PCWSTR(std::ptr::without_provenance::<u16>(1)),
         )
         .unwrap_or_default();
+        let theme = ThemeColors::system();
         let wc = WNDCLASSW {
             hInstance: hinst,
             lpszClassName: w!("GttSetupWnd"),
             lpfnWndProc: Some(wnd_proc),
             hIcon: hicon,
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-            hbrBackground: CreateSolidBrush(COLORREF(BG)),
+            hbrBackground: CreateSolidBrush(COLORREF(theme.bg)),
             ..Default::default()
         };
         RegisterClassW(&wc);
@@ -825,6 +966,7 @@ pub fn run(
 
         let state = Box::new(Gui {
             mode,
+            theme,
             dir: initial_dir.to_path_buf(),
             update_from: update_from.map(str::to_string),
             prior_dir,
@@ -836,8 +978,8 @@ pub fn run(
             edit_focus: false,
             chk_shortcut: true,
             chk_path: true,
-            bg_brush: CreateSolidBrush(COLORREF(BG)),
-            field_brush: CreateSolidBrush(COLORREF(CARD)),
+            bg_brush: CreateSolidBrush(COLORREF(theme.bg)),
+            field_brush: CreateSolidBrush(COLORREF(theme.card)),
             working: false,
             done_ok: false,
             pick_pending: false,
@@ -869,7 +1011,7 @@ pub fn run(
             Some(hinst),
             Some(state_ptr.cast_const().cast()),
         )?;
-        let dark = TRUE;
+        let dark = if theme.is_dark { TRUE } else { FALSE };
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_USE_IMMERSIVE_DARK_MODE,
@@ -896,11 +1038,12 @@ pub fn run(
                 WS_CHILD | WS_VISIBLE | WINDOW_STYLE(WS_TABSTOP.0 | ES_AUTOHSCROLL as u32),
                 sx(32), sx(144), sx(452), sx(28), Some(hwnd), Some(hmenu_id(IDC_EDIT)), Some(hinst), None,
             )?;
-            let _ = SetWindowTheme(edit, w!("DarkMode_Explorer"), None);
+            let theme_name = if theme.is_dark { w!("DarkMode_Explorer") } else { w!("Explorer") };
+            let _ = SetWindowTheme(edit, PCWSTR(theme_name.as_ptr()), None);
             let _ = SendMessageW(edit, WM_SETFONT, Some(WPARAM(font(10.5, false, dpi).0 as usize)), Some(LPARAM(1)));
             g.edit = edit;
             let br_t = w("浏览…");
-            make_btn(hwnd, &br_t, sx(492), sx(144), sx(96), sx(28), IDC_BROWSE, true, dpi);
+            make_btn(hwnd, &br_t, sx(492), sx(144), sx(96), sx(28), IDC_BROWSE, true, dpi, theme.is_dark);
             // Plain owner-drawn buttons (not AUTOCHECKBOX — the style bits
             // collide); clicks arrive as WM_COMMAND and flip Gui state.
             let c1t = w("创建开始菜单快捷方式");
@@ -935,9 +1078,9 @@ pub fn run(
                 if update_from.is_some() { "更新" } else { "安装" }
             }
         });
-        g.primary = make_btn(hwnd, &ptxt, sx(496), sx(338), sx(132), sx(34), IDC_PRIMARY, true, dpi);
+        g.primary = make_btn(hwnd, &ptxt, sx(496), sx(338), sx(132), sx(34), IDC_PRIMARY, true, dpi, theme.is_dark);
         let ctxt = w("取消");
-        g.cancel = make_btn(hwnd, &ctxt, sx(384), sx(338), sx(104), sx(34), IDC_CANCEL, true, dpi);
+        g.cancel = make_btn(hwnd, &ctxt, sx(384), sx(338), sx(104), sx(34), IDC_CANCEL, true, dpi, theme.is_dark);
 
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = UpdateWindow(hwnd);

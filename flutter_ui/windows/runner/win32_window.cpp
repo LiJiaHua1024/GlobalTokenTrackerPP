@@ -213,6 +213,8 @@ Win32Window::MessageHandler(HWND hwnd,
       }
       return 0;
 
+    case WM_THEMECHANGED:
+    case WM_SETTINGCHANGE:
     case WM_DWMCOLORIZATIONCOLORCHANGED:
       UpdateTheme(hwnd);
       return 0;

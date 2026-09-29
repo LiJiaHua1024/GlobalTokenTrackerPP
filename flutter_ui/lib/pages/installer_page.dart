@@ -12,18 +12,39 @@ class InstallerApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isUninstall = args.contains('--uninstall');
+    const seedColor = Color(0xFF1A73E8); // Google Blue M3
 
     return MaterialApp(
       title: isUninstall ? 'GlobalTokenTracker++ 卸载向导' : 'GlobalTokenTracker++ 安装向导',
       debugShowCheckedModeBanner: false,
+      themeMode: ThemeMode.system,
       theme: ThemeData(
+        useMaterial3: true,
+        brightness: Brightness.light,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: seedColor,
+          brightness: Brightness.light,
+        ),
+        fontFamily: 'Segoe UI',
+        cardTheme: CardThemeData(
+          elevation: 0,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          clipBehavior: Clip.antiAlias,
+        ),
+      ),
+      darkTheme: ThemeData(
         useMaterial3: true,
         brightness: Brightness.dark,
         colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF1A73E8), // Google Blue M3
+          seedColor: seedColor,
           brightness: Brightness.dark,
         ),
         fontFamily: 'Segoe UI',
+        cardTheme: CardThemeData(
+          elevation: 0,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          clipBehavior: Clip.antiAlias,
+        ),
       ),
       home: InstallerPage(args: args, isUninstall: isUninstall),
     );
@@ -414,7 +435,7 @@ class _InstallerPageState extends State<InstallerPage> {
     final theme = Theme.of(context);
 
     return Scaffold(
-      backgroundColor: const Color(0xFF1E1F22),
+      backgroundColor: theme.colorScheme.surface,
       body: Column(
         children: [
           CustomTitleBar(
@@ -771,21 +792,33 @@ class _InstallerPageState extends State<InstallerPage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text('将被移除的内容：', style: TextStyle(fontWeight: FontWeight.bold)),
+                Text(
+                  '将被移除的内容：',
+                  style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.bold),
+                ),
                 const SizedBox(height: 8),
-                Text('• 目标目录：$defaultDest', style: const TextStyle(fontSize: 12)),
-                const Text('• 桌面及开始菜单的全部快捷方式', style: TextStyle(fontSize: 12)),
-                const Text('• Windows 注册表卸载条目', style: TextStyle(fontSize: 12)),
+                Text(
+                  '• 目标目录：$defaultDest',
+                  style: TextStyle(fontSize: 12, color: theme.colorScheme.onSurfaceVariant),
+                ),
+                Text(
+                  '• 桌面及开始菜单的全部快捷方式',
+                  style: TextStyle(fontSize: 12, color: theme.colorScheme.onSurfaceVariant),
+                ),
+                Text(
+                  '• Windows 注册表卸载条目',
+                  style: TextStyle(fontSize: 12, color: theme.colorScheme.onSurfaceVariant),
+                ),
                 const SizedBox(height: 12),
                 Container(
                   padding: const EdgeInsets.all(10),
                   decoration: BoxDecoration(
-                    color: Colors.blue.withValues(alpha: 0.1),
+                    color: theme.colorScheme.primaryContainer.withValues(alpha: 0.3),
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Row(
                     children: [
-                      const Icon(Icons.shield_outlined, size: 18, color: Colors.blue),
+                      Icon(Icons.shield_outlined, size: 18, color: theme.colorScheme.primary),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
