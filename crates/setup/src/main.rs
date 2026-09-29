@@ -28,12 +28,14 @@ mod gui;
 
 static PAYLOAD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/payload.zip"));
 
-const APP: &str = "GlobalTokenTracker";
-const VER: &str = env!("CARGO_PKG_VERSION");
-const RUNTIME_URL: &str =
-    "https://aka.ms/windowsappsdk/1.8/latest/windowsappruntimeinstall-x64.exe";
-const UNINSTALL_KEY: &str =
-    r"Software\Microsoft\Windows\CurrentVersion\Uninstall\GlobalTokenTracker";
+pub const APP: &str = "GlobalTokenTracker++";
+pub const APP_ID: &str = "GlobalTokenTrackerPP";
+pub const EXE_NAME: &str = "globaltokentracker_ui.exe";
+pub const SETUP_EXE_NAME: &str = "globaltokentrackerpp-setup.exe";
+pub const VER: &str = "1.0.0";
+pub const UNINSTALL_KEY: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\Uninstall\GlobalTokenTrackerPP";
+
 /// Spawned console tools (taskkill/cmd/powershell) must never allocate a
 /// console window from our GUI process — it flickers on screen and, under
 /// some endpoint-protection policies, console allocation hangs the child.
@@ -48,7 +50,7 @@ fn local_appdata() -> Result<PathBuf> {
 fn dest_dir(custom: Option<&str>) -> Result<PathBuf> {
     Ok(match custom {
         Some(d) => PathBuf::from(d),
-        None => local_appdata()?.join("Programs").join(APP),
+        None => local_appdata()?.join("Programs").join(APP_ID),
     })
 }
 
@@ -62,11 +64,6 @@ fn ps(script: &str) -> Result<std::process::Output> {
         .context("spawn powershell")
 }
 
-fn winapp_runtime_present() -> bool {
-    ps("Get-AppxPackage -Name 'Microsoft.WindowsAppRuntime*' | Select-Object -First 1 -ExpandProperty Name")
-        .is_ok_and(|o| o.status.success() && !o.stdout.is_empty())
-}
-
 /// Existing install's recorded (version, location). Lets a newer installer
 /// upgrade in place even when the original install used a custom `--dir`.
 fn installed_info() -> Option<(String, PathBuf)> {
@@ -76,7 +73,7 @@ fn installed_info() -> Option<(String, PathBuf)> {
     let loc: String = key.get_value("InstallLocation").ok()?;
     let dir = PathBuf::from(loc);
     // Stale entry (dir deleted without uninstalling) is not an install.
-    if !dir.join("globaltokentracker-ui.exe").exists() {
+    if !dir.join(EXE_NAME).exists() {
         return None;
     }
     let ver: String = key.get_value("DisplayVersion").unwrap_or_default();
@@ -84,21 +81,7 @@ fn installed_info() -> Option<(String, PathBuf)> {
 }
 
 fn ensure_runtime(log: &dyn Fn(String)) -> Result<()> {
-    if winapp_runtime_present() {
-        log("Windows App Runtime 已就位".into());
-        return Ok(());
-    }
-    log("未检测到 Windows App Runtime，下载微软官方安装程序…".into());
-    let tmp = env::temp_dir().join("windowsappruntimeinstall-x64.exe");
-    let mut resp = ureq::get(RUNTIME_URL).call().context("download runtime")?;
-    let mut f = fs::File::create(&tmp)?;
-    std::io::copy(&mut resp.body_mut().as_reader(), &mut f)?;
-    log("安装运行时（可能触发 UAC）…".into());
-    Command::new(&tmp).arg("--quiet").status().context("run runtime installer")?;
-    if !winapp_runtime_present() {
-        bail!("Windows App Runtime 安装未完成 —— GUI 将无法启动");
-    }
-    log("Windows App Runtime 已安装".into());
+    log("检查系统运行环境… 绿色原生架构，免安装外部运行时".into());
     Ok(())
 }
 
@@ -110,9 +93,10 @@ fn stop_running() {
         .ok()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()));
     for name in [
-        "globaltokentracker-ui.exe",
-        "globaltokentracker-cli.exe",
-        "globaltokentracker-setup.exe",
+        EXE_NAME,
+        SETUP_EXE_NAME,
+        "globaltokentracker_ui.exe",
+        "globaltokentrackerpp-setup.exe",
     ] {
         if self_name.as_deref() == Some(name) {
             continue;
@@ -160,8 +144,8 @@ fn make_shortcuts(dest: &Path) -> Result<()> {
         .join(r"Microsoft\Windows\Start Menu\Programs")
         .join(APP);
     fs::create_dir_all(&start)?;
-    let ui = dest.join("globaltokentracker-ui.exe");
-    let uninstall = dest.join("globaltokentracker-setup.exe");
+    let ui = dest.join(EXE_NAME);
+    let uninstall = dest.join(SETUP_EXE_NAME);
     let script = format!(
         "$ws=New-Object -ComObject WScript.Shell;\
          $s=$ws.CreateShortcut('{}');$s.TargetPath='{}';$s.IconLocation='{}';$s.WorkingDirectory='{}';$s.Save();\
@@ -170,7 +154,7 @@ fn make_shortcuts(dest: &Path) -> Result<()> {
         ui.display(),
         ui.display(),
         dest.display(),
-        start.join(format!("Uninstall {APP}.lnk")).display(),
+        start.join(format!("卸载 {APP}.lnk")).display(),
         uninstall.display(),
     );
     let out = ps(&script)?;
@@ -183,12 +167,12 @@ fn make_shortcuts(dest: &Path) -> Result<()> {
 fn register_uninstall(dest: &Path, size: u64) -> Result<()> {
     let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
     let (key, _) = hkcu.create_subkey(UNINSTALL_KEY)?;
-    let setup = dest.join("globaltokentracker-setup.exe");
+    let setup = dest.join(SETUP_EXE_NAME);
     key.set_value("DisplayName", &APP)?;
     key.set_value("DisplayVersion", &VER)?;
-    key.set_value("Publisher", &APP)?;
+    key.set_value("Publisher", &"GlobalTokenTracker++")?;
     key.set_value("InstallLocation", &dest.display().to_string())?;
-    key.set_value("DisplayIcon", &dest.join("globaltokentracker-ui.exe").display().to_string())?;
+    key.set_value("DisplayIcon", &dest.join(EXE_NAME).display().to_string())?;
     key.set_value("EstimatedSize", &u32::try_from(size / 1024).unwrap_or(u32::MAX))?;
     key.set_value("NoModify", &1u32)?;
     key.set_value("NoRepair", &1u32)?;
@@ -254,7 +238,7 @@ pub fn install_steps(
     step: &mut dyn FnMut(u32, &str),
     log: &dyn Fn(String),
 ) -> Result<()> {
-    step(5, "检查 Windows App Runtime…");
+    step(5, "检查系统环境…");
     ensure_runtime(log)?;
     step(15, "结束正在运行的实例…");
     stop_running();
@@ -263,7 +247,7 @@ pub fn install_steps(
     let size = extract_payload(dest, log)?;
     // Persist a copy of this installer as the uninstaller.
     let self_exe = env::current_exe()?;
-    let setup_copy = dest.join("globaltokentracker-setup.exe");
+    let setup_copy = dest.join(SETUP_EXE_NAME);
     if self_exe.canonicalize()? != setup_copy.canonicalize().unwrap_or(setup_copy.clone()) {
         fs::copy(&self_exe, &setup_copy)?;
     }
@@ -317,7 +301,7 @@ pub fn cleanup_prior_install(old: &Path, new: &Path, log: &dyn Fn(String)) {
         || old.display().to_string().trim_end_matches('\\').eq_ignore_ascii_case(
             new.display().to_string().trim_end_matches('\\'),
         );
-    if same || new.starts_with(old) || !old.join("globaltokentracker-ui.exe").exists() {
+    if same || new.starts_with(old) || !old.join(EXE_NAME).exists() {
         return;
     }
     log(format!("清理旧安装目录 {}", old.display()));

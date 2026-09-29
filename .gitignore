@@ -13,3 +13,5 @@ flutter_ui/.flutter-plugins-dependencies
 flutter_ui/globaltokentracker_ffi.dll
 *.pdb
 *.zip
+dist/
+crates/setup/payload/

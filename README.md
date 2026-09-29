@@ -154,9 +154,24 @@
 
 ## 安装与使用
 
-### 下载运行（免安装便携版）
-从 [GitHub Releases](https://github.com/LiJiaHua1024/GlobalTokenTrackerPP/releases) 下载最新版本的 `GlobalTokenTrackerPP-v<版本>-windows-x64.zip`：
+你可以根据使用习惯任选以下方式之一：
 
+### 选项 A：单文件图形安装包（推荐）
+从 [GitHub Releases](https://github.com/LiJiaHua1024/GlobalTokenTrackerPP/releases) 下载 `GlobalTokenTrackerPP-Setup-<版本>-win-x64.exe`：
+- **独立隔离**：默认独立安装至 `%LOCALAPPDATA%\Programs\GlobalTokenTrackerPP`，与原版软件完全隔离，无任何覆盖或冲突。
+- **开箱即用**：自动创建开始菜单与桌面快捷方式，支持添加用户 PATH。
+- **免管理员提权**：基于绿色原生 Win32/GDI 安装引擎，无需管理员权限，无需 Windows App Runtime。
+- **干净卸载**：支持在 Windows “已安装的应用” 中一键平滑升级与干净移除。
+
+```powershell
+双击运行              # 打开暗黑风图形向导安装
+--quiet               # 静默后台安装
+--dir D:\Tools\GTT_PP # 自定义安装目录
+--uninstall           # 卸载移除（保留用户本地账本）
+```
+
+### 选项 B：免安装便携版 (Portable Zip)
+从 [GitHub Releases](https://github.com/LiJiaHua1024/GlobalTokenTrackerPP/releases) 下载 `GlobalTokenTrackerPP-v<版本>-windows-x64.zip`：
 1. 解压压缩包到任意本地目录（如 `D:\Tools\GlobalTokenTrackerPP`）；
 2. 双击运行 `globaltokentracker_ui.exe` 即可直接进入现代化 Material 3 仪表盘！
 

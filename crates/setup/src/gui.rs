@@ -31,7 +31,7 @@
 //! windows via SendMessage (marshalled to the UI thread) and posts a final
 //! WM_APP to swap the button row to its Done state.
 
-use crate::{install_steps, uninstall_steps, APP, VER};
+use crate::{install_steps, uninstall_steps, APP, EXE_NAME, VER};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -765,7 +765,7 @@ fn start_work(hwnd: HWND) {
                 Ok(()) => {
                     s.ok = true;
                     if mode == Mode::Install {
-                        s.launch = Some(dir.join("globaltokentracker-ui.exe"));
+                        s.launch = Some(dir.join(EXE_NAME));
                     }
                 }
                 Err(e) => {
@@ -846,12 +846,12 @@ pub fn run(
         let state_ptr = Box::into_raw(state);
 
         let title = w(match mode {
-            Mode::Uninstall => "GlobalTokenTracker 卸载",
+            Mode::Uninstall => "GlobalTokenTracker++ 卸载",
             Mode::Install => {
                 if update_from.is_some() {
-                    "GlobalTokenTracker 更新"
+                    "GlobalTokenTracker++ 更新"
                 } else {
-                    "GlobalTokenTracker 安装"
+                    "GlobalTokenTracker++ 安装"
                 }
             }
         });

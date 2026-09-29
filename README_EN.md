@@ -80,9 +80,24 @@ It incrementally and non-intrusively aggregates local AI coding tool telemetry: 
 
 ## Download & Usage
 
+Choose either of the two installation methods:
+
+### Option A: Standalone Setup Installer (Recommended)
+Download `GlobalTokenTrackerPP-Setup-<version>-win-x64.exe` from [GitHub Releases](https://github.com/LiJiaHua1024/GlobalTokenTrackerPP/releases):
+- **Fully Isolated**: Installs to `%LOCALAPPDATA%\Programs\GlobalTokenTrackerPP` by default, with no file or registry conflicts with upstream GlobalTokenTracker.
+- **Convenient**: Automatically creates Start Menu and Desktop shortcuts; supports adding to user PATH.
+- **Zero Dependencies**: Lightweight Win32/GDI installer, no administrator privileges or Windows App Runtime required.
+- **Clean Uninstall**: Easily upgrade or uninstall via Windows *Installed apps*.
+
+```powershell
+.\GlobalTokenTrackerPP-Setup-1.0.0-win-x64.exe           # GUI installer
+.\GlobalTokenTrackerPP-Setup-1.0.0-win-x64.exe --quiet   # Silent install
+```
+
+### Option B: Portable Standalone Zip
 Download `GlobalTokenTrackerPP-v<version>-windows-x64.zip` from [GitHub Releases](https://github.com/LiJiaHua1024/GlobalTokenTrackerPP/releases):
-1. Extract to any directory.
-2. Launch `globaltokentracker_ui.exe`.
+1. Extract the zip archive to any folder.
+2. Double-click `globaltokentracker_ui.exe` to run immediately!
 
 ---
 

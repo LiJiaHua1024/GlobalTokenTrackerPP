@@ -1,76 +1,68 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Builds release binaries and produces the single-file installer.
+  Builds release binaries and produces the single-file installer for GlobalTokenTracker++.
 
 .OUTPUT
-  dist\GlobalTokenTracker-Setup-<ver>.exe — self-extracting per-user installer
-  (embeds globaltokentracker-ui.exe + globaltokentracker-cli.exe as a compressed payload).
+  dist\GlobalTokenTrackerPP-Setup-<ver>-win-x64.exe — self-extracting per-user installer
+  (embeds Flutter Material Design 3 UI + Rust FFI runtime + data as a compressed payload).
 #>
 [CmdletBinding()]
 param(
     [switch]$SkipBuild
 )
 $ErrorActionPreference = 'Stop'
-# cargo may not be on PATH when invoked from a bare powershell session.
 $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue) -and (Test-Path $cargoBin)) {
     $env:PATH = "$cargoBin;$env:PATH"
 }
-$root   = Split-Path $PSScriptRoot
-$target = Join-Path $root 'target\release'
-$payloadDir = Join-Path $root 'crates\setup\payload'
-$payloadZip = Join-Path $payloadDir 'payload.zip'
+$root        = Split-Path $PSScriptRoot
+$target      = Join-Path $root 'target\release'
+$flutterUi   = Join-Path $root 'flutter_ui'
+$flutterDist = Join-Path $flutterUi 'build\windows\x64\runner\Release'
+$payloadDir  = Join-Path $root 'crates\setup\payload'
+$payloadZip  = Join-Path $payloadDir 'payload.zip'
 
 if (-not $SkipBuild) {
-    Write-Host '==> cargo build --release -p globaltokentracker-ui -p globaltokentracker-cli' -ForegroundColor Cyan
+    Write-Host '==> 1. cargo build --release -p globaltokentracker-ffi' -ForegroundColor Cyan
     Push-Location $root
-    cargo build --release -p globaltokentracker-ui -p globaltokentracker-cli
-    if ($LASTEXITCODE -ne 0) { Pop-Location; throw 'cargo build failed' }
+    cargo build --release -p globaltokentracker-ffi
+    if ($LASTEXITCODE -ne 0) { Pop-Location; throw 'cargo build ffi failed' }
     Pop-Location
+
+    Write-Host '==> 2. flutter build windows --release' -ForegroundColor Cyan
+    Push-Location $flutterUi
+    & flutter build windows --release
+    if ($LASTEXITCODE -ne 0) { Pop-Location; throw 'flutter build failed' }
+    Pop-Location
+
+    Copy-Item (Join-Path $target 'globaltokentracker_ffi.dll') $flutterDist -Force
 }
 
-foreach ($exe in 'globaltokentracker-ui.exe', 'globaltokentracker-cli.exe') {
-    if (-not (Test-Path (Join-Path $target $exe))) { throw "missing build output: $exe" }
+if (-not (Test-Path (Join-Path $flutterDist 'globaltokentracker_ui.exe'))) {
+    throw "missing build output: globaltokentracker_ui.exe in $flutterDist"
 }
 
-# Sign the inner exes BEFORE they are embedded — Windows checks signatures on
-# the payload binaries at runtime, not just on the installer wrapper.
-& (Join-Path $PSScriptRoot 'sign.ps1') -File @(
-    (Join-Path $target 'globaltokentracker-ui.exe'),
-    (Join-Path $target 'globaltokentracker-cli.exe')
-)
-
-Write-Host '==> staging payload.zip' -ForegroundColor Cyan
+Write-Host '==> staging payload.zip from Flutter Release distribution' -ForegroundColor Cyan
 New-Item -ItemType Directory -Force -Path $payloadDir | Out-Null
 if (Test-Path $payloadZip) { Remove-Item $payloadZip -Force }
-Compress-Archive -Path (Join-Path $target 'globaltokentracker-ui.exe'),
-                       (Join-Path $target 'globaltokentracker-cli.exe') `
-                 -DestinationPath $payloadZip -CompressionLevel Optimal
+Compress-Archive -Path "$flutterDist\*" -DestinationPath $payloadZip -CompressionLevel Optimal
 
 Write-Host '==> cargo build --release -p globaltokentracker-setup' -ForegroundColor Cyan
 Push-Location $root
-# Cargo's build-script freshness can miss a newly-created payload.zip —
-# touching build.rs forces it to re-run and re-embed the real payload.
 (Get-Item (Join-Path $root 'crates\setup\build.rs')).LastWriteTime = Get-Date
 cargo build --release -p globaltokentracker-setup
 $rc = $LASTEXITCODE
 Pop-Location
-Remove-Item $payloadZip -Force   # never keep the payload around
+Remove-Item $payloadZip -Force
+
 if ($rc -ne 0) { throw 'setup build failed' }
 
-$ver = (Select-String -Path (Join-Path $root 'Cargo.toml') `
-        -Pattern '(?m)^version\s*=\s*"([^"]+)"' |
-        Select-Object -First 1).Matches.Groups[1].Value
-if (-not $ver) { $ver = '0.1.0' }
-
+$ver = '1.0.0'
 $dist = Join-Path $root 'dist'
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
-$out = Join-Path $dist "GlobalTokenTracker-Setup-$ver-win-x64.exe"
+$out = Join-Path $dist "GlobalTokenTrackerPP-Setup-$ver-win-x64.exe"
 Copy-Item (Join-Path $target 'globaltokentracker-setup.exe') $out -Force
-
-# Sign the installer itself — this is the file recipients' SmartScreen sees.
-& (Join-Path $PSScriptRoot 'sign.ps1') -File $out
 
 $mb  = [math]::Round((Get-Item $out).Length / 1MB, 2)
 $sha = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
