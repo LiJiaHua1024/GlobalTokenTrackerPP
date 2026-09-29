@@ -24,6 +24,7 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+#[allow(dead_code)]
 mod gui;
 
 static PAYLOAD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/payload.zip"));
@@ -446,12 +447,34 @@ fn main() -> Result<()> {
     };
 
     if gui_mode {
-        return gui::run(
-            if uninstall_flag { gui::Mode::Uninstall } else { gui::Mode::Install },
-            &dest,
-            prior.as_ref().map(|(v, _)| v.as_str()),
-            prior.as_ref().map(|(_, d)| d.clone()),
-        );
+        let temp_dir = std::env::temp_dir().join(format!("GTT_Setup_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp_dir);
+        let log = |_s: String| {};
+        if let Err(e) = extract_payload(&temp_dir, &log) {
+            eprintln!("Failed to extract installer payload: {e}");
+            return Ok(());
+        }
+
+        let self_exe = env::current_exe()?;
+        let flutter_exe = temp_dir.join(EXE_NAME);
+
+        let mut cmd = Command::new(&flutter_exe);
+        if uninstall_flag {
+            cmd.arg("--uninstall");
+        } else {
+            cmd.arg("--setup");
+        }
+        cmd.arg("--installer-source").arg(&temp_dir);
+        cmd.arg("--installer-exe").arg(&self_exe);
+        if let Some(d) = dir {
+            cmd.arg("--dest").arg(d);
+        }
+
+        let _ = cmd.status();
+
+        // Clean up temporary extracted folder after installer window closes
+        let _ = schedule_dir_delete(&temp_dir);
+        return Ok(());
     }
 
     let log = |s: String| println!("    {s}");

@@ -2,7 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:window_manager/window_manager.dart';
 
 class CustomTitleBar extends StatefulWidget {
-  const CustomTitleBar({super.key});
+  final String? title;
+  final bool canMaximize;
+
+  const CustomTitleBar({super.key, this.title, this.canMaximize = true});
 
   @override
   State<CustomTitleBar> createState() => _CustomTitleBarState();
@@ -79,29 +82,31 @@ class _CustomTitleBarState extends State<CustomTitleBar> with WindowListener {
                 ),
                 const SizedBox(width: 8),
                 Text(
-                  'GlobalTokenTracker++',
+                  widget.title ?? 'GlobalTokenTracker++',
                   style: theme.textTheme.labelMedium?.copyWith(
                     fontWeight: FontWeight.bold,
                     color: theme.colorScheme.onSurface,
                     letterSpacing: 0.2,
                   ),
                 ),
-                const SizedBox(width: 6),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                  decoration: BoxDecoration(
-                    color: theme.colorScheme.surfaceVariant.withValues(alpha: 0.7),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Text(
-                    'Material 3',
-                    style: TextStyle(
-                      fontSize: 9,
-                      fontWeight: FontWeight.w600,
-                      color: theme.colorScheme.primary,
+                if (widget.title == null) ...[
+                  const SizedBox(width: 6),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.surfaceVariant.withValues(alpha: 0.7),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Text(
+                      'Material 3',
+                      style: TextStyle(
+                        fontSize: 9,
+                        fontWeight: FontWeight.w600,
+                        color: theme.colorScheme.primary,
+                      ),
                     ),
                   ),
-                ),
+                ],
               ],
             ),
           ),
@@ -110,13 +115,15 @@ class _CustomTitleBarState extends State<CustomTitleBar> with WindowListener {
           Expanded(
             child: GestureDetector(
               behavior: HitTestBehavior.translucent,
-              onDoubleTap: () async {
-                if (await windowManager.isMaximized()) {
-                  await windowManager.unmaximize();
-                } else {
-                  await windowManager.maximize();
-                }
-              },
+              onDoubleTap: widget.canMaximize
+                  ? () async {
+                      if (await windowManager.isMaximized()) {
+                        await windowManager.unmaximize();
+                      } else {
+                        await windowManager.maximize();
+                      }
+                    }
+                  : null,
               child: const DragToMoveArea(
                 child: SizedBox(
                   height: double.infinity,
@@ -131,18 +138,19 @@ class _CustomTitleBarState extends State<CustomTitleBar> with WindowListener {
             tooltip: '最小化',
             onPressed: () => windowManager.minimize(),
           ),
-          _TitleBarButton(
-            icon: _isMaximized ? Icons.filter_none : Icons.crop_square,
-            tooltip: _isMaximized ? '向下还原' : '最大化',
-            iconSize: _isMaximized ? 12 : 14,
-            onPressed: () async {
-              if (await windowManager.isMaximized()) {
-                await windowManager.unmaximize();
-              } else {
-                await windowManager.maximize();
-              }
-            },
-          ),
+          if (widget.canMaximize)
+            _TitleBarButton(
+              icon: _isMaximized ? Icons.filter_none : Icons.crop_square,
+              tooltip: _isMaximized ? '向下还原' : '最大化',
+              iconSize: _isMaximized ? 12 : 14,
+              onPressed: () async {
+                if (await windowManager.isMaximized()) {
+                  await windowManager.unmaximize();
+                } else {
+                  await windowManager.maximize();
+                }
+              },
+            ),
           _TitleBarButton(
             icon: Icons.close,
             tooltip: '关闭',

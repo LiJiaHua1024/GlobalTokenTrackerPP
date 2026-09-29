@@ -7,22 +7,26 @@ import 'core/ffi_bridge.dart';
 import 'core/theme.dart';
 import 'pages/details_page.dart';
 import 'pages/overview_page.dart';
+import 'pages/installer_page.dart';
 import 'pages/pricing_page.dart';
 import 'pages/quotas_page.dart';
 import 'pages/settings_page.dart';
 import 'pages/sources_page.dart';
 import 'widgets/custom_title_bar.dart';
 
-void main() async {
+void main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  final isInstaller = args.contains('--setup') || args.contains('--uninstall');
 
   // Initialize Desktop Window Manager for seamless custom titlebar
   try {
     await windowManager.ensureInitialized();
 
-    const windowOptions = WindowOptions(
-      size: Size(1300, 820),
-      minimumSize: Size(960, 640),
+    final windowOptions = WindowOptions(
+      size: isInstaller ? const Size(660, 520) : const Size(1300, 820),
+      minimumSize: isInstaller ? const Size(660, 520) : const Size(960, 640),
+      maximumSize: isInstaller ? const Size(660, 520) : null,
       center: true,
       backgroundColor: Colors.transparent,
       skipTaskbar: false,
@@ -30,11 +34,17 @@ void main() async {
     );
 
     windowManager.waitUntilReadyToShow(windowOptions, () async {
+      await windowManager.setResizable(!isInstaller);
       await windowManager.show();
       await windowManager.focus();
     });
   } catch (e) {
     debugPrint("Failed to initialize windowManager: $e");
+  }
+
+  if (isInstaller) {
+    runApp(InstallerApp(args: args));
+    return;
   }
 
   // Initialize native Rust engine via FFI
