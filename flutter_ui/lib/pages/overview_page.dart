@@ -150,34 +150,41 @@ class _OverviewPageState extends State<OverviewPage> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             // Top Bar: Time Range Selector & Action Buttons
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            Wrap(
+              alignment: WrapAlignment.spaceBetween,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 12,
+              runSpacing: 12,
               children: [
-                SegmentedButton<String>(
-                  segments: const [
-                    ButtonSegment(value: 'today', label: Text('今日')),
-                    ButtonSegment(value: 'week', label: Text('近 7 天')),
-                    ButtonSegment(value: 'month', label: Text('近 30 天')),
-                    ButtonSegment(value: 'all', label: Text('全部')),
-                  ],
-                  selected: {_selectedRange},
-                  onSelectionChanged: (val) {
-                    final newRange = val.first;
-                    final key = _cacheKey(newRange);
-                    // Instant optimistic update (0ms latency):
-                    setState(() {
-                      _selectedRange = newRange;
-                      if (_overviewCache.containsKey(key)) {
-                        _data = _overviewCache[key];
-                        _loading = false;
-                      } else {
-                        _loading = true; // Show subtle progress bar, keep page mounted
-                      }
-                    });
-                    _loadData(newRange);
-                  },
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: SegmentedButton<String>(
+                    segments: const [
+                      ButtonSegment(value: 'today', label: Text('今日')),
+                      ButtonSegment(value: 'week', label: Text('近 7 天')),
+                      ButtonSegment(value: 'month', label: Text('近 30 天')),
+                      ButtonSegment(value: 'all', label: Text('全部')),
+                    ],
+                    selected: {_selectedRange},
+                    onSelectionChanged: (val) {
+                      final newRange = val.first;
+                      final key = _cacheKey(newRange);
+                      // Instant optimistic update (0ms latency):
+                      setState(() {
+                        _selectedRange = newRange;
+                        if (_overviewCache.containsKey(key)) {
+                          _data = _overviewCache[key];
+                          _loading = false;
+                        } else {
+                          _loading = true; // Show subtle progress bar, keep page mounted
+                        }
+                      });
+                      _loadData(newRange);
+                    },
+                  ),
                 ),
                 Row(
+                  mainAxisSize: MainAxisSize.min,
                   children: [
                     OutlinedButton.icon(
                       onPressed: _triggerScan,

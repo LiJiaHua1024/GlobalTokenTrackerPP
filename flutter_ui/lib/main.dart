@@ -86,16 +86,19 @@ class GlobalTokenTrackerApp extends StatelessWidget {
           return child ?? const SizedBox.shrink();
         }
         final mq = MediaQuery.of(context);
+        final scaledW = mq.size.width / scale;
+        final scaledH = mq.size.height / scale;
+
         return MediaQuery(
           data: mq.copyWith(
-            size: Size(mq.size.width / scale, mq.size.height / scale),
+            size: Size(scaledW, scaledH),
           ),
-          child: Transform.scale(
-            scale: scale,
+          child: FittedBox(
+            fit: BoxFit.fill,
             alignment: Alignment.topLeft,
             child: SizedBox(
-              width: mq.size.width / scale,
-              height: mq.size.height / scale,
+              width: scaledW,
+              height: scaledH,
               child: child,
             ),
           ),

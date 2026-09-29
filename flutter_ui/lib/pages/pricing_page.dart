@@ -102,8 +102,11 @@ class _PricingPageState extends State<PricingPage> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // Header Bar
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          Wrap(
+            alignment: WrapAlignment.spaceBetween,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 12,
+            runSpacing: 12,
             children: [
               Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -120,6 +123,7 @@ class _PricingPageState extends State<PricingPage> {
                 ],
               ),
               Row(
+                mainAxisSize: MainAxisSize.min,
                 children: [
                   IconButton.filledTonal(
                     onPressed: () => _loadPrices(force: true),

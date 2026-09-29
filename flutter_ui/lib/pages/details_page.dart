@@ -75,14 +75,18 @@ class _DetailsPageState extends State<DetailsPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          Wrap(
+            alignment: WrapAlignment.spaceBetween,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 12,
+            runSpacing: 12,
             children: [
               Text(
                 '事件明细 (共 $totalEvents 条)',
                 style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
               ),
               Row(
+                mainAxisSize: MainAxisSize.min,
                 children: [
                   IconButton.filledTonal(
                     onPressed: _currentPage > 0 ? () => _loadPage(_currentPage - 1) : null,

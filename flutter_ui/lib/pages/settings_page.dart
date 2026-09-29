@@ -89,21 +89,24 @@ class SettingsPage extends StatelessWidget {
                     style: TextStyle(color: theme.colorScheme.outline),
                   ),
                   const SizedBox(height: 16),
-                  SegmentedButton<double>(
-                    segments: const [
-                      ButtonSegment(value: 0.85, label: Text('85% 紧凑')),
-                      ButtonSegment(value: 1.0, label: Text('100% 默认')),
-                      ButtonSegment(value: 1.15, label: Text('115% 适中')),
-                      ButtonSegment(value: 1.25, label: Text('125% 大号')),
-                      ButtonSegment(value: 1.40, label: Text('140% 超大')),
-                    ],
-                    selected: {
-                      [0.85, 1.0, 1.15, 1.25, 1.40].contains(
-                              double.parse(themeProvider.uiScale.toStringAsFixed(2)))
-                          ? double.parse(themeProvider.uiScale.toStringAsFixed(2))
-                          : 1.0
-                    },
-                    onSelectionChanged: (val) => themeProvider.setUiScale(val.first),
+                  SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: SegmentedButton<double>(
+                      segments: const [
+                        ButtonSegment(value: 0.85, label: Text('85% 紧凑')),
+                        ButtonSegment(value: 1.0, label: Text('100% 默认')),
+                        ButtonSegment(value: 1.15, label: Text('115% 适中')),
+                        ButtonSegment(value: 1.25, label: Text('125% 大号')),
+                        ButtonSegment(value: 1.40, label: Text('140% 超大')),
+                      ],
+                      selected: {
+                        [0.85, 1.0, 1.15, 1.25, 1.40].contains(
+                                double.parse(themeProvider.uiScale.toStringAsFixed(2)))
+                            ? double.parse(themeProvider.uiScale.toStringAsFixed(2))
+                            : 1.0
+                      },
+                      onSelectionChanged: (val) => themeProvider.setUiScale(val.first),
+                    ),
                   ),
                   const SizedBox(height: 12),
                   Row(
@@ -276,8 +279,11 @@ class SettingsPage extends StatelessWidget {
 
                   // Check Interval SegmentedButton
                   if (updateProvider.settings.autoCheckEnabled) ...[
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    Wrap(
+                      alignment: WrapAlignment.spaceBetween,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      spacing: 16,
+                      runSpacing: 12,
                       children: [
                         Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -290,23 +296,26 @@ class SettingsPage extends StatelessWidget {
                             ),
                           ],
                         ),
-                        SegmentedButton<UpdateCheckInterval>(
-                          segments: const [
-                            ButtonSegment(
-                              value: UpdateCheckInterval.onStartup,
-                              label: Text('每次启动'),
-                            ),
-                            ButtonSegment(
-                              value: UpdateCheckInterval.daily,
-                              label: Text('每天一次'),
-                            ),
-                            ButtonSegment(
-                              value: UpdateCheckInterval.weekly,
-                              label: Text('每周一次'),
-                            ),
-                          ],
-                          selected: {updateProvider.settings.checkInterval},
-                          onSelectionChanged: (val) => updateProvider.setCheckInterval(val.first),
+                        SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: SegmentedButton<UpdateCheckInterval>(
+                            segments: const [
+                              ButtonSegment(
+                                value: UpdateCheckInterval.onStartup,
+                                label: Text('每次启动'),
+                              ),
+                              ButtonSegment(
+                                value: UpdateCheckInterval.daily,
+                                label: Text('每天一次'),
+                              ),
+                              ButtonSegment(
+                                value: UpdateCheckInterval.weekly,
+                                label: Text('每周一次'),
+                              ),
+                            ],
+                            selected: {updateProvider.settings.checkInterval},
+                            onSelectionChanged: (val) => updateProvider.setCheckInterval(val.first),
+                          ),
                         ),
                       ],
                     ),
