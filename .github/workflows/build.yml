@@ -81,13 +81,13 @@ jobs:
           $portableMb   = [math]::Round($portable.Length / 1MB, 2)
 
           "### 📦 Automated Build Artifacts" >> $env:GITHUB_STEP_SUMMARY
-          "- **Commit**: \`${{ github.sha }}\`" >> $env:GITHUB_STEP_SUMMARY
-          "- **Branch**: \`${{ github.ref_name }}\`" >> $env:GITHUB_STEP_SUMMARY
+          "- **Commit**: ``${{ github.sha }}``" >> $env:GITHUB_STEP_SUMMARY
+          "- **Branch**: ``${{ github.ref_name }}``" >> $env:GITHUB_STEP_SUMMARY
           "" >> $env:GITHUB_STEP_SUMMARY
           "| Artifact | Filename | Size | SHA-256 |" >> $env:GITHUB_STEP_SUMMARY
           "| :--- | :--- | :--- | :--- |" >> $env:GITHUB_STEP_SUMMARY
-          "| **安装包 (Setup)** | \`$($installer.Name)\` | $installerMb MB | \`$installerSha\` |" >> $env:GITHUB_STEP_SUMMARY
-          "| **便携版 (Portable Zip)** | \`$($portable.Name)\` | $portableMb MB | \`$portableSha\` |" >> $env:GITHUB_STEP_SUMMARY
+          "| **安装包 (Setup)** | ``$($installer.Name)`` | $installerMb MB | ``$installerSha`` |" >> $env:GITHUB_STEP_SUMMARY
+          "| **便携版 (Portable Zip)** | ``$($portable.Name)`` | $portableMb MB | ``$portableSha`` |" >> $env:GITHUB_STEP_SUMMARY
 
       - name: Upload Installer Asset
         uses: actions/upload-artifact@v4
