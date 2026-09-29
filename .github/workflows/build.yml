@@ -35,7 +35,7 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 1
 
@@ -90,7 +90,7 @@ jobs:
           "| **便携版 (Portable Zip)** | ``$($portable.Name)`` | $portableMb MB | ``$portableSha`` |" >> $env:GITHUB_STEP_SUMMARY
 
       - name: Upload Installer Asset
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: GlobalTokenTrackerPP-Setup-win-x64
           path: dist/GlobalTokenTrackerPP-Setup-*-win-x64.exe
@@ -98,7 +98,7 @@ jobs:
           retention-days: 14
 
       - name: Upload Portable Zip Asset
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: GlobalTokenTrackerPP-Portable-win-x64
           path: dist/GlobalTokenTrackerPP-*-windows-x64.zip

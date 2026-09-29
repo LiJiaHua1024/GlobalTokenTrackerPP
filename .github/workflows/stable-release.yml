@@ -104,7 +104,7 @@ jobs:
             --commit "$GITHUB_SHA" \
             --release-date "$(TZ=Asia/Shanghai date +%F)" \
             --sha256 0000000000000000000000000000000000000000000000000000000000000000 \
-            --asset-filename "GlobalTokenTracker-Setup-${RELEASE_TAG}-win-x64.exe" \
+            --asset-filename "GlobalTokenTrackerPP-Setup-${RELEASE_TAG}-win-x64.exe" \
             --release-summary 'Stable release-note tooling verification summary.' \
             --changelog-file "$test_dir/STABLE_CHANGELOG.md"
           if grep -Eq '\{\{[A-Z0-9_]+\}\}' "$test_dir/RELEASE_NOTES.md"; then
@@ -170,7 +170,7 @@ jobs:
         shell: pwsh
         run: |
           installer\package.ps1
-          $exe = Get-Item "dist\GlobalTokenTracker-Setup-${{ steps.identity.outputs.version_name }}-win-x64.exe"
+          $exe = Get-Item "dist\GlobalTokenTrackerPP-Setup-${{ steps.identity.outputs.version_name }}-win-x64.exe"
           if ($exe.Length -lt 1MB) { throw "installer suspiciously small: $($exe.Length)" }
           "installer_size=$($exe.Length)" >> "$env:GITHUB_STEP_SUMMARY"
 
@@ -243,9 +243,9 @@ jobs:
           GTT_SIGN_PFX: ${{ secrets.GTT_SIGN_PFX }}
         run: |
           set -euo pipefail
-          setup="dist/GlobalTokenTracker-Setup-${EXPECTED_VERSION}-win-x64.exe"
+          setup="dist/GlobalTokenTrackerPP-Setup-${EXPECTED_VERSION}-win-x64.exe"
           test -s "$setup"
-          asset_filename="GlobalTokenTracker-Setup-${RELEASE_TAG}-win-x64.exe"
+          asset_filename="GlobalTokenTrackerPP-Setup-${RELEASE_TAG}-win-x64.exe"
           mkdir -p release-asset
           cp "$setup" "release-asset/$asset_filename"
           asset_sha256="$(sha256sum "release-asset/$asset_filename" | awk '{print $1}')"
