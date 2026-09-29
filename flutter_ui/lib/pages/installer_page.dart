@@ -222,8 +222,6 @@ class _InstallerPageState extends State<InstallerPage> {
 
         final appData = Platform.environment['APPDATA'] ?? '';
         final startMenuDir = '$appData\\Microsoft\\Windows\\Start Menu\\Programs\\GlobalTokenTracker++';
-        final userProfile = Platform.environment['USERPROFILE'] ?? '';
-        final desktopDir = '$userProfile\\Desktop';
 
         final shortcutCmd = '''
         \$ws = New-Object -ComObject WScript.Shell
@@ -241,7 +239,8 @@ class _InstallerPageState extends State<InstallerPage> {
             \$u.Save()
         }
         if ("$_shortcutDesktop" -eq "True") {
-            \$d = \$ws.CreateShortcut("$desktopDir\\GlobalTokenTracker++.lnk")
+            \$desktopPath = [System.Environment]::GetFolderPath('Desktop')
+            \$d = \$ws.CreateShortcut("\$desktopPath\\GlobalTokenTracker++.lnk")
             \$d.TargetPath = "$dest\\globaltokentracker_ui.exe"
             \$d.WorkingDirectory = "$dest"
             \$d.Save()
@@ -314,18 +313,28 @@ class _InstallerPageState extends State<InstallerPage> {
         await startMenuDir.delete(recursive: true);
       }
 
-      final userProfile = Platform.environment['USERPROFILE'] ?? '';
-      final desktopLnk = File('$userProfile\\Desktop\\GlobalTokenTracker++.lnk');
-      if (await desktopLnk.exists()) {
-        await desktopLnk.delete();
-      }
+      final dest = _pathController.text.trim();
+      final removeShortcutsCmd = '''
+      \$desktopPath = [System.Environment]::GetFolderPath('Desktop')
+      Remove-Item "\$desktopPath\\GlobalTokenTracker++.lnk" -Force -ErrorAction SilentlyContinue
+      Remove-Item "\$env:USERPROFILE\\Desktop\\GlobalTokenTracker++.lnk" -Force -ErrorAction SilentlyContinue
+      ''';
+      await Process.run('powershell', ['-NoProfile', '-NonInteractive', '-Command', removeShortcutsCmd]);
 
-      // 3. Remove Registry Key
+      // 3. Remove Registry Key & PATH
       setState(() {
-        _statusMessage = '清理系统卸载项...';
+        _statusMessage = '清理系统卸载项与环境变量...';
         _progress = 0.6;
       });
-      final cleanRegCmd = 'Remove-Item -Path "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\GlobalTokenTrackerPP" -Recurse -Force -ErrorAction SilentlyContinue';
+      final cleanRegCmd = '''
+      Remove-Item -Path "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\GlobalTokenTrackerPP" -Recurse -Force -ErrorAction SilentlyContinue
+      \$reg = "HKCU:\\Environment"
+      \$cur = (Get-ItemProperty -Path \$reg -Name Path -ErrorAction SilentlyContinue).Path
+      if (\$cur) {
+          \$kept = (\$cur -split ';') | Where-Object { \$_.TrimEnd('\\') -ne "$dest".TrimEnd('\\') }
+          Set-ItemProperty -Path \$reg -Name Path -Value (\$kept -join ';')
+      }
+      ''';
       await Process.run('powershell', ['-NoProfile', '-NonInteractive', '-Command', cleanRegCmd]);
 
       // 4. Remove install folder
@@ -333,7 +342,6 @@ class _InstallerPageState extends State<InstallerPage> {
         _statusMessage = '删除程序文件...';
         _progress = 0.8;
       });
-      final dest = _pathController.text.trim();
       final installDir = Directory(dest);
       if (await installDir.exists()) {
         // Schedule deferred deletion via cmd
