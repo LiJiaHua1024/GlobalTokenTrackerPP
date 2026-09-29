@@ -127,10 +127,8 @@ impl SourceAdapter for CommandCode {
             };
             match v.get("type").and_then(Value::as_str) {
                 // Session header — first line; also emitted on forks/resumes.
-                Some("session") => {
-                    if state.cwd.is_none() {
-                        state.cwd = text(&v["cwd"]);
-                    }
+                Some("session") if state.cwd.is_none() => {
+                    state.cwd = text(&v["cwd"]);
                 }
                 Some("message") => {
                     if v["message"]["role"].as_str() != Some("assistant") {

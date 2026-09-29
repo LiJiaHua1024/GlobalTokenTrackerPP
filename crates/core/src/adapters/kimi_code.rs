@@ -125,10 +125,8 @@ impl SourceAdapter for KimiCode {
             };
             match v.get("type").and_then(Value::as_str) {
                 // First config.update seen wins — a session can emit several.
-                Some("config.update") => {
-                    if state.project.is_none() {
-                        state.project = text(&v["cwd"]);
-                    }
+                Some("config.update") if state.project.is_none() => {
+                    state.project = text(&v["cwd"]);
                 }
                 Some("usage.record") => {
                     let u = &v["usage"];

@@ -81,9 +81,8 @@ fn installed_info() -> Option<(String, PathBuf)> {
     Some((ver, dir))
 }
 
-fn ensure_runtime(log: &dyn Fn(String)) -> Result<()> {
+fn ensure_runtime(log: &dyn Fn(String)) {
     log("检查系统运行环境… 绿色原生架构，免安装外部运行时".into());
-    Ok(())
 }
 
 fn stop_running() {
@@ -240,7 +239,7 @@ pub fn install_steps(
     log: &dyn Fn(String),
 ) -> Result<()> {
     step(5, "检查系统环境…");
-    ensure_runtime(log)?;
+    ensure_runtime(log);
     step(15, "结束正在运行的实例…");
     stop_running();
     fs::create_dir_all(dest)?;
