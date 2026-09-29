@@ -5,6 +5,7 @@ import 'package:window_manager/window_manager.dart';
 
 import 'core/ffi_bridge.dart';
 import 'core/theme.dart';
+import 'core/update_provider.dart';
 import 'pages/details_page.dart';
 import 'pages/overview_page.dart';
 import 'pages/installer_page.dart';
@@ -13,6 +14,7 @@ import 'pages/quotas_page.dart';
 import 'pages/settings_page.dart';
 import 'pages/sources_page.dart';
 import 'widgets/custom_title_bar.dart';
+import 'widgets/update_banner.dart';
 
 void main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -55,8 +57,11 @@ void main(List<String> args) async {
   }
 
   runApp(
-    ChangeNotifierProvider(
-      create: (_) => ThemeProvider(),
+    MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (_) => ThemeProvider()),
+        ChangeNotifierProvider(create: (_) => UpdateProvider()),
+      ],
       child: const GlobalTokenTrackerApp(),
     ),
   );
@@ -121,7 +126,20 @@ class _MainShellState extends State<MainShell> {
   ];
 
   @override
+  void initState() {
+    super.initState();
+    // Non-blocking auto-check with gentle delay after window is presented
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        Provider.of<UpdateProvider>(context, listen: false).initAutoCheck();
+      }
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final updateProvider = Provider.of<UpdateProvider>(context);
+
     return Scaffold(
       body: Column(
         children: [
@@ -140,55 +158,71 @@ class _MainShellState extends State<MainShell> {
                       _selectedIndex = index;
                     });
                   },
-                  destinations: const [
-                    NavigationRailDestination(
+                  destinations: [
+                    const NavigationRailDestination(
                       icon: Icon(Icons.dashboard_outlined),
                       selectedIcon: Icon(Icons.dashboard),
                       label: Text('总览'),
                     ),
-                    NavigationRailDestination(
+                    const NavigationRailDestination(
                       icon: Icon(Icons.table_rows_outlined),
                       selectedIcon: Icon(Icons.table_rows),
                       label: Text('明细'),
                     ),
-                    NavigationRailDestination(
+                    const NavigationRailDestination(
                       icon: Icon(Icons.pie_chart_outline),
                       selectedIcon: Icon(Icons.pie_chart),
                       label: Text('配额'),
                     ),
-                    NavigationRailDestination(
+                    const NavigationRailDestination(
                       icon: Icon(Icons.hub_outlined),
                       selectedIcon: Icon(Icons.hub),
                       label: Text('数据源'),
                     ),
-                    NavigationRailDestination(
+                    const NavigationRailDestination(
                       icon: Icon(Icons.monetization_on_outlined),
                       selectedIcon: Icon(Icons.monetization_on),
                       label: Text('价格表'),
                     ),
                     NavigationRailDestination(
-                      icon: Icon(Icons.settings_outlined),
-                      selectedIcon: Icon(Icons.settings),
-                      label: Text('设置'),
+                      icon: Badge(
+                        isLabelVisible: updateProvider.hasUpdate,
+                        child: const Icon(Icons.settings_outlined),
+                      ),
+                      selectedIcon: Badge(
+                        isLabelVisible: updateProvider.hasUpdate,
+                        child: const Icon(Icons.settings),
+                      ),
+                      label: const Text('设置'),
                     ),
                   ],
                 ),
                 const VerticalDivider(thickness: 1, width: 1),
 
-                // Main Content View with Material Motion Page Transition
+                // Main Content View with Material Motion Page Transition and Update Banner
                 Expanded(
-                  child: PageTransitionSwitcher(
-                    duration: const Duration(milliseconds: 300),
-                    transitionBuilder:
-                        (child, primaryAnimation, secondaryAnimation) {
-                      return SharedAxisTransition(
-                        animation: primaryAnimation,
-                        secondaryAnimation: secondaryAnimation,
-                        transitionType: SharedAxisTransitionType.vertical,
-                        child: child,
-                      );
-                    },
-                    child: _pages[_selectedIndex],
+                  child: Column(
+                    children: [
+                      // Gentle, non-intrusive Update Notification Banner
+                      const UpdateBanner(),
+
+                      // Animated page views
+                      Expanded(
+                        child: PageTransitionSwitcher(
+                          duration: const Duration(milliseconds: 300),
+                          transitionBuilder:
+                              (child, primaryAnimation, secondaryAnimation) {
+                            return SharedAxisTransition(
+                              animation: primaryAnimation,
+                              secondaryAnimation: secondaryAnimation,
+                              transitionType: SharedAxisTransitionType.vertical,
+                              child: child,
+                            );
+                          },
+                          child: _pages[_selectedIndex],
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ],
