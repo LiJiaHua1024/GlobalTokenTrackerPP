@@ -164,6 +164,12 @@ jobs:
           set -euo pipefail
           cargo build --release --workspace
 
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
       - name: Validate installer packaging
         id: package
         if: ${{ !cancelled() && steps.release.outcome == 'success' }}
@@ -222,6 +228,12 @@ jobs:
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@v2
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
 
       - name: Build installer package
         shell: pwsh
