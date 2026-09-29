@@ -35,7 +35,7 @@ void main(List<String> args) async {
       titleBarStyle: TitleBarStyle.hidden,
     );
 
-    windowManager.waitUntilReadyToShow(windowOptions, () async {
+    await windowManager.waitUntilReadyToShow(windowOptions, () async {
       await windowManager.setResizable(!isInstaller);
       await windowManager.show();
       await windowManager.focus();
