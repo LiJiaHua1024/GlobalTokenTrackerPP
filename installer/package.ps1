@@ -10,9 +10,18 @@
 [CmdletBinding()]
 param(
     [switch]$SkipBuild,
-    [string]$Version = '1.0.0'
+    # Optional override; defaults to the [workspace.package] version in the root Cargo.toml
+    # so the installer version always matches the release pipeline's single source of truth.
+    [string]$Version
 )
 $ErrorActionPreference = 'Stop'
+$root        = Split-Path $PSScriptRoot
+if (-not $Version) {
+    $tomlText = Get-Content (Join-Path $root 'Cargo.toml') -Raw
+    $match = [regex]::Match($tomlText, '(?s)\[workspace\.package\].*?version\s*=\s*"([^"]+)"')
+    if (-not $match.Success) { throw 'cannot resolve version: [workspace.package] version missing in Cargo.toml' }
+    $Version = $match.Groups[1].Value
+}
 $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue) -and (Test-Path $cargoBin)) {
     $env:PATH = "$cargoBin;$env:PATH"
@@ -20,7 +29,6 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue) -and (Test-Path $carg
 if (-not (Get-Command flutter -ErrorAction SilentlyContinue) -and (Test-Path 'F:\flutter\bin')) {
     $env:PATH = "F:\flutter\bin;$env:PATH"
 }
-$root        = Split-Path $PSScriptRoot
 $target      = Join-Path $root 'target\release'
 $flutterUi   = Join-Path $root 'flutter_ui'
 $flutterDist = Join-Path $flutterUi 'build\windows\x64\runner\Release'
