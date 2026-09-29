@@ -9,7 +9,8 @@
 #>
 [CmdletBinding()]
 param(
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [string]$Version = '1.0.0'
 )
 $ErrorActionPreference = 'Stop'
 $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
@@ -61,15 +62,29 @@ Remove-Item $payloadZip -Force
 
 if ($rc -ne 0) { throw 'setup build failed' }
 
-$ver = '1.0.0'
+$ver = $Version
 $dist = Join-Path $root 'dist'
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
+
+# 1. Self-extracting GUI Setup Installer
 $out = Join-Path $dist "GlobalTokenTrackerPP-Setup-$ver-win-x64.exe"
 Copy-Item (Join-Path $target 'globaltokentracker-setup.exe') $out -Force
-
 $mb  = [math]::Round((Get-Item $out).Length / 1MB, 2)
 $sha = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
+
+# 2. Portable Distribution Zip (extract and run directly without installation)
+$zipOut = Join-Path $dist "GlobalTokenTrackerPP-$ver-windows-x64.zip"
+if (Test-Path $zipOut) { Remove-Item $zipOut -Force }
+Write-Host "==> creating portable distribution zip: $zipOut" -ForegroundColor Cyan
+Compress-Archive -Path "$flutterDist\*" -DestinationPath $zipOut -CompressionLevel Optimal
+$zipMb  = [math]::Round((Get-Item $zipOut).Length / 1MB, 2)
+$zipSha = (Get-FileHash $zipOut -Algorithm SHA256).Hash.ToLower()
+
 Write-Host ''
 Write-Host "installer: $out" -ForegroundColor Green
 Write-Host "size     : $mb MB"
 Write-Host "sha256   : $sha"
+Write-Host ''
+Write-Host "portable : $zipOut" -ForegroundColor Green
+Write-Host "size     : $zipMb MB"
+Write-Host "sha256   : $zipSha"

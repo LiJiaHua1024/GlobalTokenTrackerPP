@@ -1,0 +1,106 @@
+name: Build on Push (Installer & Portable)
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '*.md'
+      - '**/*.md'
+      - 'README*'
+      - 'docs/**'
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - '*.md'
+      - '**/*.md'
+      - 'README*'
+      - 'docs/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ci-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUTF8: "1"
+
+jobs:
+  build:
+    name: Build Installer and Portable Zip
+    runs-on: windows-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Restore cargo cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Rust check & Clippy
+        shell: bash
+        run: |
+          cargo check --workspace --all-targets
+          cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Flutter analyze
+        working-directory: flutter_ui
+        run: flutter analyze lib/
+
+      - name: Build and Package (Installer + Portable Zip)
+        id: package
+        shell: pwsh
+        run: |
+          powershell -ExecutionPolicy Bypass -File installer\package.ps1
+
+          $installer = Get-ChildItem dist\GlobalTokenTrackerPP-Setup-*-win-x64.exe | Select-Object -First 1
+          $portable  = Get-ChildItem dist\GlobalTokenTrackerPP-*-windows-x64.zip | Select-Object -First 1
+
+          if (-not $installer) { throw "Installer executable not found in dist/" }
+          if (-not $portable)  { throw "Portable zip not found in dist/" }
+
+          $installerSha = (Get-FileHash $installer.FullName -Algorithm SHA256).Hash.ToLower()
+          $portableSha  = (Get-FileHash $portable.FullName -Algorithm SHA256).Hash.ToLower()
+          $installerMb  = [math]::Round($installer.Length / 1MB, 2)
+          $portableMb   = [math]::Round($portable.Length / 1MB, 2)
+
+          "### 📦 Automated Build Artifacts" >> $env:GITHUB_STEP_SUMMARY
+          "- **Commit**: \`${{ github.sha }}\`" >> $env:GITHUB_STEP_SUMMARY
+          "- **Branch**: \`${{ github.ref_name }}\`" >> $env:GITHUB_STEP_SUMMARY
+          "" >> $env:GITHUB_STEP_SUMMARY
+          "| Artifact | Filename | Size | SHA-256 |" >> $env:GITHUB_STEP_SUMMARY
+          "| :--- | :--- | :--- | :--- |" >> $env:GITHUB_STEP_SUMMARY
+          "| **安装包 (Setup)** | \`$($installer.Name)\` | $installerMb MB | \`$installerSha\` |" >> $env:GITHUB_STEP_SUMMARY
+          "| **便携版 (Portable Zip)** | \`$($portable.Name)\` | $portableMb MB | \`$portableSha\` |" >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload Installer Asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: GlobalTokenTrackerPP-Setup-win-x64
+          path: dist/GlobalTokenTrackerPP-Setup-*-win-x64.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Portable Zip Asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: GlobalTokenTrackerPP-Portable-win-x64
+          path: dist/GlobalTokenTrackerPP-*-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 14
