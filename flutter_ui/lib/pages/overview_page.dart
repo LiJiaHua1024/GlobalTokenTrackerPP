@@ -6,6 +6,7 @@ import '../core/theme.dart';
 import '../widgets/charts/pie_donut_chart.dart';
 import '../widgets/charts/trend_chart.dart';
 import '../widgets/quota_card.dart';
+import '../widgets/share_card.dart';
 import '../widgets/stat_card.dart';
 
 class OverviewPage extends StatefulWidget {
@@ -186,6 +187,16 @@ class _OverviewPageState extends State<OverviewPage> {
                 Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    FilledButton.tonalIcon(
+                      onPressed: () => showShareCardDialog(
+                        context,
+                        data,
+                        _selectedRange,
+                      ),
+                      icon: const Icon(Icons.share_outlined, size: 18),
+                      label: const Text('分享卡片'),
+                    ),
+                    const SizedBox(width: 8),
                     OutlinedButton.icon(
                       onPressed: _triggerScan,
                       icon: const Icon(Icons.sync, size: 18),
