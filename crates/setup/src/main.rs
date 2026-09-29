@@ -19,10 +19,13 @@
 use anyhow::{Context, Result, bail};
 use std::env;
 use std::fs;
-use std::io::{Cursor, Read};
+use std::io::{self, Cursor, Read};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use winreg::RegKey;
+use winreg::enums::RegType;
+use winreg::types::{FromRegValue, ToRegValue};
 
 #[allow(dead_code)]
 mod gui;
@@ -33,7 +36,10 @@ pub const APP: &str = "GlobalTokenTracker++";
 pub const APP_ID: &str = "GlobalTokenTrackerPP";
 pub const EXE_NAME: &str = "globaltokentracker_ui.exe";
 pub const SETUP_EXE_NAME: &str = "globaltokentrackerpp-setup.exe";
-pub const VER: &str = "1.0.0";
+/// Installer version — taken from the workspace manifest so
+/// `DisplayVersion` and the upgrade prompt can never drift from the release
+/// that shipped this binary.
+pub const VER: &str = env!("CARGO_PKG_VERSION");
 pub const UNINSTALL_KEY: &str =
     r"Software\Microsoft\Windows\CurrentVersion\Uninstall\GlobalTokenTrackerPP";
 
@@ -188,43 +194,129 @@ fn register_uninstall(dest: &Path, size: u64) -> Result<()> {
     Ok(())
 }
 
-/// Append dest to the *user* PATH so `globaltokentracker-cli` works in
-/// terminals. Best-effort: EDR/policy may guard HKCU\Environment for unsigned
-/// binaries — a denied write must not fail the whole install.
-fn extend_user_path(dest: &Path, log: &dyn Fn(String)) {
-    let inner = || -> Result<()> {
-        let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
-        let env_key = hkcu.open_subkey_with_flags(
-            "Environment",
-            winreg::enums::KEY_READ | winreg::enums::KEY_WRITE,
-        )?;
-        let cur: String = env_key.get_value("Path").unwrap_or_default();
-        let d = dest.display().to_string();
-        if cur.split(';').any(|p| {
-            p.trim_end_matches('\\').eq_ignore_ascii_case(d.trim_end_matches('\\'))
-        }) {
-            return Ok(());
+/// Environment key holding the *user* PATH (and the value name inside it). Both
+/// PATH helpers take the key as a parameter so tests can drive a scratch key
+/// instead of the real environment.
+const USER_ENV_KEY: &str = "Environment";
+const PATH_VALUE: &str = "Path";
+
+/// Open the environment key for a read-then-write. `KEY_READ` is not optional:
+/// a write-only handle cannot be queried, and a PATH rebuilt from a failed read
+/// would replace the user's whole PATH instead of editing it.
+fn open_user_env(key_path: &str) -> io::Result<RegKey> {
+    winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER).open_subkey_with_flags(
+        key_path,
+        winreg::enums::KEY_READ | winreg::enums::KEY_WRITE,
+    )
+}
+
+/// Read the user PATH together with its stored type.
+///
+/// `Ok(None)` means the value does not exist (a fresh account) — safe to create.
+/// `Err` means it exists but cannot be read or is not a string: callers must
+/// then leave the registry alone, because Windows keeps no backup of the value
+/// and overwriting it from an empty read loses every entry we never saw.
+fn read_path(env_key: &RegKey) -> io::Result<Option<(String, RegType)>> {
+    match env_key.get_raw_value(PATH_VALUE) {
+        Ok(raw) => {
+            if raw.vtype != RegType::REG_SZ && raw.vtype != RegType::REG_EXPAND_SZ {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{PATH_VALUE} has unexpected type {:?}", raw.vtype),
+                ));
+            }
+            let value = String::from_reg_value(&raw)?;
+            Ok(Some((value, raw.vtype)))
         }
-        let new = if cur.is_empty() { d } else { format!("{cur};{d}") };
-        env_key.set_value("Path", &new)?;
-        Ok(())
-    };
-    match inner() {
-        Ok(()) => log("已加入用户 PATH（新开的终端生效）".into()),
-        Err(e) => log(format!("PATH 追加被拒（{e}）——不影响使用，CLI 可用完整路径")),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
     }
 }
 
-fn remove_user_path(dest: &Path) {
-    let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
-    if let Ok(env_key) = hkcu.open_subkey_with_flags("Environment", winreg::enums::KEY_WRITE) {
-        let cur: String = env_key.get_value("Path").unwrap_or_default();
-        let d = dest.display().to_string();
-        let kept: Vec<&str> = cur
-            .split(';')
-            .filter(|p| !p.trim_end_matches('\\').eq_ignore_ascii_case(d.trim_end_matches('\\')))
-            .collect();
-        let _ = env_key.set_value("Path", &kept.join(";"));
+/// Write the user PATH back as `vtype`. The type must survive the round trip:
+/// dropping `REG_EXPAND_SZ` to `REG_SZ` leaves entries such as
+/// `%USERPROFILE%\AppData\Local\Microsoft\WindowsApps` unexpanded for every
+/// process launched afterwards.
+fn write_path(env_key: &RegKey, value: &str, vtype: RegType) -> io::Result<()> {
+    let mut raw = value.to_reg_value();
+    raw.vtype = vtype;
+    env_key.set_raw_value(PATH_VALUE, &raw)
+}
+
+/// True when a PATH entry and a directory name the same path, ignoring a
+/// trailing separator and letter case.
+fn same_dir(entry: &str, dir: &str) -> bool {
+    entry
+        .trim_end_matches('\\')
+        .eq_ignore_ascii_case(dir.trim_end_matches('\\'))
+}
+
+/// PATH with every entry pointing at `dest` dropped. `None` when no entry
+/// matched, so callers can skip the write entirely.
+fn strip_dir(cur: &str, dest: &Path) -> Option<String> {
+    let d = dest.display().to_string();
+    let mut hit = false;
+    let mut kept: Vec<&str> = Vec::new();
+    for entry in cur.split(';') {
+        if same_dir(entry, &d) {
+            hit = true;
+        } else {
+            kept.push(entry);
+        }
+    }
+    if hit { Some(kept.join(";")) } else { None }
+}
+
+/// Append dest to the *user* PATH (`key_path`) so `globaltokentracker-cli` works
+/// in terminals. Best-effort: EDR/policy may guard HKCU\Environment for unsigned
+/// binaries — a denied write must not fail the whole install.
+fn extend_user_path(key_path: &str, dest: &Path, log: &dyn Fn(String)) {
+    let reject = |e: &dyn std::fmt::Display| {
+        log(format!("PATH 追加被拒（{e}）——不影响使用，CLI 可用完整路径"));
+    };
+    let env_key = match open_user_env(key_path) {
+        Ok(key) => key,
+        Err(e) => return reject(&e),
+    };
+    let cur = match read_path(&env_key) {
+        Ok(Some(found)) => found,
+        // Fresh account: there is no user PATH yet, so create one. Windows
+        // stores this particular value as REG_EXPAND_SZ; match that.
+        Ok(None) => (String::new(), RegType::REG_EXPAND_SZ),
+        Err(e) => {
+            log(format!("PATH 未追加（读取失败：{e}）——不改动现有值"));
+            return;
+        }
+    };
+    let (cur, vtype) = cur;
+    let d = dest.display().to_string();
+    if cur.split(';').any(|p| same_dir(p, &d)) {
+        return;
+    }
+    let new = if cur.is_empty() { d } else { format!("{cur};{d}") };
+    match write_path(&env_key, &new, vtype) {
+        Ok(()) => log("已加入用户 PATH（新开的终端生效）".into()),
+        Err(e) => reject(&e),
+    }
+}
+
+/// Drop dest from the *user* PATH (`key_path`). Never writes when the current
+/// value cannot be read — see `read_path`.
+fn remove_user_path(key_path: &str, dest: &Path, log: &dyn Fn(String)) {
+    let env_key = match open_user_env(key_path) {
+        Ok(key) => key,
+        Err(e) => return log(format!("PATH 未清理（无法打开环境键：{e}）")),
+    };
+    let (cur, vtype) = match read_path(&env_key) {
+        Ok(Some(found)) => found,
+        Ok(None) => return,
+        Err(e) => return log(format!("PATH 未清理（读取失败：{e}）——不改动现有值")),
+    };
+    let Some(new) = strip_dir(&cur, dest) else {
+        return;
+    };
+    if let Err(e) = write_path(&env_key, &new, vtype) {
+        log(format!("PATH 清理失败：{e}"));
     }
 }
 
@@ -259,7 +351,7 @@ pub fn install_steps(
     }
     if want_path {
         step(90, "加入用户 PATH…");
-        extend_user_path(dest, log);
+        extend_user_path(USER_ENV_KEY, dest, log);
     }
     step(100, "安装完成");
     log(format!("程序目录 : {}", dest.display()));
@@ -282,7 +374,7 @@ pub fn uninstall_steps(
     let _ = fs::remove_dir_all(&start);
     let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
     let _ = hkcu.delete_subkey_all(UNINSTALL_KEY);
-    remove_user_path(dest);
+    remove_user_path(USER_ENV_KEY, dest, log);
     step(100, "已卸载");
     log("用户数据保留在 %USERPROFILE%\\.globaltokentracker".into());
     Ok(())
@@ -305,7 +397,7 @@ pub fn cleanup_prior_install(old: &Path, new: &Path, log: &dyn Fn(String)) {
         return;
     }
     log(format!("清理旧安装目录 {}", old.display()));
-    remove_user_path(old);
+    remove_user_path(USER_ENV_KEY, old, log);
     if let Err(e) = schedule_dir_delete(old) {
         log(format!("旧目录延迟删除失败：{e}"));
     }
@@ -499,4 +591,142 @@ fn main() -> Result<()> {
         println!("  数据目录 : %USERPROFILE%\\.globaltokentracker（首次运行创建）");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use winreg::enums::HKEY_CURRENT_USER;
+
+    const KEEP: &str = r"C:\Windows\system32";
+    const OTHER: &str = r"D:\tools";
+    const INSTALL: &str = r"C:\Users\me\AppData\Local\Programs\GlobalTokenTrackerPP";
+
+    fn dest() -> PathBuf {
+        PathBuf::from(INSTALL)
+    }
+
+    /// Throwaway `HKCU\Software\...` key so the PATH helpers can be driven
+    /// against the registry without touching the real environment.
+    struct Scratch {
+        path: String,
+    }
+
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let path = format!(r"Software\GlobalTokenTrackerPP-selftest-{name}");
+            let _ = RegKey::predef(HKEY_CURRENT_USER).delete_subkey_all(&path);
+            RegKey::predef(HKEY_CURRENT_USER)
+                .create_subkey(&path)
+                .expect("create scratch key");
+            Self { path }
+        }
+
+        fn open(&self) -> RegKey {
+            open_user_env(&self.path).expect("open scratch key")
+        }
+
+        fn set(&self, value: &str, vtype: RegType) {
+            write_path(&self.open(), value, vtype).expect("write scratch Path");
+        }
+
+        fn get(&self) -> Option<(String, RegType)> {
+            read_path(&self.open()).expect("read scratch Path")
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = RegKey::predef(HKEY_CURRENT_USER).delete_subkey_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn same_dir_ignores_case_and_trailing_separator() {
+        assert!(same_dir(INSTALL, INSTALL));
+        assert!(same_dir(&format!("{INSTALL}\\"), INSTALL));
+        assert!(same_dir(&INSTALL.to_lowercase(), INSTALL));
+        assert!(!same_dir(&format!("{INSTALL}-old"), INSTALL));
+        assert!(!same_dir(OTHER, INSTALL));
+    }
+
+    #[test]
+    fn strip_dir_removes_only_the_matching_entry() {
+        let cur = format!("{KEEP};{INSTALL};{OTHER}");
+        assert_eq!(strip_dir(&cur, &dest()), Some(format!("{KEEP};{OTHER}")));
+    }
+
+    #[test]
+    fn strip_dir_reports_nothing_to_do() {
+        // An empty PATH — the state a failed read used to look like — must not
+        // become a write.
+        assert_eq!(strip_dir("", &dest()), None);
+        assert_eq!(strip_dir(&format!("{KEEP};{OTHER}"), &dest()), None);
+        assert_eq!(strip_dir(&format!("{INSTALL}-old"), &dest()), None);
+    }
+
+    #[test]
+    fn remove_user_path_strips_the_entry_and_keeps_the_value_type() {
+        let scratch = Scratch::new("remove");
+        scratch.set(&format!("{KEEP};{INSTALL};{OTHER}"), RegType::REG_EXPAND_SZ);
+
+        remove_user_path(&scratch.path, &dest(), &|_| {});
+
+        let (value, vtype) = scratch.get().expect("Path still readable");
+        assert_eq!(value, format!("{KEEP};{OTHER}"));
+        // Losing REG_EXPAND_SZ would leave %VARS% unexpanded for every process
+        // started afterwards.
+        assert_eq!(vtype, RegType::REG_EXPAND_SZ);
+    }
+
+    #[test]
+    fn remove_user_path_leaves_an_unrelated_path_untouched() {
+        let scratch = Scratch::new("untouched");
+        scratch.set(&format!("{KEEP};{OTHER}"), RegType::REG_EXPAND_SZ);
+
+        remove_user_path(&scratch.path, &dest(), &|_| {});
+
+        assert_eq!(
+            scratch.get(),
+            Some((format!("{KEEP};{OTHER}"), RegType::REG_EXPAND_SZ))
+        );
+    }
+
+    #[test]
+    fn extend_user_path_appends_once() {
+        let scratch = Scratch::new("append");
+        scratch.set(KEEP, RegType::REG_EXPAND_SZ);
+
+        extend_user_path(&scratch.path, &dest(), &|_| {});
+        extend_user_path(&scratch.path, &dest(), &|_| {});
+
+        let (value, vtype) = scratch.get().expect("Path still readable");
+        assert_eq!(value, format!("{KEEP};{INSTALL}"));
+        assert_eq!(vtype, RegType::REG_EXPAND_SZ);
+    }
+
+    #[test]
+    fn extend_user_path_creates_a_missing_value() {
+        let scratch = Scratch::new("create");
+        assert_eq!(scratch.get(), None);
+
+        extend_user_path(&scratch.path, &dest(), &|_| {});
+
+        let (value, vtype) = scratch.get().expect("Path created");
+        assert_eq!(value, INSTALL);
+        assert_eq!(vtype, RegType::REG_EXPAND_SZ);
+    }
+
+    #[test]
+    fn path_helpers_report_an_unopenable_key() {
+        let missing = r"Software\GlobalTokenTrackerPP-selftest-no-such-key";
+        let _ = RegKey::predef(HKEY_CURRENT_USER).delete_subkey_all(missing);
+        let logged = std::sync::Mutex::new(Vec::new());
+        let log = |line: String| logged.lock().unwrap().push(line);
+
+        remove_user_path(missing, &dest(), &log);
+        extend_user_path(missing, &dest(), &log);
+
+        assert_eq!(logged.lock().unwrap().len(), 2);
+    }
 }

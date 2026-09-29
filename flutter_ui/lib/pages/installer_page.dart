@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:window_manager/window_manager.dart';
+import '../core/app_info.dart';
 import '../widgets/custom_title_bar.dart';
 
 class InstallerApp extends StatelessWidget {
@@ -55,6 +56,43 @@ class _InstallerPageState extends State<InstallerPage> {
   String _installerSource = '';
   String _installerExe = '';
   String _customDest = '';
+
+  /// PowerShell that adds `dest` to (or removes it from) the user PATH.
+  ///
+  /// The value is read with `DoNotExpandEnvironmentNames` and written back with
+  /// the kind it already had, so an entry such as `%USERPROFILE%\...` keeps
+  /// expanding instead of being frozen into this profile's literal path. The
+  /// environment key is opened read/write as a single handle, and nothing is
+  /// written unless the current value could be read: rewriting PATH from an
+  /// empty read would drop every entry the installer never saw.
+  String _userPathScript({required String dest, required bool remove}) {
+    final edit = remove
+        ? '''
+        \$kept = @(\$parts | Where-Object { -not (\$_.TrimEnd('\\') -ieq \$d) })
+        if (\$kept.Count -ne \$parts.Count) { \$key.SetValue(\$name, (\$kept -join ';'), \$kind) }
+        '''
+        : '''
+        if (-not (\$parts | Where-Object { \$_.TrimEnd('\\') -ieq \$d })) {
+            \$key.SetValue(\$name, \$(if (\$cur.Length -gt 0) { "\$cur;$dest" } else { "$dest" }), \$kind)
+        }
+        ''';
+    return '''
+        \$name = 'Path'
+        \$d = "$dest".TrimEnd('\\')
+        \$key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', \$true)
+        if (-not \$key) { throw 'cannot open HKCU environment key' }
+        try {
+            \$has = \$key.GetValueNames() -contains \$name
+            \$kind = if (\$has) { \$key.GetValueKind(\$name) } else { 'ExpandString' }
+            if (\$has -and \$kind -ne 'String' -and \$kind -ne 'ExpandString') { throw "unexpected \$name kind: \$kind" }
+            \$cur = if (\$has) { [string]\$key.GetValue(\$name, '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } else { '' }
+            \$parts = @(\$cur -split ';')
+        $edit
+        } finally {
+            \$key.Close()
+        }
+        ''';
+  }
 
   @override
   void initState() {
@@ -202,7 +240,7 @@ class _InstallerPageState extends State<InstallerPage> {
       \$reg = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\GlobalTokenTrackerPP"
       New-Item -Path \$reg -Force | Out-Null
       Set-ItemProperty -Path \$reg -Name "DisplayName" -Value "GlobalTokenTracker++"
-      Set-ItemProperty -Path \$reg -Name "DisplayVersion" -Value "1.0.0"
+      Set-ItemProperty -Path \$reg -Name "DisplayVersion" -Value "${AppInfo.currentVersion}"
       Set-ItemProperty -Path \$reg -Name "Publisher" -Value "GlobalTokenTracker++"
       Set-ItemProperty -Path \$reg -Name "InstallLocation" -Value "$dest"
       Set-ItemProperty -Path \$reg -Name "DisplayIcon" -Value "$dest\\globaltokentracker_ui.exe"
@@ -255,19 +293,15 @@ class _InstallerPageState extends State<InstallerPage> {
           _statusMessage = '追加用户环境变量 PATH...';
           _progress = 0.95;
         });
-        final pathCmd = '''
-        \$reg = "HKCU:\\Environment"
-        \$cur = (Get-ItemProperty -Path \$reg -Name Path -ErrorAction SilentlyContinue).Path
-        if (\$cur) {
-            \$parts = \$cur -split ';'
-            if (-not (\$parts -contains "$dest")) {
-                Set-ItemProperty -Path \$reg -Name Path -Value "\$cur;$dest"
-            }
-        } else {
-            Set-ItemProperty -Path \$reg -Name Path -Value "$dest"
+        final pathRes = await Process.run('powershell', [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          _userPathScript(dest: dest, remove: false),
+        ]);
+        if (pathRes.exitCode != 0) {
+          debugPrint('用户 PATH 未修改：${pathRes.stderr}');
         }
-        ''';
-        await Process.run('powershell', ['-NoProfile', '-NonInteractive', '-Command', pathCmd]);
       }
 
       setState(() {
@@ -328,14 +362,18 @@ class _InstallerPageState extends State<InstallerPage> {
       });
       final cleanRegCmd = '''
       Remove-Item -Path "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\GlobalTokenTrackerPP" -Recurse -Force -ErrorAction SilentlyContinue
-      \$reg = "HKCU:\\Environment"
-      \$cur = (Get-ItemProperty -Path \$reg -Name Path -ErrorAction SilentlyContinue).Path
-      if (\$cur) {
-          \$kept = (\$cur -split ';') | Where-Object { \$_.TrimEnd('\\') -ne "$dest".TrimEnd('\\') }
-          Set-ItemProperty -Path \$reg -Name Path -Value (\$kept -join ';')
-      }
       ''';
       await Process.run('powershell', ['-NoProfile', '-NonInteractive', '-Command', cleanRegCmd]);
+
+      final pathRes = await Process.run('powershell', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        _userPathScript(dest: dest, remove: true),
+      ]);
+      if (pathRes.exitCode != 0) {
+        debugPrint('用户 PATH 未清理：${pathRes.stderr}');
+      }
 
       // 4. Remove install folder
       setState(() {
