@@ -132,12 +132,9 @@ impl ThemeColors {
 
 pub fn is_system_light_mode() -> bool {
     let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
-    if let Ok(key) = hkcu.open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") {
-        if let Ok(val) = key.get_value::<u32, _>("AppsUseLightTheme") {
-            return val != 0;
-        }
-    }
-    false
+    hkcu.open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+        .and_then(|key| key.get_value::<u32, _>("AppsUseLightTheme"))
+        .is_ok_and(|val| val != 0)
 }
 
 const IDC_EDIT: i32 = 100;
@@ -386,10 +383,10 @@ extern "system" fn prog_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRES
         WM_PAINT => unsafe {
             let theme = if let Ok(parent) = GetParent(hwnd) {
                 let g = gui(parent);
-                if !g.is_null() {
-                    (*g).theme
-                } else {
+                if g.is_null() {
                     ThemeColors::system()
+                } else {
+                    (*g).theme
                 }
             } else {
                 ThemeColors::system()
