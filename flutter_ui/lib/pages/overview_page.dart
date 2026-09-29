@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
+import 'package:provider/provider.dart';
 import '../core/ffi_bridge.dart';
 import '../core/models.dart';
+import '../core/theme.dart';
 import '../widgets/charts/pie_donut_chart.dart';
 import '../widgets/charts/trend_chart.dart';
 import '../widgets/quota_card.dart';
@@ -111,6 +112,7 @@ class _OverviewPageState extends State<OverviewPage> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final themeProvider = Provider.of<ThemeProvider>(context);
 
     if (_loading && _data == null) {
       return const Center(child: CircularProgressIndicator());
@@ -139,7 +141,6 @@ class _OverviewPageState extends State<OverviewPage> {
 
     final data = _data!;
     final span = data.span;
-    final fmtTokens = NumberFormat('#,###');
 
     return RefreshIndicator(
       onRefresh: () => _loadData(_selectedRange, force: true),
@@ -254,9 +255,9 @@ class _OverviewPageState extends State<OverviewPage> {
                 children: [
                   StatCard(
                     title: '累计 Token 用量',
-                    value: fmtTokens.format(span.totalTokens),
+                    value: themeProvider.formatTokens(span.totalTokens),
                     subtitle:
-                        '输入: ${fmtTokens.format(span.inputTokens)} · 输出: ${fmtTokens.format(span.outputTokens)}',
+                        '输入: ${themeProvider.formatTokens(span.inputTokens)} · 输出: ${themeProvider.formatTokens(span.outputTokens)}',
                     icon: Icons.token,
                     color: const Color(0xFF1A73E8),
                   ),
@@ -271,7 +272,7 @@ class _OverviewPageState extends State<OverviewPage> {
                   ),
                   StatCard(
                     title: '请求事件次数',
-                    value: fmtTokens.format(span.events),
+                    value: themeProvider.formatTokens(span.events),
                     subtitle:
                         '活跃时长: ${(span.activeMs / 1000 / 60).toStringAsFixed(1)} 分钟',
                     icon: Icons.bolt,
@@ -279,8 +280,8 @@ class _OverviewPageState extends State<OverviewPage> {
                   ),
                   StatCard(
                     title: '缓存命中 Token',
-                    value: fmtTokens.format(span.cacheReadTokens),
-                    subtitle: '缓存写入: ${fmtTokens.format(span.cacheWriteTokens)}',
+                    value: themeProvider.formatTokens(span.cacheReadTokens),
+                    subtitle: '缓存写入: ${themeProvider.formatTokens(span.cacheWriteTokens)}',
                     icon: Icons.speed,
                     color: const Color(0xFF8E24AA),
                   ),
@@ -300,7 +301,7 @@ class _OverviewPageState extends State<OverviewPage> {
             LayoutBuilder(builder: (context, constraints) {
               final chartCols = constraints.maxWidth > 800 ? 2 : 1;
               return GridView.count(
-                crossAxisCount: chartCols,
+                 crossAxisCount: chartCols,
                 crossAxisSpacing: 16,
                 mainAxisSpacing: 16,
                 shrinkWrap: true,
@@ -338,7 +339,7 @@ class _OverviewPageState extends State<OverviewPage> {
                     title: '按工具 · Token 用量',
                     centerUnit: 'Tokens',
                     initialIsDonut: true,
-                    valueFormatter: (v) => fmtTokens.format(v.toInt()),
+                    valueFormatter: (v) => themeProvider.formatTokens(v),
                     items: data.byApp
                         .map((a) => PieDonutChartItem(
                               label: a.app,
@@ -351,7 +352,7 @@ class _OverviewPageState extends State<OverviewPage> {
                     title: '按模型 · Token 用量',
                     centerUnit: 'Tokens',
                     initialIsDonut: false,
-                    valueFormatter: (v) => fmtTokens.format(v.toInt()),
+                    valueFormatter: (v) => themeProvider.formatTokens(v),
                     items: data.byModel
                         .map((m) => PieDonutChartItem(
                               label: m.name,

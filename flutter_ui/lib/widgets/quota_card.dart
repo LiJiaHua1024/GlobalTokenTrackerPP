@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import '../../core/models.dart';
+import '../../core/theme.dart';
 
 class QuotaCardWidget extends StatelessWidget {
   final QuotaGroup group;
@@ -9,6 +11,7 @@ class QuotaCardWidget extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final themeProvider = Provider.of<ThemeProvider>(context);
 
     return Card(
       elevation: 1,
@@ -71,8 +74,8 @@ class QuotaCardWidget extends StatelessWidget {
                         ),
                         Text(
                           row.used != null && row.limitValue != null
-                              ? '${row.used!.toInt()} / ${row.limitValue!.toInt()}'
-                              : (row.used != null ? row.used!.toInt().toString() : '未知'),
+                              ? '${themeProvider.formatTokens(row.used!)} / ${themeProvider.formatTokens(row.limitValue!)}'
+                              : (row.used != null ? themeProvider.formatTokens(row.used!) : '未知'),
                           style: theme.textTheme.bodySmall?.copyWith(
                             color: theme.colorScheme.outline,
                           ),

@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:provider/provider.dart';
 import '../core/ffi_bridge.dart';
 import '../core/models.dart';
+import '../core/theme.dart';
 
 class DetailsPage extends StatefulWidget {
   const DetailsPage({super.key});
@@ -57,7 +59,7 @@ class _DetailsPageState extends State<DetailsPage> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final fmtTokens = NumberFormat('#,###');
+    final themeProvider = Provider.of<ThemeProvider>(context);
 
     final totalEvents = _data?.totalEvents ?? 0;
     final totalPages = (totalEvents / _pageSize).ceil();
@@ -195,21 +197,21 @@ class _DetailsPageState extends State<DetailsPage> {
                                           Expanded(
                                             flex: 2,
                                             child: Text(
-                                              fmtTokens.format(row.totalTokens),
+                                              themeProvider.formatTokens(row.totalTokens),
                                               style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
                                             ),
                                           ),
                                           Expanded(
                                             flex: 3,
                                             child: Text(
-                                              '${fmtTokens.format(row.inputTokens)} / ${fmtTokens.format(row.cacheReadTokens)}',
+                                              '${themeProvider.formatTokens(row.inputTokens)} / ${themeProvider.formatTokens(row.cacheReadTokens)}',
                                               style: TextStyle(color: theme.colorScheme.outline, fontSize: 11),
                                             ),
                                           ),
                                           Expanded(
                                             flex: 2,
                                             child: Text(
-                                              fmtTokens.format(row.outputTokens),
+                                              themeProvider.formatTokens(row.outputTokens),
                                               style: const TextStyle(fontSize: 12),
                                             ),
                                           ),

@@ -29,13 +29,13 @@ class PieDonutChart extends StatefulWidget {
   final String centerUnit;
 
   const PieDonutChart({
-    Key? key,
+    super.key,
     required this.title,
     required this.items,
     this.valueFormatter,
     this.initialIsDonut = false,
     this.centerUnit = '',
-  }) : super(key: key);
+  });
 
   @override
   State<PieDonutChart> createState() => _PieDonutChartState();
@@ -68,9 +68,14 @@ class _PieDonutChartState extends State<PieDonutChart> {
     if (widget.valueFormatter != null) {
       return widget.valueFormatter!(val);
     }
-    if (val >= 1000000) {
+    final absV = val.abs();
+    if (absV >= 1000000000000) {
+      return '${(val / 1000000000000).toStringAsFixed(2)}T';
+    } else if (absV >= 1000000000) {
+      return '${(val / 1000000000).toStringAsFixed(2)}B';
+    } else if (absV >= 1000000) {
       return '${(val / 1000000).toStringAsFixed(2)}M';
-    } else if (val >= 1000) {
+    } else if (absV >= 1000) {
       return '${(val / 1000).toStringAsFixed(1)}K';
     }
     return NumberFormat('#,##0.##').format(val);
@@ -87,6 +92,7 @@ class _PieDonutChartState extends State<PieDonutChart> {
       if (total > 0 && (i.value / total * 100) < 0.05) return false;
       return true;
     }).toList();
+
     if (validItems.isEmpty || total <= 0) {
       return Card(
         child: Container(
@@ -107,24 +113,47 @@ class _PieDonutChartState extends State<PieDonutChart> {
       );
     }
 
+    final hasHover = _touchedIndex >= 0 && _touchedIndex < validItems.length;
+    final hoveredItem = hasHover ? validItems[_touchedIndex] : null;
+
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(20),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Header with Title & Mode Toggle
+            // Header with Title & Mode Toggle + Dynamic Selected Item Info
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Expanded(
-                  child: Text(
-                    widget.title,
-                    style: theme.textTheme.titleMedium?.copyWith(
-                      fontWeight: FontWeight.bold,
-                    ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        widget.title,
+                        style: theme.textTheme.titleMedium?.copyWith(
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        hasHover
+                            ? '已选: ${hoveredItem!.label} (${_formatValue(hoveredItem.value)} · ${(hoveredItem.value / total * 100).toStringAsFixed(1)}%)'
+                            : '总计: ${_formatValue(total)} ${widget.centerUnit}',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: hasHover ? theme.colorScheme.primary : theme.colorScheme.outline,
+                          fontWeight: hasHover ? FontWeight.bold : FontWeight.normal,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
                   ),
                 ),
+                const SizedBox(width: 8),
                 // Toggle Button: Pie vs Donut
                 SegmentedButton<ChartDisplayMode>(
                   style: const ButtonStyle(
@@ -151,7 +180,7 @@ class _PieDonutChartState extends State<PieDonutChart> {
                 ),
               ],
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 16),
 
             // Chart Core Canvas
             SizedBox(
@@ -164,8 +193,8 @@ class _PieDonutChartState extends State<PieDonutChart> {
                       pieTouchData: PieTouchData(
                         touchCallback: (FlTouchEvent event, pieTouchResponse) {
                           final newIndex = (!event.isInterestedForInteractions ||
-                              pieTouchResponse == null ||
-                              pieTouchResponse.touchedSection == null)
+                                  pieTouchResponse == null ||
+                                  pieTouchResponse.touchedSection == null)
                               ? -1
                               : pieTouchResponse.touchedSection!.touchedSectionIndex;
                           if (_touchedIndex != newIndex) {
@@ -178,38 +207,48 @@ class _PieDonutChartState extends State<PieDonutChart> {
                       startDegreeOffset: -90,
                       borderData: FlBorderData(show: false),
                       sectionsSpace: 2,
-                      centerSpaceRadius: _mode == ChartDisplayMode.donut ? 48 : 0,
+                      centerSpaceRadius: _mode == ChartDisplayMode.donut ? 50 : 0,
                       sections: _generateSections(validItems, total, theme),
                     ),
-                    swapAnimationDuration: const Duration(milliseconds: 350),
-                    swapAnimationCurve: Curves.easeInOutCubic,
+                    duration: const Duration(milliseconds: 350),
+                    curve: Curves.easeInOutCubic,
                   ),
 
-                  // Center info indicator when in Donut mode
+                  // Center info indicator when in Donut mode (Constrained to 92px width to never overlap the ring)
                   if (_mode == ChartDisplayMode.donut)
-                    Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          _touchedIndex >= 0 && _touchedIndex < validItems.length
-                              ? _formatValue(validItems[_touchedIndex].value)
-                              : _formatValue(total),
-                          style: theme.textTheme.titleMedium?.copyWith(
-                            fontWeight: FontWeight.bold,
-                            color: theme.colorScheme.primary,
+                    SizedBox(
+                      width: 92,
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Text(
+                              hasHover
+                                  ? _formatValue(hoveredItem!.value)
+                                  : _formatValue(total),
+                              style: theme.textTheme.titleMedium?.copyWith(
+                                fontWeight: FontWeight.bold,
+                                color: theme.colorScheme.primary,
+                              ),
+                            ),
                           ),
-                        ),
-                        Text(
-                          _touchedIndex >= 0 && _touchedIndex < validItems.length
-                              ? validItems[_touchedIndex].label
-                              : '总计 ${widget.centerUnit}',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: theme.textTheme.bodySmall?.copyWith(
-                            color: theme.colorScheme.outline,
+                          const SizedBox(height: 2),
+                          Text(
+                            hasHover
+                                ? '占比 ${(hoveredItem!.value / total * 100).toStringAsFixed(1)}%'
+                                : '总计 ${widget.centerUnit}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            textAlign: TextAlign.center,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: theme.colorScheme.outline,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w500,
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                 ],
               ),
@@ -273,7 +312,7 @@ class _PieDonutChartState extends State<PieDonutChart> {
       final color = item.color ?? _palette[i % _palette.length];
 
       // Base radius vs Explode Radius on Hover/Tap
-      final baseRadius = _mode == ChartDisplayMode.donut ? 40.0 : 80.0;
+      final baseRadius = _mode == ChartDisplayMode.donut ? 38.0 : 80.0;
       final radius = isTouched ? baseRadius + 10.0 : baseRadius;
 
       return PieChartSectionData(

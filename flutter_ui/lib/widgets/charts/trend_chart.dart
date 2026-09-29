@@ -1,7 +1,8 @@
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
+import 'package:provider/provider.dart';
 import '../../core/models.dart';
+import '../../core/theme.dart';
 
 class TrendChart extends StatefulWidget {
   final List<TrendBucket> daily;
@@ -23,6 +24,7 @@ class _TrendChartState extends State<TrendChart> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final themeProvider = Provider.of<ThemeProvider>(context);
     final primaryColor = theme.colorScheme.primary;
 
     if (widget.daily.isEmpty) {
@@ -56,7 +58,7 @@ class _TrendChartState extends State<TrendChart> {
                 ),
                 Text(
                   _touchedIndex >= 0 && _touchedIndex < widget.daily.length
-                      ? '${widget.daily[_touchedIndex].date} · ${NumberFormat('#,###').format(widget.daily[_touchedIndex].tokens)} Tokens · \$${widget.daily[_touchedIndex].costUsd.toStringAsFixed(3)}'
+                      ? '${widget.daily[_touchedIndex].date} · ${themeProvider.formatTokens(widget.daily[_touchedIndex].tokens)} Tokens · \$${widget.daily[_touchedIndex].costUsd.toStringAsFixed(3)}'
                       : '悬停柱状图查看每日明细',
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: _touchedIndex >= 0 ? theme.colorScheme.primary : theme.colorScheme.outline,
@@ -77,7 +79,7 @@ class _TrendChartState extends State<TrendChart> {
                       getTooltipItem: (group, groupIndex, rod, rodIndex) {
                         final bucket = widget.daily[groupIndex];
                         return BarTooltipItem(
-                          '${bucket.date}\nTokens: ${NumberFormat('#,###').format(bucket.tokens)}\n成本: \$${bucket.costUsd.toStringAsFixed(3)}',
+                          '${bucket.date}\nTokens: ${themeProvider.formatTokens(bucket.tokens)}\n成本: \$${bucket.costUsd.toStringAsFixed(3)}',
                           TextStyle(
                             color: theme.colorScheme.onSurfaceVariant,
                             fontWeight: FontWeight.bold,

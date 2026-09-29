@@ -54,6 +54,35 @@ class SettingsPage extends StatelessWidget {
           ),
           const SizedBox(height: 16),
 
+          // Number Display Preference (K, M, B, T)
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(20.0),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('数值显示偏好', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  Text('针对大额 Token 及用量数值的展示方式：', style: TextStyle(color: theme.colorScheme.outline)),
+                  const SizedBox(height: 8),
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('紧凑大数字格式 (K / M / B / T)', style: TextStyle(fontWeight: FontWeight.w500)),
+                    subtitle: Text(
+                      themeProvider.compactNumbers
+                          ? '当前：自动缩写（如 5.79M, 1.20B, 350.2K），界面紧凑优雅'
+                          : '当前：完整数字（如 5,790,000），使用千分位精确显示',
+                      style: TextStyle(color: theme.colorScheme.outline, fontSize: 13),
+                    ),
+                    value: themeProvider.compactNumbers,
+                    onChanged: (val) => themeProvider.setCompactNumbers(val),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+
           // Seed Accent Color
           Card(
             child: Padding(
