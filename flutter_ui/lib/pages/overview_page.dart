@@ -306,7 +306,7 @@ class _OverviewPageState extends State<OverviewPage> {
                 mainAxisSpacing: 16,
                 shrinkWrap: true,
                 physics: const NeverScrollableScrollPhysics(),
-                childAspectRatio: constraints.maxWidth > 800 ? 1.35 : 1.1,
+                childAspectRatio: constraints.maxWidth > 800 ? 1.18 : 1.05,
                 children: [
                   // 1. 按工具 · 成本
                   PieDonutChart(
