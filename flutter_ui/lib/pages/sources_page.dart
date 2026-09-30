@@ -64,22 +64,25 @@ class _SourcesPageState extends State<SourcesPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Wrap(
-            alignment: WrapAlignment.spaceBetween,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            spacing: 12,
-            runSpacing: 12,
-            children: [
-              Text(
-                '数据源与日志扫描器健康度',
-                style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
-              ),
-              IconButton.filledTonal(
-                onPressed: _loadSources,
-                icon: const Icon(Icons.refresh),
-                tooltip: '刷新状态',
-              ),
-            ],
+          SizedBox(
+            width: double.infinity,
+            child: Wrap(
+              alignment: WrapAlignment.spaceBetween,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                Text(
+                  '数据源与日志扫描器健康度',
+                  style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
+                ),
+                IconButton.filledTonal(
+                  onPressed: _loadSources,
+                  icon: const Icon(Icons.refresh),
+                  tooltip: '刷新状态',
+                ),
+              ],
+            ),
           ),
           const SizedBox(height: 20),
           Expanded(

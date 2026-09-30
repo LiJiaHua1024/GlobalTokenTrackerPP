@@ -102,43 +102,46 @@ class _PricingPageState extends State<PricingPage> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // Header Bar
-          Wrap(
-            alignment: WrapAlignment.spaceBetween,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            spacing: 12,
-            runSpacing: 12,
-            children: [
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'LLM 模型价目表 (${_prices.length} 个模型)',
-                    style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    '单位：美元 / 1M Tokens (支持模糊实时检索)',
-                    style: TextStyle(color: theme.colorScheme.outline, fontSize: 12),
-                  ),
-                ],
-              ),
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  IconButton.filledTonal(
-                    onPressed: () => _loadPrices(force: true),
-                    icon: const Icon(Icons.refresh, size: 20),
-                    tooltip: '重新加载本地价格',
-                  ),
-                  const SizedBox(width: 8),
-                  FilledButton.icon(
-                    onPressed: _updatePrices,
-                    icon: const Icon(Icons.cloud_download, size: 18),
-                    label: const Text('在线同步最新价目'),
-                  ),
-                ],
-              ),
-            ],
+          SizedBox(
+            width: double.infinity,
+            child: Wrap(
+              alignment: WrapAlignment.spaceBetween,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'LLM 模型价目表 (${_prices.length} 个模型)',
+                      style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '单位：美元 / 1M Tokens (支持模糊实时检索)',
+                      style: TextStyle(color: theme.colorScheme.outline, fontSize: 12),
+                    ),
+                  ],
+                ),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton.filledTonal(
+                      onPressed: () => _loadPrices(force: true),
+                      icon: const Icon(Icons.refresh, size: 20),
+                      tooltip: '重新加载本地价格',
+                    ),
+                    const SizedBox(width: 8),
+                    FilledButton.icon(
+                      onPressed: _updatePrices,
+                      icon: const Icon(Icons.cloud_download, size: 18),
+                      label: const Text('在线同步最新价目'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
           const SizedBox(height: 16),
 

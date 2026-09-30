@@ -80,22 +80,25 @@ class _QuotasPageState extends State<QuotasPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Wrap(
-            alignment: WrapAlignment.spaceBetween,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            spacing: 12,
-            runSpacing: 12,
-            children: [
-              Text(
-                '各工具订阅与配额监控',
-                style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
-              ),
-              FilledButton.icon(
-                onPressed: _pollQuotas,
-                icon: const Icon(Icons.cloud_sync),
-                label: const Text('立即同步配额'),
-              ),
-            ],
+          SizedBox(
+            width: double.infinity,
+            child: Wrap(
+              alignment: WrapAlignment.spaceBetween,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                Text(
+                  '各工具订阅与配额监控',
+                  style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
+                ),
+                FilledButton.icon(
+                  onPressed: _pollQuotas,
+                  icon: const Icon(Icons.cloud_sync),
+                  label: const Text('立即同步配额'),
+                ),
+              ],
+            ),
           ),
           const SizedBox(height: 20),
           if (_groups.isEmpty)

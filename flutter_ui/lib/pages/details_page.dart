@@ -75,41 +75,44 @@ class _DetailsPageState extends State<DetailsPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Wrap(
-            alignment: WrapAlignment.spaceBetween,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            spacing: 12,
-            runSpacing: 12,
-            children: [
-              Text(
-                '事件明细 (共 $totalEvents 条)',
-                style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
-              ),
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  IconButton.filledTonal(
-                    onPressed: _currentPage > 0 ? () => _loadPage(_currentPage - 1) : null,
-                    icon: const Icon(Icons.chevron_left),
-                    tooltip: '上一页',
-                  ),
-                  const SizedBox(width: 8),
-                  Text('第 ${_currentPage + 1} / ${totalPages > 0 ? totalPages : 1} 页'),
-                  const SizedBox(width: 8),
-                  IconButton.filledTonal(
-                    onPressed: _currentPage < totalPages - 1 ? () => _loadPage(_currentPage + 1) : null,
-                    icon: const Icon(Icons.chevron_right),
-                    tooltip: '下一页',
-                  ),
-                  const SizedBox(width: 12),
-                  IconButton(
-                    onPressed: () => _loadPage(_currentPage),
-                    icon: const Icon(Icons.refresh),
-                    tooltip: '刷新',
-                  ),
-                ],
-              ),
-            ],
+          SizedBox(
+            width: double.infinity,
+            child: Wrap(
+              alignment: WrapAlignment.spaceBetween,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                Text(
+                  '事件明细 (共 $totalEvents 条)',
+                  style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
+                ),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton.filledTonal(
+                      onPressed: _currentPage > 0 ? () => _loadPage(_currentPage - 1) : null,
+                      icon: const Icon(Icons.chevron_left),
+                      tooltip: '上一页',
+                    ),
+                    const SizedBox(width: 8),
+                    Text('第 ${_currentPage + 1} / ${totalPages > 0 ? totalPages : 1} 页'),
+                    const SizedBox(width: 8),
+                    IconButton.filledTonal(
+                      onPressed: _currentPage < totalPages - 1 ? () => _loadPage(_currentPage + 1) : null,
+                      icon: const Icon(Icons.chevron_right),
+                      tooltip: '下一页',
+                    ),
+                    const SizedBox(width: 12),
+                    IconButton(
+                      onPressed: () => _loadPage(_currentPage),
+                      icon: const Icon(Icons.refresh),
+                      tooltip: '刷新',
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
           const SizedBox(height: 16),
           Expanded(
