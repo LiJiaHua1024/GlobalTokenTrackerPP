@@ -795,10 +795,15 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wpar: WPARAM, lpar: LPARAM) ->
                 if !g.edit.0.is_null() {
                     let _ = SetWindowTheme(g.edit, PCWSTR(theme_name.as_ptr()), None);
                 }
-                let _ = InvalidateRect(Some(hwnd), None, true);
-                if !g.prog.0.is_null() {
-                    let _ = InvalidateRect(Some(g.prog), None, true);
-                }
+                // RDW_ALLCHILDREN is required: the owner-drawn buttons and
+                // checkboxes are separate HWNDs that only repaint via
+                // WM_DRAWITEM, and InvalidateRect never reaches them.
+                let _ = RedrawWindow(
+                    Some(hwnd),
+                    None,
+                    None,
+                    RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_ERASE,
+                );
             }
             LRESULT(0)
         },
