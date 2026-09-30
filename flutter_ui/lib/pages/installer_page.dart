@@ -86,16 +86,25 @@ class _InstallerPageState extends State<InstallerPage> {
   /// environment key is opened read/write as a single handle, and nothing is
   /// written unless the current value could be read: rewriting PATH from an
   /// empty read would drop every entry the installer never saw.
+  ///
+  /// Entries are compared after `%VAR%` expansion, so an entry stored as
+  /// `%LOCALAPPDATA%\...` dedupes against (and uninstalls alongside) its
+  /// absolute spelling. Before any overwrite the current value and kind are
+  /// backed up to `%USERPROFILE%\.globaltokentracker\path.bak` — a failed
+  /// backup aborts the write — and afterwards a `WM_SETTINGCHANGE` broadcast
+  /// lets freshly opened terminals see the new PATH without a logoff.
   String _userPathScript({required String dest, required bool remove}) {
     final edit = remove
         ? '''
-        \$kept = @(\$parts | Where-Object { -not (\$_.TrimEnd('\\') -ieq \$d) })
-        if (\$kept.Count -ne \$parts.Count) { \$key.SetValue(\$name, (\$kept -join ';'), \$kind) }
+        \$kept = @(\$parts | Where-Object { (& \$exp \$_) -ine (& \$exp \$d) })
+        \$new = \$kept -join ';'
+        \$changed = \$kept.Count -ne \$parts.Count
         '''
         : '''
-        if (-not (\$parts | Where-Object { \$_.TrimEnd('\\') -ieq \$d })) {
-            \$key.SetValue(\$name, \$(if (\$cur.Length -gt 0) { "\$cur;$dest" } else { "$dest" }), \$kind)
-        }
+        \$exists = \$false
+        foreach (\$p in \$parts) { if ((& \$exp \$p) -ieq (& \$exp \$d)) { \$exists = \$true; break } }
+        \$new = if (-not \$exists) { \$(if (\$cur.Length -gt 0) { "\$cur;$dest" } else { "$dest" }) } else { \$cur }
+        \$changed = -not \$exists
         ''';
     return '''
         \$name = 'Path'
@@ -107,8 +116,22 @@ class _InstallerPageState extends State<InstallerPage> {
             \$kind = if (\$has) { \$key.GetValueKind(\$name) } else { 'ExpandString' }
             if (\$has -and \$kind -ne 'String' -and \$kind -ne 'ExpandString') { throw "unexpected \$name kind: \$kind" }
             \$cur = if (\$has) { [string]\$key.GetValue(\$name, '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } else { '' }
+            \$exp = { param(\$p) [Environment]::ExpandEnvironmentVariables(\$p.Trim().TrimEnd('\\')) }
             \$parts = @(\$cur -split ';')
-        $edit
+$edit
+            if (\$changed) {
+                if (\$has) {
+                    \$bakDir = Join-Path \$env:USERPROFILE '.globaltokentracker'
+                    New-Item -ItemType Directory -Force -Path \$bakDir | Out-Null
+                    Set-Content -Path (Join-Path \$bakDir 'path.bak') -Value @("type=\$kind", \$cur) -Encoding UTF8 -ErrorAction Stop
+                }
+                \$key.SetValue(\$name, \$new, \$kind)
+                try {
+                    Add-Type -Namespace Win32 -Name NativeEnv -MemberDefinition '[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(System.IntPtr hWnd, uint Msg, System.UIntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out System.UIntPtr lpdwResult);' -ErrorAction Stop
+                    \$res = [System.UIntPtr]::Zero
+                    [Win32.NativeEnv]::SendMessageTimeout([System.IntPtr]0xFFFF, 0x1A, [System.UIntPtr]::Zero, 'Environment', 2, 5000, [ref]\$res) | Out-Null
+                } catch { }
+            }
         } finally {
             \$key.Close()
         }

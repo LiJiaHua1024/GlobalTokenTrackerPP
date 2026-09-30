@@ -237,18 +237,93 @@ fn read_path(env_key: &RegKey) -> io::Result<Option<(String, RegType)>> {
 /// dropping `REG_EXPAND_SZ` to `REG_SZ` leaves entries such as
 /// `%USERPROFILE%\AppData\Local\Microsoft\WindowsApps` unexpanded for every
 /// process launched afterwards.
-fn write_path(env_key: &RegKey, value: &str, vtype: RegType) -> io::Result<()> {
+///
+/// Before overwriting, the value Windows is about to lose is backed up to
+/// `bak` (when given) — the registry keeps no history, so this file is the
+/// only way back if an edit ever goes wrong. A failed backup aborts the write.
+fn write_path(
+    env_key: &RegKey,
+    original: Option<(&str, RegType)>,
+    value: &str,
+    vtype: RegType,
+    bak: Option<&Path>,
+) -> io::Result<()> {
+    if let Some((raw, t)) = original {
+        let bak = bak.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "no backup location for Path")
+        })?;
+        if let Some(dir) = bak.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let tname = if t == RegType::REG_EXPAND_SZ {
+            "REG_EXPAND_SZ"
+        } else {
+            "REG_SZ"
+        };
+        fs::write(bak, format!("type={tname}\n{raw}\n"))?;
+    }
     let mut raw = value.to_reg_value();
     raw.vtype = vtype;
     env_key.set_raw_value(PATH_VALUE, &raw)
 }
 
-/// True when a PATH entry and a directory name the same path, ignoring a
-/// trailing separator and letter case.
+/// Expand `%VAR%` references with the Windows rules (`ExpandEnvironmentStringsW`,
+/// the same expansion a `REG_EXPAND_SZ` PATH gets at logon): unknown variables
+/// stay literal. Any API failure returns the input unchanged, i.e. comparison
+/// degrades to the old literal behaviour rather than erroring.
+fn expand_env(s: &str) -> String {
+    use windows::Win32::System::Environment::ExpandEnvironmentStringsW;
+    use windows::core::PCWSTR;
+    if !s.contains('%') {
+        return s.to_string();
+    }
+    let src: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut buf = vec![0u16; 512];
+    loop {
+        // SAFETY: `src` is NUL-terminated and outlives the call; `buf` is a
+        // valid writable slice whose length the API honours.
+        let need =
+            unsafe { ExpandEnvironmentStringsW(PCWSTR(src.as_ptr()), Some(&mut buf)) } as usize;
+        if need == 0 {
+            return s.to_string();
+        }
+        if need <= buf.len() {
+            // `need` counts the terminating NUL.
+            return String::from_utf16_lossy(&buf[..need - 1]);
+        }
+        buf.resize(need, 0);
+    }
+}
+
+/// True when a PATH entry and a directory name the same path: both sides are
+/// `%VAR%`-expanded first (a PATH entry written as `%LOCALAPPDATA%\Programs\X`
+/// is the same directory as its absolute spelling), then compared without
+/// surrounding whitespace / trailing `\`, ASCII-case-insensitively. Purely
+/// textual otherwise: no `..`, `/`, or 8.3-short-name resolution.
 fn same_dir(entry: &str, dir: &str) -> bool {
-    entry
-        .trim_end_matches('\\')
-        .eq_ignore_ascii_case(dir.trim_end_matches('\\'))
+    let key = |p: &str| expand_env(p).trim().trim_end_matches('\\').to_string();
+    key(entry).eq_ignore_ascii_case(&key(dir))
+}
+
+/// Tell every top-level window the environment changed, so a freshly opened
+/// terminal picks up the new PATH without a logoff/logon round trip.
+fn broadcast_env_change() {
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE,
+    };
+    use windows::core::w;
+    unsafe {
+        let _ = SendMessageTimeoutW(
+            HWND_BROADCAST,
+            WM_SETTINGCHANGE,
+            WPARAM(0),
+            LPARAM(w!("Environment").as_ptr() as isize),
+            SMTO_ABORTIFHUNG,
+            5000,
+            None,
+        );
+    }
 }
 
 /// PATH with every entry pointing at `dest` dropped. `None` when no entry
@@ -271,6 +346,20 @@ fn strip_dir(cur: &str, dest: &Path) -> Option<String> {
 /// in terminals. Best-effort: EDR/policy may guard HKCU\Environment for unsigned
 /// binaries — a denied write must not fail the whole install.
 fn extend_user_path(key_path: &str, dest: &Path, log: &dyn Fn(String)) {
+    let bak = std::env::var_os("USERPROFILE").map(|p| {
+        Path::new(&p)
+            .join(".globaltokentracker")
+            .join("path.bak")
+    });
+    extend_user_path_at(key_path, dest, log, bak.as_deref());
+}
+
+fn extend_user_path_at(
+    key_path: &str,
+    dest: &Path,
+    log: &dyn Fn(String),
+    bak: Option<&Path>,
+) {
     let reject = |e: &dyn std::fmt::Display| {
         log(format!("PATH 追加被拒（{e}）——不影响使用，CLI 可用完整路径"));
     };
@@ -294,8 +383,16 @@ fn extend_user_path(key_path: &str, dest: &Path, log: &dyn Fn(String)) {
         return;
     }
     let new = if cur.is_empty() { d } else { format!("{cur};{d}") };
-    match write_path(&env_key, &new, vtype) {
-        Ok(()) => log("已加入用户 PATH（新开的终端生效）".into()),
+    let original = if cur.is_empty() {
+        None
+    } else {
+        Some((cur.as_str(), vtype.clone()))
+    };
+    match write_path(&env_key, original, &new, vtype, bak) {
+        Ok(()) => {
+            broadcast_env_change();
+            log("已加入用户 PATH（新开的终端生效）".into());
+        }
         Err(e) => reject(&e),
     }
 }
@@ -303,6 +400,15 @@ fn extend_user_path(key_path: &str, dest: &Path, log: &dyn Fn(String)) {
 /// Drop dest from the *user* PATH (`key_path`). Never writes when the current
 /// value cannot be read — see `read_path`.
 fn remove_user_path(key_path: &str, dest: &Path, log: &dyn Fn(String)) {
+    let bak = std::env::var_os("USERPROFILE").map(|p| {
+        Path::new(&p)
+            .join(".globaltokentracker")
+            .join("path.bak")
+    });
+    remove_user_path_at(key_path, dest, log, bak.as_deref());
+}
+
+fn remove_user_path_at(key_path: &str, dest: &Path, log: &dyn Fn(String), bak: Option<&Path>) {
     let env_key = match open_user_env(key_path) {
         Ok(key) => key,
         Err(e) => return log(format!("PATH 未清理（无法打开环境键：{e}）")),
@@ -315,8 +421,9 @@ fn remove_user_path(key_path: &str, dest: &Path, log: &dyn Fn(String)) {
     let Some(new) = strip_dir(&cur, dest) else {
         return;
     };
-    if let Err(e) = write_path(&env_key, &new, vtype) {
-        log(format!("PATH 清理失败：{e}"));
+    match write_path(&env_key, Some((cur.as_str(), vtype.clone())), &new, vtype, bak) {
+        Ok(()) => broadcast_env_change(),
+        Err(e) => log(format!("PATH 清理失败：{e}")),
     }
 }
 
@@ -627,7 +734,7 @@ mod tests {
         }
 
         fn set(&self, value: &str, vtype: RegType) {
-            write_path(&self.open(), value, vtype).expect("write scratch Path");
+            write_path(&self.open(), None, value, vtype, None).expect("write scratch Path");
         }
 
         fn get(&self) -> Option<(String, RegType)> {
@@ -650,6 +757,37 @@ mod tests {
         assert!(!same_dir(OTHER, INSTALL));
     }
 
+    /// The default install dir spelled with `%LOCALAPPDATA%` and absolutely.
+    /// Pure strings: nothing here reads or writes the registry.
+    fn env_spellings() -> (String, String) {
+        let local = env::var("LOCALAPPDATA").expect("LOCALAPPDATA must be set");
+        (
+            r"%LOCALAPPDATA%\Programs\GlobalTokenTrackerPP".to_string(),
+            format!(r"{local}\Programs\GlobalTokenTrackerPP"),
+        )
+    }
+
+    #[test]
+    fn expand_env_follows_windows_rules() {
+        let local = env::var("LOCALAPPDATA").expect("LOCALAPPDATA must be set");
+        assert_eq!(expand_env(r"%LOCALAPPDATA%\x"), format!(r"{local}\x"));
+        // Variable names are case-insensitive.
+        assert_eq!(expand_env(r"%localappdata%\x"), format!(r"{local}\x"));
+        // Unknown variables stay literal, like the API.
+        assert_eq!(expand_env(r"%GTT_NO_SUCH_VAR%\x"), r"%GTT_NO_SUCH_VAR%\x");
+        assert_eq!(expand_env(r"C:\plain"), r"C:\plain");
+        assert_eq!(expand_env(""), "");
+    }
+
+    #[test]
+    fn same_dir_matches_variable_and_absolute_spellings() {
+        let (var_form, abs_form) = env_spellings();
+        assert!(same_dir(&var_form, &abs_form));
+        assert!(same_dir(&abs_form, &var_form));
+        assert!(same_dir(&format!("{var_form}\\"), &abs_form));
+        assert!(!same_dir(&format!("{var_form}-old"), &abs_form));
+    }
+
     #[test]
     fn strip_dir_removes_only_the_matching_entry() {
         let cur = format!("{KEEP};{INSTALL};{OTHER}");
@@ -665,44 +803,60 @@ mod tests {
         assert_eq!(strip_dir(&format!("{INSTALL}-old"), &dest()), None);
     }
 
+    /// A temp file the PATH backup can be pointed at, unique per test run.
+    fn temp_bak(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("gtt_pathbak_{}", std::process::id()));
+        dir.join(format!("{tag}.bak"))
+    }
+
     #[test]
     fn remove_user_path_strips_the_entry_and_keeps_the_value_type() {
         let scratch = Scratch::new("remove");
         scratch.set(&format!("{KEEP};{INSTALL};{OTHER}"), RegType::REG_EXPAND_SZ);
+        let bak = temp_bak("remove");
 
-        remove_user_path(&scratch.path, &dest(), &|_| {});
+        remove_user_path_at(&scratch.path, &dest(), &|_| {}, Some(&bak));
 
         let (value, vtype) = scratch.get().expect("Path still readable");
         assert_eq!(value, format!("{KEEP};{OTHER}"));
         // Losing REG_EXPAND_SZ would leave %VARS% unexpanded for every process
         // started afterwards.
         assert_eq!(vtype, RegType::REG_EXPAND_SZ);
+        // The overwritten value (and its type) is recoverable from the backup.
+        let saved = fs::read_to_string(&bak).expect("backup written");
+        assert_eq!(saved, format!("type=REG_EXPAND_SZ\n{KEEP};{INSTALL};{OTHER}\n"));
+        let _ = fs::remove_file(&bak);
     }
 
     #[test]
     fn remove_user_path_leaves_an_unrelated_path_untouched() {
         let scratch = Scratch::new("untouched");
         scratch.set(&format!("{KEEP};{OTHER}"), RegType::REG_EXPAND_SZ);
+        let bak = temp_bak("untouched");
 
-        remove_user_path(&scratch.path, &dest(), &|_| {});
+        remove_user_path_at(&scratch.path, &dest(), &|_| {}, Some(&bak));
 
         assert_eq!(
             scratch.get(),
             Some((format!("{KEEP};{OTHER}"), RegType::REG_EXPAND_SZ))
         );
+        // Nothing matched → no write → no backup churn either.
+        assert!(!bak.exists());
     }
 
     #[test]
     fn extend_user_path_appends_once() {
         let scratch = Scratch::new("append");
         scratch.set(KEEP, RegType::REG_EXPAND_SZ);
+        let bak = temp_bak("append");
 
-        extend_user_path(&scratch.path, &dest(), &|_| {});
-        extend_user_path(&scratch.path, &dest(), &|_| {});
+        extend_user_path_at(&scratch.path, &dest(), &|_| {}, Some(&bak));
+        extend_user_path_at(&scratch.path, &dest(), &|_| {}, Some(&bak));
 
         let (value, vtype) = scratch.get().expect("Path still readable");
         assert_eq!(value, format!("{KEEP};{INSTALL}"));
         assert_eq!(vtype, RegType::REG_EXPAND_SZ);
+        let _ = fs::remove_file(&bak);
     }
 
     #[test]
@@ -710,11 +864,28 @@ mod tests {
         let scratch = Scratch::new("create");
         assert_eq!(scratch.get(), None);
 
-        extend_user_path(&scratch.path, &dest(), &|_| {});
+        extend_user_path_at(&scratch.path, &dest(), &|_| {}, Some(&temp_bak("create")));
 
         let (value, vtype) = scratch.get().expect("Path created");
         assert_eq!(value, INSTALL);
         assert_eq!(vtype, RegType::REG_EXPAND_SZ);
+    }
+
+    #[test]
+    fn a_failed_backup_aborts_the_write() {
+        let scratch = Scratch::new("bakfail");
+        scratch.set(KEEP, RegType::REG_EXPAND_SZ);
+        // The backup cannot be created: its parent is a regular file.
+        let blocker = temp_bak("blocker");
+        fs::create_dir_all(blocker.parent().unwrap()).unwrap();
+        fs::write(&blocker, "not a directory").unwrap();
+        let bak = blocker.join("path.bak");
+        let before = scratch.get().clone();
+
+        extend_user_path_at(&scratch.path, &dest(), &|_| {}, Some(&bak));
+
+        assert_eq!(scratch.get(), before, "PATH must be untouched when backup fails");
+        let _ = fs::remove_file(&blocker);
     }
 
     #[test]
