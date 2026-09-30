@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:file_picker/file_picker.dart';
+import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -45,6 +46,32 @@ extension ShareCardStyleExtension on ShareCardStyle {
         return Icons.auto_awesome;
       case ShareCardStyle.crispMinimal:
         return Icons.light_mode_outlined;
+    }
+  }
+}
+
+/// Trend chart rendering mode in the share card
+enum ShareTrendChartType {
+  multiModel,
+  classicBars,
+}
+
+extension ShareTrendChartTypeExtension on ShareTrendChartType {
+  String get label {
+    switch (this) {
+      case ShareTrendChartType.multiModel:
+        return '多模型平滑曲线';
+      case ShareTrendChartType.classicBars:
+        return '经典走势柱状';
+    }
+  }
+
+  IconData get icon {
+    switch (this) {
+      case ShareTrendChartType.multiModel:
+        return Icons.insights_rounded;
+      case ShareTrendChartType.classicBars:
+        return Icons.bar_chart_rounded;
     }
   }
 }
@@ -424,6 +451,8 @@ class ShareStatCard extends StatelessWidget {
   final bool showModels;
   final bool showTools;
   final bool showTrend;
+  final bool showHeatmap;
+  final ShareTrendChartType trendChartType;
 
   const ShareStatCard({
     super.key,
@@ -437,6 +466,8 @@ class ShareStatCard extends StatelessWidget {
     this.showModels = true,
     this.showTools = true,
     this.showTrend = true,
+    this.showHeatmap = true,
+    this.trendChartType = ShareTrendChartType.multiModel,
   });
 
   String get _effectiveRangeKey {
@@ -922,7 +953,17 @@ class ShareStatCard extends StatelessWidget {
                   ],
                 ),
 
-                // 4. Daily Trend Sparkline (Bar chart with vertical light tube gradient)
+                // 4. Token Activity Heatmap (Commit Matrix & Streaks)
+                if (showHeatmap && data.activity.isNotEmpty) ...[
+                  const SizedBox(height: 16),
+                  _buildHeatmapSection(
+                    data.activity,
+                    palette,
+                    themeProvider,
+                  ),
+                ],
+
+                // 5. Daily Trend Sparkline / Multi-Model Trend Chart
                 if (showTrend && data.daily.isNotEmpty) ...[
                   const SizedBox(height: 16),
                   Container(
@@ -949,8 +990,13 @@ class ShareStatCard extends StatelessWidget {
                             Expanded(
                               child: Row(
                                 children: [
-                                  Icon(Icons.show_chart,
-                                      size: 15, color: palette.primary),
+                                  Icon(
+                                    trendChartType == ShareTrendChartType.multiModel
+                                        ? Icons.insights_rounded
+                                        : Icons.show_chart,
+                                    size: 15,
+                                    color: palette.primary,
+                                  ),
                                   const SizedBox(width: 6),
                                   Flexible(
                                     child: Text(
@@ -978,8 +1024,12 @@ class ShareStatCard extends StatelessWidget {
                           ],
                         ),
                         const SizedBox(height: 14),
-                        _buildDailyBars(
-                            data.daily, palette, themeProvider),
+                        if (trendChartType == ShareTrendChartType.multiModel)
+                          _buildMultiModelTrend(
+                              data.daily, palette, themeProvider)
+                        else
+                          _buildDailyBars(
+                              data.daily, palette, themeProvider),
                       ],
                     ),
                   ),
@@ -1460,6 +1510,679 @@ class ShareStatCard extends StatelessWidget {
       colors: [palette.secondary, palette.primary],
     );
   }
+
+  Color _getModelColor(String modelName, int index, ShareCardPalette palette) {
+    final lower = modelName.toLowerCase();
+    if (lower.contains('claude') || lower.contains('sonnet') || lower.contains('haiku')) {
+      return const Color(0xFFF59E0B);
+    } else if (lower.contains('gemini')) {
+      return const Color(0xFF38BDF8);
+    } else if (lower.contains('gpt') || lower.contains('o1') || lower.contains('o3')) {
+      return const Color(0xFF10B981);
+    } else if (lower.contains('deepseek')) {
+      return const Color(0xFF818CF8);
+    }
+    const fallbackPalette = [
+      Color(0xFF2979FF),
+      Color(0xFF00E676),
+      Color(0xFFFF5252),
+      Color(0xFFFF9100),
+      Color(0xFFB388FF),
+      Color(0xFF00E5FF),
+      Color(0xFFFF4081),
+      Color(0xFF7C4DFF),
+    ];
+    return fallbackPalette[index % fallbackPalette.length];
+  }
+
+  double _computeNiceInterval(double rawMax) {
+    if (rawMax <= 0) return 100.0;
+    final roughInterval = (rawMax * 1.15) / 3.0;
+    final exponent = (math.log(roughInterval) / math.ln10).floor();
+    final magnitude = math.pow(10, exponent).toDouble();
+    final fraction = roughInterval / magnitude;
+
+    double niceInterval;
+    if (fraction <= 1.5) {
+      niceInterval = 1.0 * magnitude;
+    } else if (fraction <= 3.0) {
+      niceInterval = 2.0 * magnitude;
+    } else if (fraction <= 7.0) {
+      niceInterval = 5.0 * magnitude;
+    } else {
+      niceInterval = 10.0 * magnitude;
+    }
+    return niceInterval;
+  }
+
+  Widget _buildMultiModelTrend(
+    List<TrendBucket> daily,
+    ShareCardPalette palette,
+    ThemeProvider themeProvider,
+  ) {
+    final recentBuckets = daily.length > 30
+        ? daily.sublist(daily.length - 30)
+        : daily;
+    if (recentBuckets.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    final int numPoints = recentBuckets.length;
+
+    // Collect distinct models
+    final Map<String, int> modelTotalTokens = {};
+    for (final b in recentBuckets) {
+      for (final entry in b.top) {
+        if (entry.value > 0) {
+          modelTotalTokens[entry.key] =
+              (modelTotalTokens[entry.key] ?? 0) + entry.value;
+        }
+      }
+    }
+
+    final sortedModels = modelTotalTokens.keys.toList()
+      ..sort((a, b) =>
+          (modelTotalTokens[b] ?? 0).compareTo(modelTotalTokens[a] ?? 0));
+    final topModels = sortedModels.take(4).toList();
+
+    double maxVal = 0;
+    final List<LineChartBarData> lineBarsData = [];
+
+    if (topModels.isNotEmpty) {
+      for (int mIdx = 0; mIdx < topModels.length; mIdx++) {
+        final model = topModels[mIdx];
+        final color = _getModelColor(model, mIdx, palette);
+        final spots = <FlSpot>[];
+
+        for (int i = 0; i < numPoints; i++) {
+          final bucket = recentBuckets[i];
+          int val = 0;
+          for (final entry in bucket.top) {
+            if (entry.key == model) {
+              val = entry.value;
+              break;
+            }
+          }
+          if (val > maxVal) maxVal = val.toDouble();
+          spots.add(FlSpot(i.toDouble(), val.toDouble()));
+        }
+
+        if (numPoints == 1) {
+          spots.add(FlSpot(1.0, spots.first.y));
+        }
+
+        lineBarsData.add(
+          LineChartBarData(
+            spots: spots,
+            isCurved: true,
+            curveSmoothness: 0.35,
+            preventCurveOverShooting: true,
+            color: color,
+            barWidth: 2.2,
+            isStrokeCapRound: true,
+            dotData: FlDotData(
+              show: numPoints <= 8,
+              getDotPainter: (spot, percent, barData, index) =>
+                  FlDotCirclePainter(
+                radius: 3,
+                color: color,
+                strokeWidth: 1.5,
+                strokeColor: palette.isDark ? const Color(0xFF0F172A) : Colors.white,
+              ),
+            ),
+            belowBarData: BarAreaData(
+              show: true,
+              color: color.withValues(alpha: 0.07),
+            ),
+          ),
+        );
+      }
+    } else {
+      // Fallback: Total Tokens single curve
+      final spots = <FlSpot>[];
+      for (int i = 0; i < numPoints; i++) {
+        final t = recentBuckets[i].tokens.toDouble();
+        if (t > maxVal) maxVal = t;
+        spots.add(FlSpot(i.toDouble(), t));
+      }
+
+      if (numPoints == 1) {
+        spots.add(FlSpot(1.0, spots.first.y));
+      }
+
+      lineBarsData.add(
+        LineChartBarData(
+          spots: spots,
+          isCurved: true,
+          curveSmoothness: 0.35,
+          preventCurveOverShooting: true,
+          color: palette.primary,
+          barWidth: 2.5,
+          isStrokeCapRound: true,
+          dotData: FlDotData(
+            show: numPoints <= 10,
+            getDotPainter: (spot, percent, barData, index) =>
+                FlDotCirclePainter(
+              radius: 3.5,
+              color: palette.primary,
+              strokeWidth: 1.5,
+              strokeColor: palette.isDark ? const Color(0xFF0F172A) : Colors.white,
+            ),
+          ),
+          belowBarData: BarAreaData(
+            show: true,
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [
+                palette.primary.withValues(alpha: 0.22),
+                palette.primary.withValues(alpha: 0.02),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    final double interval = _computeNiceInterval(maxVal);
+    final double maxY = maxVal <= 0 ? 100 : (maxVal * 1.18);
+    final double bottomInterval = math.max(1.0, (numPoints / 6).floorToDouble());
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (topModels.isNotEmpty) ...[
+          Wrap(
+            spacing: 12,
+            runSpacing: 6,
+            children: topModels.map((m) {
+              final color = _getModelColor(m, topModels.indexOf(m), palette);
+              final total = modelTotalTokens[m] ?? 0;
+              return Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 7,
+                    height: 7,
+                    decoration: BoxDecoration(
+                      color: color,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 5),
+                  Text(
+                    m,
+                    style: TextStyle(
+                      color: palette.textPrimary,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(width: 3),
+                  Text(
+                    '(${themeProvider.formatTokens(total)})',
+                    style: TextStyle(
+                      color: palette.textMuted,
+                      fontSize: 9,
+                    ),
+                  ),
+                ],
+              );
+            }).toList(),
+          ),
+          const SizedBox(height: 10),
+        ],
+        SizedBox(
+          height: 110,
+          child: LineChart(
+            LineChartData(
+              lineTouchData: const LineTouchData(enabled: false),
+              minY: 0,
+              maxY: maxY,
+              minX: 0,
+              maxX: math.max(1.0, (numPoints - 1).toDouble()),
+              gridData: FlGridData(
+                show: true,
+                drawVerticalLine: false,
+                horizontalInterval: interval > 0 ? interval : 100,
+                getDrawingHorizontalLine: (value) => FlLine(
+                  color: palette.cardBorder.withValues(alpha: 0.45),
+                  strokeWidth: 1,
+                  dashArray: [4, 4],
+                ),
+              ),
+              titlesData: FlTitlesData(
+                show: true,
+                topTitles: const AxisTitles(
+                  sideTitles: SideTitles(showTitles: false),
+                ),
+                rightTitles: const AxisTitles(
+                  sideTitles: SideTitles(showTitles: false),
+                ),
+                leftTitles: AxisTitles(
+                  sideTitles: SideTitles(
+                    showTitles: true,
+                    reservedSize: 42,
+                    interval: interval > 0 ? interval : 100,
+                    getTitlesWidget: (value, meta) {
+                      if (value < 0 || value > maxY) {
+                        return const SizedBox.shrink();
+                      }
+                      return Padding(
+                        padding: const EdgeInsets.only(right: 6.0),
+                        child: Text(
+                          themeProvider.formatTokens(value.toInt()),
+                          textAlign: TextAlign.right,
+                          style: TextStyle(
+                            color: palette.textMuted,
+                            fontSize: 9,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+                bottomTitles: AxisTitles(
+                  sideTitles: SideTitles(
+                    showTitles: true,
+                    reservedSize: 18,
+                    interval: bottomInterval,
+                    getTitlesWidget: (value, meta) {
+                      final idx = value.toInt();
+                      if (idx < 0 || idx >= numPoints) {
+                        return const SizedBox.shrink();
+                      }
+                      final b = recentBuckets[idx];
+                      final dateParts = b.date.split('-');
+                      final label = dateParts.length >= 3
+                          ? '${dateParts[1]}/${dateParts[2]}'
+                          : b.date;
+                      return Padding(
+                        padding: const EdgeInsets.only(top: 4.0),
+                        child: Text(
+                          label,
+                          style: TextStyle(
+                            color: palette.textMuted,
+                            fontSize: 8.5,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ),
+              borderData: FlBorderData(show: false),
+              lineBarsData: lineBarsData,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildHeatmapSection(
+    List<ActivityDay> activity,
+    ShareCardPalette palette,
+    ThemeProvider themeProvider,
+  ) {
+    final Map<String, ActivityDay> activityMap = {
+      for (final a in activity) a.date: a,
+    };
+
+    int activeDays = 0;
+    int totalTokens = 0;
+    int maxDailyTokens = 0;
+
+    for (final a in activity) {
+      if (a.tokens > 0) {
+        activeDays++;
+        totalTokens += a.tokens;
+        if (a.tokens > maxDailyTokens) {
+          maxDailyTokens = a.tokens;
+        }
+      }
+    }
+
+    final sortedActiveDates = activity
+        .where((a) => a.tokens > 0)
+        .map((a) => a.date)
+        .toList()
+      ..sort();
+
+    int longestStreak = 0;
+    int currentStreak = 0;
+    DateTime? prevDate;
+
+    for (final dStr in sortedActiveDates) {
+      try {
+        final dt = DateTime.parse(dStr);
+        if (prevDate != null) {
+          final diff = dt.difference(prevDate).inDays;
+          if (diff == 1) {
+            currentStreak++;
+          } else if (diff > 1) {
+            currentStreak = 1;
+          }
+        } else {
+          currentStreak = 1;
+        }
+        if (currentStreak > longestStreak) {
+          longestStreak = currentStreak;
+        }
+        prevDate = dt;
+      } catch (_) {}
+    }
+
+    const totalWeeks = 52;
+    const daysPerWeek = 7;
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final currentDayOfWeek = today.weekday % 7;
+    final startDate = today
+        .subtract(Duration(days: (totalWeeks - 1) * 7 + currentDayOfWeek));
+
+    final gridDates = List.generate(totalWeeks, (w) {
+      return List.generate(daysPerWeek, (d) {
+        return startDate.add(Duration(days: w * 7 + d));
+      });
+    });
+
+    final Map<int, String> monthLabels = {};
+    int lastMonth = -1;
+    int lastWeekCol = -10;
+    for (int w = 0; w < totalWeeks; w++) {
+      final firstDayInWeek = gridDates[w][0];
+      final month = firstDayInWeek.month;
+      if (month != lastMonth) {
+        if (lastWeekCol < 0 || (w - lastWeekCol) >= 3) {
+          monthLabels[w] = '$month月';
+          lastMonth = month;
+          lastWeekCol = w;
+        }
+      }
+    }
+
+    const double cellSize = 8.0;
+    const double cellSpacing = 2.0;
+
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        gradient: palette.cardGradient,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: palette.cardBorder),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(
+                alpha: palette.isDark ? 0.15 : 0.03),
+            blurRadius: 10,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    Icons.local_fire_department_rounded,
+                    size: 16,
+                    color: palette.accent,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    'TOKEN 活动矩阵 (COMMIT HEATMAP)',
+                    style: TextStyle(
+                      color: palette.textMuted,
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 0.5,
+                    ),
+                  ),
+                ],
+              ),
+              Row(
+                children: [
+                  if (longestStreak > 1) ...[
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: palette.pillBackground,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: palette.pillBorder),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.local_fire_department,
+                            size: 11,
+                            color: palette.accent,
+                          ),
+                          const SizedBox(width: 3),
+                          Text(
+                            '最长连续 $longestStreak 天',
+                            style: TextStyle(
+                              color: palette.textSecondary,
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                  ],
+                  Text(
+                    '活跃 $activeDays 天',
+                    style: TextStyle(
+                      color: palette.textSecondary,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: List.generate(daysPerWeek, (d) {
+                  String label = '';
+                  if (d == 1) label = '一';
+                  if (d == 3) label = '三';
+                  if (d == 5) label = '五';
+                  return Container(
+                    width: 14,
+                    height: cellSize,
+                    margin: EdgeInsets.only(
+                        bottom: d < daysPerWeek - 1 ? cellSpacing : 0),
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      label,
+                      style: TextStyle(
+                        color: palette.textMuted,
+                        fontSize: 7.5,
+                        height: 1.0,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  );
+                }),
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: List.generate(totalWeeks, (w) {
+                        return Padding(
+                          padding: EdgeInsets.only(
+                              right: w < totalWeeks - 1 ? cellSpacing : 0),
+                          child: Column(
+                            children: List.generate(daysPerWeek, (d) {
+                              final dt = gridDates[w][d];
+                              final isFuture = dt.isAfter(today);
+
+                              if (isFuture) {
+                                return Container(
+                                  width: cellSize,
+                                  height: cellSize,
+                                  margin: EdgeInsets.only(
+                                      bottom: d < daysPerWeek - 1
+                                          ? cellSpacing
+                                          : 0),
+                                  color: Colors.transparent,
+                                );
+                              }
+
+                              final dStr =
+                                  DateFormat('yyyy-MM-dd').format(dt);
+                              final act = activityMap[dStr];
+                              final dailyTokens = act?.tokens ?? 0;
+                              final level = _getHeatmapLevel(
+                                  dailyTokens, maxDailyTokens);
+                              final color =
+                                  _getHeatmapCellColor(level, palette);
+
+                              return Container(
+                                width: cellSize,
+                                height: cellSize,
+                                margin: EdgeInsets.only(
+                                    bottom: d < daysPerWeek - 1
+                                        ? cellSpacing
+                                        : 0),
+                                decoration: BoxDecoration(
+                                  color: color,
+                                  borderRadius: BorderRadius.circular(2),
+                                  border: Border.all(
+                                    color: level == 0
+                                        ? palette.cardBorder
+                                            .withValues(alpha: 0.35)
+                                        : Colors.transparent,
+                                    width: 0.4,
+                                  ),
+                                ),
+                              );
+                            }),
+                          ),
+                        );
+                      }),
+                    ),
+                    const SizedBox(height: 6),
+                    SizedBox(
+                      height: 14,
+                      child: Stack(
+                        children: monthLabels.entries.map((entry) {
+                          final w = entry.key;
+                          final label = entry.value;
+                          final leftPos = w * (cellSize + cellSpacing);
+                          return Positioned(
+                            left: leftPos,
+                            child: Text(
+                              label,
+                              style: TextStyle(
+                                fontSize: 9,
+                                color: palette.textMuted,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                '近一年累计活动活跃 · 产生 ${themeProvider.formatTokens(totalTokens)} Tokens',
+                style: TextStyle(
+                  color: palette.textMuted,
+                  fontSize: 10,
+                ),
+              ),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    '少',
+                    style: TextStyle(color: palette.textMuted, fontSize: 10),
+                  ),
+                  const SizedBox(width: 4),
+                  ...[0, 1, 2, 3, 4].map((level) => Container(
+                        width: 8,
+                        height: 8,
+                        margin: const EdgeInsets.symmetric(horizontal: 1.5),
+                        decoration: BoxDecoration(
+                          color: _getHeatmapCellColor(level, palette),
+                          borderRadius: BorderRadius.circular(2),
+                          border: Border.all(
+                            color: level == 0
+                                ? palette.cardBorder.withValues(alpha: 0.5)
+                                : Colors.transparent,
+                            width: 0.5,
+                          ),
+                        ),
+                      )),
+                  const SizedBox(width: 4),
+                  Text(
+                    '多',
+                    style: TextStyle(color: palette.textMuted, fontSize: 10),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  int _getHeatmapLevel(int dailyTokens, int maxDailyTokens) {
+    if (dailyTokens <= 0 || maxDailyTokens <= 0) return 0;
+    final ratio = dailyTokens / maxDailyTokens;
+    if (ratio <= 0.25) return 1;
+    if (ratio <= 0.50) return 2;
+    if (ratio <= 0.75) return 3;
+    return 4;
+  }
+
+  Color _getHeatmapCellColor(int level, ShareCardPalette palette) {
+    switch (level) {
+      case 1:
+        return palette.primary.withValues(alpha: palette.isDark ? 0.35 : 0.25);
+      case 2:
+        return palette.primary.withValues(alpha: palette.isDark ? 0.60 : 0.50);
+      case 3:
+        return palette.primary.withValues(alpha: palette.isDark ? 0.85 : 0.75);
+      case 4:
+        return palette.isDark ? palette.glowColor : palette.primary;
+      case 0:
+      default:
+        return palette.isDark
+            ? const Color(0xFF1E293B).withValues(alpha: 0.55)
+            : const Color(0xFFE2E8F0).withValues(alpha: 0.8);
+    }
+  }
 }
 
 /// Full interactive Dialog for Customizing & Exporting the Share Stat Card
@@ -1491,6 +2214,8 @@ class _ShareCardDialogState extends State<ShareCardDialog> {
   bool _showModels = true;
   bool _showTools = true;
   bool _showTrend = true;
+  bool _showHeatmap = true;
+  ShareTrendChartType _trendChartType = ShareTrendChartType.multiModel;
 
   bool _isCopying = false;
   bool _copySuccess = false;
@@ -1747,6 +2472,13 @@ class _ShareCardDialogState extends State<ShareCardDialog> {
           '专注时长: ${(span.activeMs / 1000 / 60).toStringAsFixed(0)} 分钟');
     }
 
+    if (_showHeatmap && _data.activity.isNotEmpty) {
+      final activeDays = _data.activity.where((a) => a.tokens > 0).length;
+      if (activeDays > 0) {
+        buffer.writeln('📅 活跃天数: $activeDays 天活动打卡');
+      }
+    }
+
     if (_showModels && _data.byModel.isNotEmpty) {
       final top3 = _data.byModel.take(3).map((m) => m.name).join(', ');
       buffer.writeln('🏆 主要模型: $top3');
@@ -1867,6 +2599,8 @@ class _ShareCardDialogState extends State<ShareCardDialog> {
                                       showModels: _showModels,
                                       showTools: _showTools,
                                       showTrend: _showTrend,
+                                      showHeatmap: _showHeatmap,
+                                      trendChartType: _trendChartType,
                                     ),
                                   ),
                                 ),
@@ -1984,15 +2718,57 @@ class _ShareCardDialogState extends State<ShareCardDialog> {
                           ),
                           SwitchListTile(
                             contentPadding: EdgeInsets.zero,
-                            title: const Text('显示核心模型分布排行'),
-                            value: _showModels,
-                            onChanged: (v) => setState(() => _showModels = v),
+                            title: const Text('显示 Token 活动打卡热力图'),
+                            subtitle: const Text('展示类似 GitHub 贡献矩阵的年度活跃打卡'),
+                            value: _showHeatmap,
+                            onChanged: (v) => setState(() => _showHeatmap = v),
                           ),
                           SwitchListTile(
                             contentPadding: EdgeInsets.zero,
-                            title: const Text('显示用量走势微图'),
+                            title: const Text('显示用量走势图表'),
+                            subtitle: const Text('展示周期内的模型用量变化走势'),
                             value: _showTrend,
                             onChanged: (v) => setState(() => _showTrend = v),
+                          ),
+                          if (_showTrend) ...[
+                            Padding(
+                              padding: const EdgeInsets.only(
+                                  left: 12.0, bottom: 8.0, top: 2.0),
+                              child: Row(
+                                children: [
+                                  Text(
+                                    '走势样式: ',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: theme.colorScheme.onSurfaceVariant,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  SegmentedButton<ShareTrendChartType>(
+                                    segments:
+                                        ShareTrendChartType.values.map((t) {
+                                      return ButtonSegment<ShareTrendChartType>(
+                                        value: t,
+                                        icon: Icon(t.icon, size: 14),
+                                        label: Text(t.label,
+                                            style:
+                                                const TextStyle(fontSize: 12)),
+                                      );
+                                    }).toList(),
+                                    selected: {_trendChartType},
+                                    onSelectionChanged: (val) => setState(
+                                        () => _trendChartType = val.first),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                          SwitchListTile(
+                            contentPadding: EdgeInsets.zero,
+                            title: const Text('显示核心模型分布排行'),
+                            value: _showModels,
+                            onChanged: (v) => setState(() => _showModels = v),
                           ),
                           SwitchListTile(
                             contentPadding: EdgeInsets.zero,
