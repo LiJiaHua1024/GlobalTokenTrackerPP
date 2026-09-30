@@ -455,6 +455,7 @@ class ShareStatCard extends StatelessWidget {
   final bool showTools;
   final bool showTrend;
   final bool showHeatmap;
+  final bool showCache;
   final ShareTrendChartType trendChartType;
 
   const ShareStatCard({
@@ -470,6 +471,7 @@ class ShareStatCard extends StatelessWidget {
     this.showTools = true,
     this.showTrend = true,
     this.showHeatmap = true,
+    this.showCache = true,
     this.trendChartType = ShareTrendChartType.multiModel,
   });
 
@@ -894,8 +896,9 @@ class ShareStatCard extends StatelessWidget {
                             color: palette.secondary,
                             palette: palette,
                           ),
-                          if (span.cacheReadTokens > 0 ||
-                              span.reasoningTokens > 0)
+                          if (showCache &&
+                              (span.cacheReadTokens > 0 ||
+                                  span.reasoningTokens > 0))
                             _buildTokenPill(
                               label: '缓存与推理',
                               value: themeProvider.formatTokens(
@@ -940,18 +943,19 @@ class ShareStatCard extends StatelessWidget {
                           palette: palette,
                         ),
                       ),
-                    if (showActivity) const SizedBox(width: 12),
-                    Expanded(
-                      child: _buildMetricTile(
-                        title: '缓存命中率',
-                        value: '${cacheHitRate.toStringAsFixed(1)}%',
-                        subtext:
-                            '命中: ${themeProvider.formatTokens(span.cacheReadTokens)}',
-                        icon: Icons.speed,
-                        color: const Color(0xFF8B5CF6),
-                        palette: palette,
+                    if (showActivity && showCache) const SizedBox(width: 12),
+                    if (showCache)
+                      Expanded(
+                        child: _buildMetricTile(
+                          title: '缓存命中率',
+                          value: '${cacheHitRate.toStringAsFixed(1)}%',
+                          subtext:
+                              '命中: ${themeProvider.formatTokens(span.cacheReadTokens)}',
+                          icon: Icons.speed,
+                          color: const Color(0xFF8B5CF6),
+                          palette: palette,
+                        ),
                       ),
-                    ),
                   ],
                 ),
 
@@ -2222,6 +2226,7 @@ class _ShareCardDialogState extends State<ShareCardDialog> {
   bool _showTools = true;
   bool _showTrend = true;
   bool _showHeatmap = true;
+  bool _showCache = true;
   ShareTrendChartType _trendChartType = ShareTrendChartType.multiModel;
 
   bool _isCopying = false;
@@ -2618,6 +2623,7 @@ class _ShareCardDialogState extends State<ShareCardDialog> {
                                       showTools: _showTools,
                                       showTrend: _showTrend,
                                       showHeatmap: _showHeatmap,
+                                      showCache: _showCache,
                                       trendChartType: _trendChartType,
                                     ),
                                   ),
@@ -2733,6 +2739,13 @@ class _ShareCardDialogState extends State<ShareCardDialog> {
                             title: const Text('显示活跃时长与请求次数'),
                             value: _showActivity,
                             onChanged: (v) => setState(() => _showActivity = v),
+                          ),
+                          SwitchListTile(
+                            contentPadding: EdgeInsets.zero,
+                            title: const Text('显示缓存命中率与推理统计'),
+                            subtitle: const Text('可关闭以隐藏缓存行为特征'),
+                            value: _showCache,
+                            onChanged: (v) => setState(() => _showCache = v),
                           ),
                           SwitchListTile(
                             contentPadding: EdgeInsets.zero,
