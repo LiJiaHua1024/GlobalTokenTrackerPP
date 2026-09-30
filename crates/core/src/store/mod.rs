@@ -9,15 +9,21 @@ use std::path::Path;
 
 pub use cursor::{CursorAction, FileCursor, tail_fingerprint};
 pub use query::{
-    ActivityDay, AppSummary, DailyRow, EventRow, PriceRow, QuotaRow, ShareRow, SourceHealth,
-    Totals,
+    ActivityDay, AppSummary, DailyRow, EventRow, MODEL_EXPR, PriceRow, QuotaRow, ShareRow,
+    SourceHealth, Totals,
 };
 
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_VERSION: i64 = 1;
 
 /// Default database location: `~/.globaltokentracker/ledger.db`.
+///
+/// `GTT_DATA_DIR` (a directory) relocates the ledger, `ui.json` and backups —
+/// for tests and screenshots, so a scratch instance never touches real data.
 pub fn default_db_path() -> std::path::PathBuf {
+    if let Some(dir) = std::env::var_os("GTT_DATA_DIR") {
+        return std::path::PathBuf::from(dir).join("ledger.db");
+    }
     let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
     let dir = home.join(".globaltokentracker");
     // Rename-era migration: pre-rename builds stored the ledger at

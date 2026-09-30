@@ -5,6 +5,7 @@
 //! Windows (WinUI 3) and future macOS shells stay thin view layers.
 
 pub mod adapters;
+pub mod cube;
 pub mod engine;
 pub mod model;
 pub mod normalize;
@@ -16,6 +17,7 @@ pub mod store;
 pub mod sync;
 pub mod viewmodel;
 
+pub use cube::Cube;
 pub use engine::{Engine, ScanReport};
 pub use model::{CostSource, Provenance, QuotaSnapshot, UsageEvent, apps};
 pub use store::Store;

@@ -374,6 +374,13 @@ impl super::Store {
         );
         let fmt = if hourly { "%H:00" } else { "%Y-%m-%d" };
         let (w, p) = scope_where(from_ms, to_ms, apps, models);
+        // A row without ts_start has no bucket (strftime → NULL, which the
+        // String read below would reject and fail the whole overview).
+        let w = if w.is_empty() {
+            "WHERE ts_start IS NOT NULL".to_string()
+        } else {
+            format!("{w} AND ts_start IS NOT NULL")
+        };
         let mut st = self.conn().prepare(&format!(
             "SELECT strftime('{fmt}', ts_start/1000, 'unixepoch', '{utc_offset}') AS k,
                     {MODEL_EXPR},
