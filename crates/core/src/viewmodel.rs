@@ -152,6 +152,19 @@ pub struct TrendBucket {
     pub top: Vec<(String, u64)>,
 }
 
+/// One day of the activity heatmap — all four metrics, so the tooltip and the
+/// metric switch need no second query. `date` is "YYYY-MM-DD" (local day).
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct HeatDay {
+    pub date: String,
+    /// Headline tokens: input + output + cache_read.
+    pub tokens: u64,
+    pub cost_usd: f64,
+    pub events: u64,
+    /// Sum of the events' `duration_ms` (NULL counts 0).
+    pub duration_ms: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct OverviewVm {
     /// Always today — the tray tooltip and badges stay day-scoped regardless
@@ -182,6 +195,9 @@ pub struct OverviewVm {
     /// renders these, the overview strip keeps using the flat `quotas`.
     pub quota_groups: Vec<QuotaGroupVm>,
     pub unpriced: Vec<(String, u64)>,
+    /// Activity heatmap days — a fixed ~1-year window, independent of `range`
+    /// but under the same tool/model filters.
+    pub heat: Vec<HeatDay>,
     /// Local UTC offset "+HH:MM" for display.
     pub tz_offset: String,
 }
@@ -294,6 +310,7 @@ impl Store {
         let start = range.start_ms();
         let end = range.end_ms();
         let tz = local_utc_offset();
+        let since = crate::cube::heat_since_ms();
         // Per-bucket × model rows fold into trend buckets carrying the
         // tooltip payload (events + top-3 models by tokens).
         let mut buckets: std::collections::BTreeMap<String, TrendBucket> =
@@ -368,6 +385,7 @@ impl Store {
             quota_groups: group_quotas(quotas.clone()),
             quotas,
             unpriced: self.unpriced_models()?,
+            heat: self.heat_days(apps, models, since)?,
             tz_offset: tz,
         })
     }

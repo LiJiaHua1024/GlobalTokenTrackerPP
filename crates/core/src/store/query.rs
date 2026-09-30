@@ -264,6 +264,55 @@ impl super::Store {
             .map_err(Into::into)
     }
 
+    /// SQL twin of `Cube::heat` — same window, day frame and filters; the
+    /// fallback when the overview is not served from the cube. `since_ms` is the
+    /// window start (`cube::heat_since_ms`), the end is always today.
+    pub fn heat_days(
+        &self,
+        apps: Option<&[String]>,
+        models: Option<&[String]>,
+        since_ms: i64,
+    ) -> Result<Vec<crate::viewmodel::HeatDay>> {
+        use crate::cube::{blank_heat, current_offset_ms, heat_bounds, heat_day_start_ms};
+        let off_ms = current_offset_ms();
+        let (start, today) = heat_bounds(off_ms, super::now_ms());
+        let to_ms = heat_day_start_ms(off_ms, today + 1);
+        let (w, p) = scope_where(Some(since_ms), Some(to_ms), apps, models);
+        let offset = crate::viewmodel::local_utc_offset();
+        let mut st = self.conn().prepare(&format!(
+            "SELECT strftime('%Y-%m-%d', ts_start/1000, 'unixepoch', '{offset}') AS d, COUNT(*),
+                    COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens),0),
+                    COALESCE(SUM(cost_usd),0), COALESCE(SUM(duration_ms),0)
+             FROM usage_events {w} GROUP BY d"
+        ))?;
+        let rows = st.query_map(rusqlite::params_from_iter(p.iter()), |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)? as u64,
+                r.get::<_, i64>(2)? as u64,
+                r.get::<_, f64>(3)?,
+                r.get::<_, i64>(4)? as u64,
+            ))
+        })?;
+        let mut out = blank_heat(start, today);
+        let index: std::collections::HashMap<String, usize> = out
+            .iter()
+            .enumerate()
+            .map(|(i, h)| (h.date.clone(), i))
+            .collect();
+        for row in rows {
+            let (date, events, tokens, cost, duration) = row?;
+            if let Some(&i) = index.get(&date) {
+                let h = &mut out[i];
+                h.events += events;
+                h.tokens += tokens;
+                h.cost_usd += cost;
+                h.duration_ms += duration;
+            }
+        }
+        Ok(out)
+    }
+
     pub fn by_app(
         &self,
         from_ms: Option<i64>,

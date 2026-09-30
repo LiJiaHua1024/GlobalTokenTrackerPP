@@ -6,7 +6,7 @@
 
 use super::{Capability, ScanOutcome, SourceAdapter, SourceItem, SourceKind, complete_lines};
 use crate::model::{Provenance, QuotaSnapshot, UsageEvent, apps};
-use crate::normalize::{fnum, input_excludes_cache, num, text, ts_ms};
+use crate::normalize::{derived_duration, fnum, input_excludes_cache, num, text, ts_ms};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -34,6 +34,14 @@ impl Totals5 {
 struct PrevLine {
     inc: Totals5,
     cum: Totals5,
+    /// When the model call in flight began: the last turn start, user message,
+    /// tool result or emitted token_count. Absent in states written before
+    /// durations.
+    #[serde(default)]
+    call_start_ms: Option<i64>,
+    /// Latest model-output line (response item / usage record) of that call.
+    #[serde(default)]
+    model_out_ms: Option<i64>,
 }
 
 impl PrevLine {
@@ -110,6 +118,15 @@ impl SourceAdapter for Codex {
             .and_then(|s| serde_json::from_str(s).ok())
             .unwrap_or_default();
 
+        // A call's duration runs from `call_start` to the LAST model-output line
+        // before its `token_count`: Codex writes the token_count after the tool
+        // has run (tool output, then token_count within milliseconds), so
+        // token_count's own timestamp would measure the tool, not the model.
+        // A tool result that arrives while a token_count is still pending is
+        // `staged`: it starts the NEXT call once this one is emitted.
+        let mut call_start: Option<i64> = prev.call_start_ms;
+        let mut model_out: Option<i64> = prev.model_out_ms;
+        let mut staged_start: Option<i64> = None;
         let mut cur_model: Option<String> = None;
         let mut cur_cwd: Option<String> = None;
         let mut last_quota: Option<(f64, i64)> = None; // (used_percent, resets_at) change-detect
@@ -126,17 +143,58 @@ impl SourceAdapter for Codex {
                 continue;
             };
             let ty = v.get("type").and_then(Value::as_str).unwrap_or("");
+            let ts = ts_ms(&v["timestamp"]);
             if ty == "turn_context" {
                 let p = &v["payload"];
                 cur_model = text(&p["model"]).or(cur_model);
                 cur_cwd = text(&p["cwd"]).or(cur_cwd);
                 continue;
             }
-            if ty != "event_msg" {
+            if ty == "token_usage_record" {
+                if ts.is_some() {
+                    model_out = ts;
+                }
                 continue;
             }
             let p = &v["payload"];
-            if p.get("type").and_then(Value::as_str) != Some("token_count") {
+            let pty = p.get("type").and_then(Value::as_str);
+            if ty == "response_item" {
+                match (pty, p["role"].as_str()) {
+                    (Some("custom_tool_call_output" | "function_call_output"), _) => {
+                        if model_out.is_some() {
+                            staged_start = ts.or(staged_start);
+                        } else if ts.is_some() {
+                            call_start = ts;
+                        }
+                    }
+                    (Some("message"), Some("user")) => {
+                        if ts.is_some() {
+                            call_start = ts;
+                            model_out = None;
+                            staged_start = None;
+                        }
+                    }
+                    (Some("message"), Some("developer")) => {}
+                    _ => {
+                        if ts.is_some() {
+                            model_out = ts;
+                        }
+                    }
+                }
+                continue;
+            }
+            if ty != "event_msg" {
+                continue;
+            }
+            if pty == Some("task_started") {
+                if ts.is_some() {
+                    call_start = ts;
+                    model_out = None;
+                    staged_start = None;
+                }
+                continue;
+            }
+            if pty != Some("token_count") {
                 continue;
             }
             let info = &p["info"];
@@ -159,7 +217,8 @@ impl SourceAdapter for Codex {
             // Verbatim repeat of the previous emission → duplicate, skip usage
             // (quota below is still change-detected on its own signature).
             let is_dup = prev.is_same(&inc, &cum);
-            prev = PrevLine { inc, cum };
+            prev.inc = inc;
+            prev.cum = cum;
 
             if !is_dup && inc.sum() > 0 {
                 out.events.push(UsageEvent {
@@ -171,7 +230,8 @@ impl SourceAdapter for Codex {
                     // priced or unpriced per §7.3.
                     model: cur_model.clone(),
                     request_model: cur_model.clone(),
-                    ts_start: ts_ms(&v["timestamp"]),
+                    ts_start: ts,
+                    duration_ms: derived_duration(call_start, model_out.or(ts)),
                     // OpenAI semantic: input INCLUDES cached → normalize out.
                     input_tokens: input_excludes_cache(inc.input, inc.cached, inc.cache_write),
                     output_tokens: inc.output,
@@ -182,6 +242,8 @@ impl SourceAdapter for Codex {
                     raw_ref: Some(format!("{}@{}", item.path.display(), line_start)),
                     ..Default::default()
                 });
+                call_start = staged_start.take().or(ts);
+                model_out = None;
             }
 
             // Free official quota signal riding on the same line.
@@ -197,6 +259,8 @@ impl SourceAdapter for Codex {
                 }
             }
         }
+        prev.call_start_ms = call_start;
+        prev.model_out_ms = model_out;
         out.new_state = serde_json::to_string(&prev).ok();
         Ok(out)
     }
@@ -247,4 +311,190 @@ fn quotas_from(rl: &Value) -> Vec<QuotaSnapshot> {
         });
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item() -> SourceItem {
+        SourceItem {
+            key: "k".into(),
+            path: PathBuf::from("rollout-abc.jsonl"),
+            kind: SourceKind::Jsonl,
+        }
+    }
+
+    fn ts(sec: u32) -> String {
+        format!("2026-09-01T10:{:02}:{:02}.000Z", sec / 60 % 60, sec % 60)
+    }
+
+    fn started(sec: u32) -> String {
+        format!(
+            r#"{{"timestamp":"{}","type":"event_msg","payload":{{"type":"task_started"}}}}"#,
+            ts(sec)
+        )
+    }
+
+    fn response(sec: u32, payload: &str) -> String {
+        format!(
+            r#"{{"timestamp":"{}","type":"response_item","payload":{payload}}}"#,
+            ts(sec)
+        )
+    }
+
+    /// `out` = this call's output tokens, `cum` = cumulative output so far.
+    fn token_count(sec: u32, out: u64, cum: u64) -> String {
+        format!(
+            r#"{{"timestamp":"{}","type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":10,"output_tokens":{out}}},"total_token_usage":{{"input_tokens":10,"output_tokens":{cum}}}}}}}}}"#,
+            ts(sec)
+        )
+    }
+
+    fn parse(lines: &[String], state: Option<&str>) -> ScanOutcome {
+        let data = format!("{}\n", lines.join("\n"));
+        Codex
+            .parse_jsonl(&item(), 0, data.as_bytes(), state)
+            .unwrap()
+    }
+
+    fn durs(o: &ScanOutcome) -> Vec<Option<i64>> {
+        o.events.iter().map(|e| e.duration_ms).collect()
+    }
+
+    fn asst(sec: u32, ty: &str) -> String {
+        response(sec, &format!(r#"{{"type":"{ty}","role":"assistant"}}"#))
+    }
+
+    fn usage_record(sec: u32) -> String {
+        format!(
+            r#"{{"timestamp":"{}","type":"token_usage_record","payload":{{}}}}"#,
+            ts(sec)
+        )
+    }
+
+    fn user_msg(sec: u32) -> String {
+        response(sec, r#"{"type":"message","role":"user"}"#)
+    }
+
+    fn tool_out(sec: u32) -> String {
+        response(sec, r#"{"type":"custom_tool_call_output"}"#)
+    }
+
+    #[test]
+    fn plain_turn_runs_from_turn_start_to_the_last_model_output() {
+        let o = parse(
+            &[
+                started(0),
+                user_msg(0),
+                asst(3, "reasoning"),
+                asst(5, "message"),
+                token_count(5, 7, 7),
+            ],
+            None,
+        );
+        assert_eq!(durs(&o), [Some(5_000)]);
+    }
+
+    #[test]
+    fn token_count_after_tool_output_does_not_measure_the_tool() {
+        // Real order: model output → tool runs → tool output → token_count
+        // (milliseconds later). The call is the model's 5 s, then 4 s.
+        let o = parse(
+            &[
+                started(0),
+                user_msg(0),
+                asst(5, "custom_tool_call"),
+                usage_record(5),
+                tool_out(8),
+                token_count(8, 7, 7),
+                asst(12, "custom_tool_call"),
+                usage_record(12),
+                tool_out(15),
+                token_count(15, 8, 15),
+            ],
+            None,
+        );
+        assert_eq!(durs(&o), [Some(5_000), Some(4_000)]);
+    }
+
+    #[test]
+    fn older_order_token_count_before_tool_output_restarts_at_the_result() {
+        let o = parse(
+            &[
+                started(0),
+                asst(4, "function_call"),
+                token_count(4, 7, 7),
+                tool_out(10),
+                asst(13, "function_call"),
+                token_count(13, 8, 15),
+            ],
+            None,
+        );
+        assert_eq!(durs(&o), [Some(4_000), Some(3_000)]);
+    }
+
+    #[test]
+    fn a_new_user_message_restarts_the_clock_and_assistant_text_does_not() {
+        let o = parse(
+            &[
+                started(0),
+                asst(3, "message"),
+                token_count(3, 7, 7),
+                user_msg(40),
+                asst(44, "message"),
+                token_count(44, 1, 8),
+            ],
+            None,
+        );
+        assert_eq!(durs(&o), [Some(3_000), Some(4_000)]);
+    }
+
+    #[test]
+    fn a_dup_line_neither_emits_nor_resets() {
+        let o = parse(
+            &[
+                started(0),
+                asst(3, "message"),
+                token_count(3, 7, 7),
+                token_count(4, 7, 7), // verbatim repeat of the previous usage
+                asst(9, "message"),
+                token_count(9, 8, 15),
+            ],
+            None,
+        );
+        assert_eq!(durs(&o), [Some(3_000), Some(6_000)]);
+    }
+
+    #[test]
+    fn call_state_survives_chunk_boundaries_and_old_state_still_parses() {
+        let first = parse(&[started(0), asst(3, "message")], None);
+        assert!(first.events.is_empty());
+        let st = first.new_state.unwrap();
+        let second = parse(&[token_count(4, 7, 7)], Some(&st));
+        assert_eq!(durs(&second), [Some(3_000)]);
+        // A state persisted before durations existed has neither field.
+        let old = r#"{"inc":{"input":10,"cached":0,"cache_write":0,"output":7,"reasoning":0},
+                      "cum":{"input":10,"cached":0,"cache_write":0,"output":7,"reasoning":0}}"#;
+        let o = parse(&[token_count(8, 8, 15)], Some(old));
+        assert_eq!(durs(&o), [None]);
+        let o = parse(
+            &[started(6), asst(7, "message"), token_count(8, 8, 15)],
+            Some(old),
+        );
+        assert_eq!(durs(&o), [Some(1_000)]);
+    }
+
+    #[test]
+    fn idle_gap_longer_than_30_minutes_is_not_a_duration() {
+        let o = parse(
+            &[
+                started(0),
+                asst(31 * 60, "message"),
+                token_count(31 * 60, 7, 7),
+            ],
+            None,
+        );
+        assert_eq!(durs(&o), [None]);
+    }
 }

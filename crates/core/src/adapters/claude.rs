@@ -6,13 +6,23 @@
 
 use super::{Capability, ScanOutcome, SourceAdapter, SourceItem, SourceKind, complete_lines};
 use crate::model::{Provenance, UsageEvent, apps};
-use crate::normalize::{num, text, ts_ms};
+use crate::normalize::{derived_duration, num, text, ts_ms};
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub struct Claude;
+
+/// Timestamp of the latest `user` input line (prompt or tool result) per
+/// `isSidechain` value — the start of the next assistant call. Persisted so a
+/// call whose input landed in an earlier chunk still gets its duration.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct ClaudeState {
+    #[serde(default)]
+    last_input: [Option<i64>; 2],
+}
 
 impl SourceAdapter for Claude {
     fn id(&self) -> &'static str {
@@ -46,11 +56,15 @@ impl SourceAdapter for Claude {
         item: &SourceItem,
         from: u64,
         data: &[u8],
-        _prior_state: Option<&str>,
+        prior_state: Option<&str>,
     ) -> Result<ScanOutcome> {
         let (seg, consumed) = complete_lines(data);
         let mut by_msg: HashMap<String, UsageEvent> = HashMap::new();
         let mut order: Vec<String> = Vec::new();
+        let mut state: ClaudeState = prior_state
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        let mut start_of: HashMap<String, Option<i64>> = HashMap::new();
 
         let mut pos = 0u64;
         for line in seg.split(|&b| b == b'\n') {
@@ -63,8 +77,16 @@ impl SourceAdapter for Claude {
             let Ok(v) = serde_json::from_slice::<Value>(line) else {
                 continue;
             };
-            if v.get("type").and_then(Value::as_str) != Some("assistant") {
-                continue;
+            let side = usize::from(v["isSidechain"].as_bool().unwrap_or(false));
+            match v.get("type").and_then(Value::as_str) {
+                Some("user") => {
+                    if let Some(t) = ts_ms(&v["timestamp"]) {
+                        state.last_input[side] = Some(t);
+                    }
+                    continue;
+                }
+                Some("assistant") => {}
+                _ => continue,
             }
             let Some(msg) = v.get("message") else {
                 continue;
@@ -85,6 +107,10 @@ impl SourceAdapter for Claude {
                 None => (cc_total, 0),
             };
             let model = text(&msg["model"]);
+            let ts = ts_ms(&v["timestamp"]);
+            let start = *start_of
+                .entry(id.to_string())
+                .or_insert(state.last_input[side]);
             let ev = UsageEvent {
                 // Global message.id dedup — resumed/forked sessions rewrite the
                 // same messages into new files; keying per-file double-counts
@@ -95,7 +121,7 @@ impl SourceAdapter for Claude {
                 project: text(&v["cwd"]).or_else(|| project_from_path(&item.path)),
                 model: model.clone(),
                 request_model: model,
-                ts_start: ts_ms(&v["timestamp"]),
+                ts_start: ts,
                 input_tokens: num(&u["input_tokens"]),
                 output_tokens: num(&u["output_tokens"]),
                 reasoning_tokens: num(&u["output_tokens_details"]["thinking_tokens"]),
@@ -103,7 +129,7 @@ impl SourceAdapter for Claude {
                 cache_write_5m_tokens: cw5,
                 cache_write_1h_tokens: cw1,
                 provenance: Provenance::LocalJsonl,
-                duration_ms: num64(&v["durationMs"]),
+                duration_ms: num64(&v["durationMs"]).or_else(|| derived_duration(start, ts)),
                 status: msg
                     .get("stop_reason")
                     .and_then(Value::as_str)
@@ -122,6 +148,7 @@ impl SourceAdapter for Claude {
         Ok(ScanOutcome {
             events,
             consumed,
+            new_state: serde_json::to_string(&state).ok(),
             ..Default::default()
         })
     }
@@ -141,4 +168,123 @@ fn project_from_path(p: &std::path::Path) -> Option<String> {
     p.parent()?
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item() -> SourceItem {
+        SourceItem {
+            key: "k".into(),
+            path: PathBuf::from("proj/s.jsonl"),
+            kind: SourceKind::Jsonl,
+        }
+    }
+
+    /// `sec` seconds after 10:00:00 (fits inside the hour for these tests).
+    fn ts(sec: u32) -> String {
+        format!(
+            "2026-09-01T{:02}:{:02}:{:02}.000Z",
+            10 + sec / 3600,
+            sec / 60 % 60,
+            sec % 60
+        )
+    }
+
+    fn user(sec: u32, side: bool) -> String {
+        format!(
+            r#"{{"type":"user","isSidechain":{side},"timestamp":"{}","message":{{"role":"user"}}}}"#,
+            ts(sec)
+        )
+    }
+
+    fn asst(id: &str, sec: u32, side: bool, extra: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","isSidechain":{side},"timestamp":"{}"{extra},"message":{{"id":"{id}","model":"m","usage":{{"input_tokens":1,"output_tokens":2}}}}}}"#,
+            ts(sec)
+        )
+    }
+
+    fn parse(lines: &[String], state: Option<&str>) -> ScanOutcome {
+        let data = format!("{}\n", lines.join("\n"));
+        Claude
+            .parse_jsonl(&item(), 0, data.as_bytes(), state)
+            .unwrap()
+    }
+
+    fn dur(o: &ScanOutcome, id: &str) -> Option<i64> {
+        o.events
+            .iter()
+            .find(|e| e.dedup_key == format!("claude:{id}"))
+            .unwrap()
+            .duration_ms
+    }
+
+    #[test]
+    fn duration_is_assistant_minus_preceding_input() {
+        let o = parse(&[user(0, false), asst("a", 4, false, "")], None);
+        assert_eq!(dur(&o, "a"), Some(4_000));
+    }
+
+    #[test]
+    fn streamed_message_uses_its_last_line() {
+        let o = parse(
+            &[
+                user(0, false),
+                asst("a", 1, false, ""),
+                asst("a", 5, false, ""),
+                user(6, false),
+                asst("b", 8, false, ""),
+            ],
+            None,
+        );
+        assert_eq!(o.events.len(), 2);
+        assert_eq!(dur(&o, "a"), Some(5_000));
+        assert_eq!(dur(&o, "b"), Some(2_000));
+    }
+
+    #[test]
+    fn state_chains_input_timestamps_across_chunks() {
+        let first = parse(&[user(0, false)], None);
+        assert!(first.events.is_empty());
+        let st = first.new_state.unwrap();
+        let second = parse(&[asst("a", 7, false, "")], Some(&st));
+        assert_eq!(dur(&second, "a"), Some(7_000));
+        // No carried state → nothing to measure from.
+        assert_eq!(dur(&parse(&[asst("a", 7, false, "")], None), "a"), None);
+        // Garbage state degrades to empty instead of failing the scan.
+        assert_eq!(
+            dur(&parse(&[asst("a", 7, false, "")], Some("{nope")), "a"),
+            None
+        );
+    }
+
+    #[test]
+    fn sidechain_has_its_own_input_slot() {
+        let o = parse(
+            &[
+                user(0, false),
+                user(10, true),
+                asst("main", 12, false, ""),
+                asst("side", 14, true, ""),
+            ],
+            None,
+        );
+        assert_eq!(dur(&o, "main"), Some(12_000));
+        assert_eq!(dur(&o, "side"), Some(4_000));
+    }
+
+    #[test]
+    fn implausible_gaps_are_dropped_and_explicit_duration_wins() {
+        let o = parse(&[user(0, false), asst("a", 31 * 60, false, "")], None);
+        assert_eq!(dur(&o, "a"), None);
+        let o = parse(&[user(0, false), asst("a", 30 * 60, false, "")], None);
+        assert_eq!(dur(&o, "a"), Some(1_800_000));
+        let o = parse(
+            &[user(0, false), asst("a", 4, false, r#","durationMs":1234"#)],
+            None,
+        );
+        assert_eq!(dur(&o, "a"), Some(1_234));
+    }
 }

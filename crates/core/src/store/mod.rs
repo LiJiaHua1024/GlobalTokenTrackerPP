@@ -220,6 +220,24 @@ impl Store {
             )?;
             tx.commit()?;
         }
+        // Claude/Codex now derive per-call duration from log timestamps.
+        // Dropping their cursors (adapter_state goes with the row) makes the
+        // next scan re-read those files from offset 0; the re-emitted rows
+        // carry a duration, hence higher completeness, hence overwrite.
+        const RESCAN_DURATIONS: &str = "mig_rescan_durations_v1";
+        if self.get_state(RESCAN_DURATIONS)?.is_none() {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute(
+                "DELETE FROM sync_cursors WHERE source IN (?1, ?2)",
+                [crate::model::apps::CLAUDE, crate::model::apps::CODEX],
+            )?;
+            tx.execute(
+                "INSERT INTO app_state(key, value) VALUES (?1, '1')
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [RESCAN_DURATIONS],
+            )?;
+            tx.commit()?;
+        }
         let version: i64 = self.conn.query_row(
             "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
             [],
@@ -434,6 +452,52 @@ mod tests {
             provenance: Provenance::LocalJsonl,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn duration_rescan_drops_claude_and_codex_cursors_once() {
+        let s = Store::open_memory().unwrap();
+        let cursors = |s: &Store| -> Vec<String> {
+            let mut st = s
+                .conn()
+                .prepare("SELECT source FROM sync_cursors ORDER BY file_path")
+                .unwrap();
+            st.query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<std::result::Result<_, _>>()
+                .unwrap()
+        };
+        let put = |s: &Store| {
+            for (src, path) in [
+                (apps::CLAUDE, "a"),
+                (apps::CODEX, "b"),
+                (apps::OPENCODE, "c"),
+                (apps::CLAUDE, "d"),
+            ] {
+                s.conn()
+                    .execute(
+                        "INSERT INTO sync_cursors(source, file_path, last_byte_offset, adapter_state)
+                         VALUES (?1, ?2, 10, '{}')",
+                        [src, path],
+                    )
+                    .unwrap();
+            }
+        };
+        put(&s);
+        // A ledger from before the migration existed.
+        s.conn()
+            .execute(
+                "DELETE FROM app_state WHERE key='mig_rescan_durations_v1'",
+                [],
+            )
+            .unwrap();
+        s.migrate().unwrap();
+        assert_eq!(cursors(&s), [apps::OPENCODE]);
+        // Second run is a no-op: cursors written since are kept.
+        s.conn().execute("DELETE FROM sync_cursors", []).unwrap();
+        put(&s);
+        s.migrate().unwrap();
+        assert_eq!(cursors(&s).len(), 4);
     }
 
     #[test]

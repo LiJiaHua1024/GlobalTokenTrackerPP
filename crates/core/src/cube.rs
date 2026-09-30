@@ -13,7 +13,9 @@
 //! in unbounded totals only.
 
 use crate::store::{AppSummary, MODEL_EXPR, ShareRow, Store, Totals};
-use crate::viewmodel::{Range, TrendBucket, day_start_ms, local_utc_offset, utc_offset_ms};
+use crate::viewmodel::{
+    HeatDay, Range, TrendBucket, day_start_ms, local_utc_offset, utc_offset_ms,
+};
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -39,6 +41,7 @@ struct Group {
     credits: f64,
     cost: f64,
     active_ms: u64,
+    duration_ms: u64,
 }
 
 impl Group {
@@ -100,6 +103,7 @@ struct Raw {
     credits: f64,
     cost: f64,
     active_ms: u64,
+    duration_ms: u64,
 }
 
 impl Cube {
@@ -189,6 +193,7 @@ impl Cube {
                 credits: r.credits,
                 cost: r.cost,
                 active_ms: r.active_ms,
+                duration_ms: r.duration_ms,
             });
         }
     }
@@ -276,6 +281,32 @@ impl Cube {
             .filter(|g| app_ok[usize::from(g.app)] && model_ok[usize::from(g.model)])
             .map(|g| g.events)
             .sum()
+    }
+
+    /// The activity heatmap's days: from the Monday 52 weeks before the
+    /// current week through today, one entry per local day (zero-filled),
+    /// under the tool/model filters. Independent of the selected range; rows
+    /// without a timestamp and future-dated rows are outside the window.
+    pub fn heat(&self, apps: Option<&[String]>, models: Option<&[String]>) -> Vec<HeatDay> {
+        let (start, today) = heat_bounds(self.off_ms, now_ms());
+        let mut out = blank_heat(start, today);
+        let (app_ok, model_ok) = (self.app_mask(apps), self.model_mask(models));
+        for g in &self.groups {
+            if g.day == NO_DAY
+                || g.day < start
+                || g.day > today
+                || !app_ok[usize::from(g.app)]
+                || !model_ok[usize::from(g.model)]
+            {
+                continue;
+            }
+            let h = &mut out[(g.day - start) as usize];
+            h.tokens += g.headline();
+            h.cost_usd += g.cost;
+            h.events += g.events;
+            h.duration_ms += g.duration_ms;
+        }
+        out
     }
 
     /// Everything on the overview that depends on the range/filters. `None`
@@ -526,7 +557,7 @@ fn top3(models: &BTreeMap<u16, u64>, names: &[String]) -> Vec<(String, u64)> {
     v
 }
 
-fn current_offset_ms() -> i64 {
+pub(crate) fn current_offset_ms() -> i64 {
     utc_offset_ms(&local_utc_offset()).unwrap_or(0)
 }
 
@@ -536,6 +567,36 @@ fn now_ms() -> i64 {
 
 fn day_index(off_ms: i64, ms: i64) -> i32 {
     (ms + off_ms).div_euclid(DAY_MS) as i32
+}
+
+/// `(first day, today)` day indices of the heatmap window: the Monday that
+/// starts the week 52 weeks before the current week, through today — 365–371
+/// days. 1970-01-01 was a Thursday, hence the `+ 3` for a Monday-first week.
+pub(crate) fn heat_bounds(off_ms: i64, now: i64) -> (i32, i32) {
+    let today = day_index(off_ms, now);
+    let weekday = (today + 3).rem_euclid(7);
+    (today - weekday - 52 * 7, today)
+}
+
+/// Epoch ms where the heatmap window starts (local midnight of its Monday).
+pub(crate) fn heat_since_ms() -> i64 {
+    let off_ms = current_offset_ms();
+    heat_day_start_ms(off_ms, heat_bounds(off_ms, now_ms()).0)
+}
+
+/// Epoch ms of the local midnight that opens `day` in the `off_ms` frame.
+pub(crate) fn heat_day_start_ms(off_ms: i64, day: i32) -> i64 {
+    i64::from(day) * DAY_MS - off_ms
+}
+
+/// The window's days with nothing in them yet.
+pub(crate) fn blank_heat(start: i32, today: i32) -> Vec<HeatDay> {
+    (start..=today)
+        .map(|d| HeatDay {
+            date: civil_date(i64::from(d)),
+            ..Default::default()
+        })
+        .collect()
 }
 
 /// Days since 1970-01-01 → "YYYY-MM-DD" (proleptic Gregorian).
@@ -589,7 +650,8 @@ fn query_groups(store: &Store, off_ms: i64, days: Option<&BTreeSet<i64>>) -> Res
                 COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
                 COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cache_read_tokens),0),
                 COALESCE(SUM(cache_write_5m_tokens+cache_write_1h_tokens),0),
-                COALESCE(SUM(credits),0), COALESCE(SUM(cost_usd),0), COALESCE(SUM(active_ms),0)
+                COALESCE(SUM(credits),0), COALESCE(SUM(cost_usd),0), COALESCE(SUM(active_ms),0),
+                COALESCE(SUM(duration_ms),0)
          FROM usage_events {filter} GROUP BY d, app, m"
     ))?;
     let rows = st.query_map(rusqlite::params_from_iter(params.iter()), |r| {
@@ -606,6 +668,7 @@ fn query_groups(store: &Store, off_ms: i64, days: Option<&BTreeSet<i64>>) -> Res
             credits: r.get(9)?,
             cost: r.get(10)?,
             active_ms: r.get::<_, i64>(11)? as u64,
+            duration_ms: r.get::<_, i64>(12)? as u64,
         })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -638,6 +701,8 @@ mod tests {
             provenance: Provenance::LocalJsonl,
             credits: out.is_multiple_of(3).then_some(out as f64 / 10.0),
             active_ms: Some(out as i64),
+            // Every 4th call has no duration (Cursor-like), the rest do.
+            duration_ms: (!out.is_multiple_of(4)).then_some(out as i64 * 11),
             ..Default::default()
         }
     }
@@ -728,6 +793,22 @@ mod tests {
         assert_totals(&sql.all, &c.all, &format!("all [{what}]"));
         assert_eq!(sql.apps, c.apps, "app names [{what}]");
         assert_eq!(sql.models, c.models, "model names [{what}]");
+        let ch = cube.heat(apps, models);
+        assert_eq!(sql.heat.len(), ch.len(), "heat days [{what}]");
+        for (x, y) in sql.heat.iter().zip(&ch) {
+            assert_eq!(x.date, y.date, "heat date [{what}]");
+            assert_eq!(
+                (x.tokens, x.events, x.duration_ms),
+                (y.tokens, y.events, y.duration_ms),
+                "heat {} [{what}]",
+                x.date
+            );
+            assert!(
+                close(x.cost_usd, y.cost_usd),
+                "heat cost {} [{what}]",
+                x.date
+            );
+        }
 
         let by_app = |v: &[AppSummary]| -> BTreeMap<String, (u64, u64, u64, u64)> {
             v.iter()
@@ -820,6 +901,68 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn heat_window_is_monday_aligned_contiguous_and_zero_filled() {
+        let store = ledger();
+        let heat = Cube::build(&store).unwrap().heat(None, None);
+        assert!((365..=371).contains(&heat.len()), "{}", heat.len());
+        let first: jiff::civil::Date = heat[0].date.parse().unwrap();
+        assert_eq!(first.weekday(), jiff::civil::Weekday::Monday);
+        let today = jiff::Zoned::now().date();
+        assert_eq!(heat.last().unwrap().date, today.to_string());
+        // Today's week column is the 53rd, with today at weekday-index row.
+        let wd = i64::from(today.weekday().to_monday_zero_offset());
+        assert_eq!(heat.len() as i64, 52 * 7 + wd + 1);
+        let mut d = first;
+        for h in &heat {
+            assert_eq!(h.date, d.to_string());
+            d = d.tomorrow().unwrap();
+        }
+        // The fixture spans 45 days back; older days are present but empty.
+        let old = &heat[0];
+        assert_eq!((old.events, old.tokens, old.duration_ms), (0, 0, 0));
+        assert!(heat.iter().filter(|h| h.events > 0).count() >= 40);
+        // Rows without a timestamp never land in a day.
+        let all_events: u64 = heat.iter().map(|h| h.events).sum();
+        assert!(all_events < store.event_count(None, None).unwrap());
+    }
+
+    #[test]
+    fn heat_follows_tool_and_model_filters_and_sums_durations() {
+        let store = ledger();
+        let cube = Cube::build(&store).unwrap();
+        let sum = |h: &[HeatDay]| -> (u64, u64, u64) {
+            (
+                h.iter().map(|d| d.events).sum(),
+                h.iter().map(|d| d.tokens).sum(),
+                h.iter().map(|d| d.duration_ms).sum(),
+            )
+        };
+        let all = sum(&cube.heat(None, None));
+        let claude = sum(&cube.heat(Some(&["claude".to_string()]), None));
+        let none = sum(&cube.heat(Some(&[]), None));
+        assert!(claude.0 > 0 && claude.0 < all.0);
+        assert_eq!(none, (0, 0, 0));
+        let opus = sum(&cube.heat(None, Some(&["opus".to_string()])));
+        assert!(opus.0 > 0 && opus.0 < all.0);
+        // Durations come straight from the events (NULL counts 0): the window
+        // covers every timestamped, non-future fixture row.
+        let sql: i64 = store
+            .conn()
+            .query_row(
+                "SELECT COALESCE(SUM(duration_ms),0) FROM usage_events
+                 WHERE ts_start IS NOT NULL AND ts_start < ?1",
+                [heat_day_start_ms(
+                    cube.off_ms,
+                    heat_bounds(cube.off_ms, now_ms()).1 + 1,
+                )],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(all.2 as i64, sql);
+        assert!(all.2 > 0);
     }
 
     #[test]
