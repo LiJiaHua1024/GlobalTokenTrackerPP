@@ -776,34 +776,45 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wpar: WPARAM, lpar: LPARAM) ->
             DefWindowProcW(hwnd, msg, wpar, lpar)
         },
         WM_SETTINGCHANGE | WM_THEMECHANGED => unsafe {
-            let g = &mut *gui(hwnd);
-            let new_theme = ThemeColors::system();
-            if new_theme != g.theme {
-                g.theme = new_theme;
-                let _ = DeleteObject(g.bg_brush.into());
-                let _ = DeleteObject(g.field_brush.into());
-                g.bg_brush = CreateSolidBrush(COLORREF(new_theme.bg));
-                g.field_brush = CreateSolidBrush(COLORREF(new_theme.card));
-                let dark = if new_theme.is_dark { TRUE } else { FALSE };
-                let _ = DwmSetWindowAttribute(
-                    hwnd,
-                    DWMWA_USE_IMMERSIVE_DARK_MODE,
-                    std::ptr::from_ref(&dark).cast(),
-                    4,
-                );
-                let theme_name = if new_theme.is_dark { w!("DarkMode_Explorer") } else { w!("Explorer") };
-                if !g.edit.0.is_null() {
-                    let _ = SetWindowTheme(g.edit, PCWSTR(theme_name.as_ptr()), None);
+            // WM_SETTINGCHANGE fires for many unrelated reasons (locale,
+            // input method, network, ...); only a color-scheme switch can
+            // change the theme, so skip the registry read for all others.
+            let scheme_changed = msg == WM_THEMECHANGED
+                || (lpar.0 != 0
+                    && matches!(
+                        PCWSTR(lpar.0 as *const u16).to_string(),
+                        Ok(s) if s == "ImmersiveColorSet"
+                    ));
+            if scheme_changed {
+                let g = &mut *gui(hwnd);
+                let new_theme = ThemeColors::system();
+                if new_theme != g.theme {
+                    g.theme = new_theme;
+                    let _ = DeleteObject(g.bg_brush.into());
+                    let _ = DeleteObject(g.field_brush.into());
+                    g.bg_brush = CreateSolidBrush(COLORREF(new_theme.bg));
+                    g.field_brush = CreateSolidBrush(COLORREF(new_theme.card));
+                    let dark = if new_theme.is_dark { TRUE } else { FALSE };
+                    let _ = DwmSetWindowAttribute(
+                        hwnd,
+                        DWMWA_USE_IMMERSIVE_DARK_MODE,
+                        std::ptr::from_ref(&dark).cast(),
+                        4,
+                    );
+                    let theme_name = if new_theme.is_dark { w!("DarkMode_Explorer") } else { w!("Explorer") };
+                    if !g.edit.0.is_null() {
+                        let _ = SetWindowTheme(g.edit, PCWSTR(theme_name.as_ptr()), None);
+                    }
+                    // RDW_ALLCHILDREN is required: the owner-drawn buttons and
+                    // checkboxes are separate HWNDs that only repaint via
+                    // WM_DRAWITEM, and InvalidateRect never reaches them.
+                    let _ = RedrawWindow(
+                        Some(hwnd),
+                        None,
+                        None,
+                        RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_ERASE,
+                    );
                 }
-                // RDW_ALLCHILDREN is required: the owner-drawn buttons and
-                // checkboxes are separate HWNDs that only repaint via
-                // WM_DRAWITEM, and InvalidateRect never reaches them.
-                let _ = RedrawWindow(
-                    Some(hwnd),
-                    None,
-                    None,
-                    RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_ERASE,
-                );
             }
             LRESULT(0)
         },
