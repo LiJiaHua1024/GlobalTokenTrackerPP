@@ -40,7 +40,7 @@ class _OverviewPageState extends State<OverviewPage> {
     if (_overviewCache.containsKey(key)) {
       _data = _overviewCache[key];
     }
-    _loadData(_selectedRange);
+    _loadData(_selectedRange).then((_) => _autoScanOnce());
   }
 
   Future<void> _loadData(String range, {bool force = false}) async {
@@ -109,6 +109,29 @@ class _OverviewPageState extends State<OverviewPage> {
           SnackBar(content: Text('扫描失败: $e'), backgroundColor: Colors.red),
         );
       }
+    }
+  }
+
+  /// At most once per app session: a silent background scan right after the
+  /// first overview load, so usage from sources that were never scanned before
+  /// (or that produced data while the app was closed) shows up without the
+  /// user having to know about the manual refresh button. The scan itself
+  /// runs off the UI isolate; ranges switched meanwhile simply queue on the
+  /// engine behind it.
+  static bool _autoScanRan = false;
+
+  Future<void> _autoScanOnce() async {
+    if (_autoScanRan) return;
+    _autoScanRan = true;
+    try {
+      final res = await FfiBridge.instance.scan();
+      final ingested = (res['events_ingested'] as num?)?.toInt() ?? 0;
+      if (ingested > 0) {
+        _overviewCache.clear();
+        if (mounted) await _loadData(_selectedRange, force: true);
+      }
+    } catch (_) {
+      // Silent: scan failures surface through the manual refresh button.
     }
   }
 

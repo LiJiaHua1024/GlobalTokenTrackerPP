@@ -74,9 +74,6 @@ class FfiBridge {
   late _gtt_free_string_dart _freeString;
   late _gtt_engine_open_dart _engineOpen;
   late _gtt_engine_close_dart _engineClose;
-  late _gtt_engine_scan_dart _engineScan;
-  late _gtt_update_prices_dart _updatePrices;
-  late _gtt_poll_quotas_dart _pollQuotas;
 
   ffi.Pointer<ffi.Void>? _context;
 
@@ -128,15 +125,6 @@ class FfiBridge {
     _engineClose = _dylib
         .lookup<ffi.NativeFunction<_gtt_engine_close_c>>('gtt_engine_close')
         .asFunction();
-    _engineScan = _dylib
-        .lookup<ffi.NativeFunction<_gtt_engine_scan_c>>('gtt_engine_scan')
-        .asFunction();
-    _updatePrices = _dylib
-        .lookup<ffi.NativeFunction<_gtt_update_prices_c>>('gtt_update_prices')
-        .asFunction();
-    _pollQuotas = _dylib
-        .lookup<ffi.NativeFunction<_gtt_poll_quotas_c>>('gtt_poll_quotas')
-        .asFunction();
   }
 
   String getDefaultDbPath() {
@@ -163,18 +151,34 @@ class FfiBridge {
     }
   }
 
-  String _consumeString(ffi.Pointer<Utf8> ptr) {
-    if (ptr == ffi.nullptr) return '';
-    final res = ptr.toDartString();
-    _freeString(ptr);
-    return res;
-  }
-
+  /// Offload the full incremental scan to a background worker isolate.
+  ///
+  /// The scan walks every registered adapter; a first pass over a newly added
+  /// source can take tens of seconds (186 Antigravity databases on a real
+  /// machine), and this call used to run synchronously on the UI isolate,
+  /// freezing the whole app until it finished.
   Future<Map<String, dynamic>> scan() async {
     if (_context == null) throw Exception("Engine not initialized");
-    final ptr = _engineScan(_context!);
-    final raw = _consumeString(ptr);
-    return jsonDecode(raw) as Map<String, dynamic>;
+    final ctxAddress = _context!.address;
+    final dylibPath = _resolvedDylibPath;
+
+    return await Isolate.run(() {
+      final dylib = ffi.DynamicLibrary.open(dylibPath);
+      final scanFunc = dylib
+          .lookup<ffi.NativeFunction<_gtt_engine_scan_c>>('gtt_engine_scan')
+          .asFunction<_gtt_engine_scan_dart>();
+      final freeStringFunc = dylib
+          .lookup<ffi.NativeFunction<_gtt_free_string_c>>('gtt_free_string')
+          .asFunction<_gtt_free_string_dart>();
+
+      final ctx = ffi.Pointer<ffi.Void>.fromAddress(ctxAddress);
+      final ptr = scanFunc(ctx);
+      if (ptr == ffi.nullptr) throw Exception("Scan failed");
+      final raw = ptr.toDartString();
+      freeStringFunc(ptr);
+
+      return jsonDecode(raw) as Map<String, dynamic>;
+    });
   }
 
   /// Offload Overview retrieval and JSON deserialization to a background worker isolate.
@@ -325,17 +329,54 @@ class FfiBridge {
     });
   }
 
+  /// Offload the price-feed refresh (network downloads plus parsing of
+  /// multi-megabyte JSON) to a background worker isolate.
   Future<Map<String, dynamic>> updatePrices() async {
     if (_context == null) throw Exception("Engine not initialized");
-    final ptr = _updatePrices(_context!);
-    final raw = _consumeString(ptr);
-    return jsonDecode(raw) as Map<String, dynamic>;
+    final ctxAddress = _context!.address;
+    final dylibPath = _resolvedDylibPath;
+
+    return await Isolate.run(() {
+      final dylib = ffi.DynamicLibrary.open(dylibPath);
+      final updatePricesFunc = dylib
+          .lookup<ffi.NativeFunction<_gtt_update_prices_c>>('gtt_update_prices')
+          .asFunction<_gtt_update_prices_dart>();
+      final freeStringFunc = dylib
+          .lookup<ffi.NativeFunction<_gtt_free_string_c>>('gtt_free_string')
+          .asFunction<_gtt_free_string_dart>();
+
+      final ctx = ffi.Pointer<ffi.Void>.fromAddress(ctxAddress);
+      final ptr = updatePricesFunc(ctx);
+      if (ptr == ffi.nullptr) throw Exception("Price update failed");
+      final raw = ptr.toDartString();
+      freeStringFunc(ptr);
+
+      return jsonDecode(raw) as Map<String, dynamic>;
+    });
   }
 
+  /// Offload the vendor quota polling (network) to a background worker isolate.
   Future<Map<String, dynamic>> pollQuotas() async {
     if (_context == null) throw Exception("Engine not initialized");
-    final ptr = _pollQuotas(_context!);
-    final raw = _consumeString(ptr);
-    return jsonDecode(raw) as Map<String, dynamic>;
+    final ctxAddress = _context!.address;
+    final dylibPath = _resolvedDylibPath;
+
+    return await Isolate.run(() {
+      final dylib = ffi.DynamicLibrary.open(dylibPath);
+      final pollQuotasFunc = dylib
+          .lookup<ffi.NativeFunction<_gtt_poll_quotas_c>>('gtt_poll_quotas')
+          .asFunction<_gtt_poll_quotas_dart>();
+      final freeStringFunc = dylib
+          .lookup<ffi.NativeFunction<_gtt_free_string_c>>('gtt_free_string')
+          .asFunction<_gtt_free_string_dart>();
+
+      final ctx = ffi.Pointer<ffi.Void>.fromAddress(ctxAddress);
+      final ptr = pollQuotasFunc(ctx);
+      if (ptr == ffi.nullptr) throw Exception("Quota poll failed");
+      final raw = ptr.toDartString();
+      freeStringFunc(ptr);
+
+      return jsonDecode(raw) as Map<String, dynamic>;
+    });
   }
 }
