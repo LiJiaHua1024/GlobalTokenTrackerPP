@@ -219,6 +219,7 @@ class _OverviewPageState extends State<OverviewPage> {
                           context,
                           data,
                           _selectedRange,
+                          cacheLookup: (range) => _overviewCache[_cacheKey(range)],
                         ),
                         icon: const Icon(Icons.share_outlined, size: 18),
                         label: const Text('分享卡片'),

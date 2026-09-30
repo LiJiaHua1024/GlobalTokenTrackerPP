@@ -2190,10 +2190,15 @@ class ShareCardDialog extends StatefulWidget {
   final OverviewData initialData;
   final String currentRange;
 
+  /// Synchronous lookup into the caller's in-memory overview cache, keyed by
+  /// range ('today' / 'week' / 'month' / 'all'); null means a cache miss.
+  final OverviewData? Function(String rangeKey)? cacheLookup;
+
   const ShareCardDialog({
     super.key,
     required this.initialData,
     required this.currentRange,
+    this.cacheLookup,
   });
 
   @override
@@ -2251,6 +2256,15 @@ class _ShareCardDialogState extends State<ShareCardDialog> {
   Future<void> _switchRange(String range) async {
     if (_selectedRange == range) return;
     final requested = range;
+    final cached = widget.cacheLookup?.call(range);
+    if (cached != null) {
+      setState(() {
+        _selectedRange = range;
+        _data = cached;
+        _loadingRange = false;
+      });
+      return;
+    }
     setState(() {
       _selectedRange = range;
       _loadingRange = true;
@@ -2856,13 +2870,15 @@ class _ShareCardDialogState extends State<ShareCardDialog> {
 void showShareCardDialog(
   BuildContext context,
   OverviewData data,
-  String currentRange,
-) {
+  String currentRange, {
+  OverviewData? Function(String rangeKey)? cacheLookup,
+}) {
   showDialog(
     context: context,
     builder: (ctx) => ShareCardDialog(
       initialData: data,
       currentRange: currentRange,
+      cacheLookup: cacheLookup,
     ),
   );
 }
