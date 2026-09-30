@@ -32,6 +32,10 @@ CREATE INDEX IF NOT EXISTS idx_events_time ON usage_events(ts_start);
 CREATE INDEX IF NOT EXISTS idx_events_app ON usage_events(app, ts_start);
 CREATE INDEX IF NOT EXISTS idx_events_pricing_model ON usage_events(pricing_model, ts_start);
 CREATE INDEX IF NOT EXISTS idx_events_project ON usage_events(project, ts_start);
+-- Only the (few) unpriced rows: makes the overview's "unpriced models" list and the reprice
+-- backfill an index scan instead of a full table pass (7ms → ~0.1ms at 63k events).
+CREATE INDEX IF NOT EXISTS idx_events_unpriced ON usage_events(model, request_model)
+  WHERE pricing_model IS NULL AND cost_source = 'unpriced';
 
 -- 增量游标（cc-switch session_log_sync 设计，已验证可靠）
 -- 截断(偏移越界)或指纹不符 → 游标钉到 EOF，绝不重放（重放已 rollup 区间=永久双算）
@@ -55,6 +59,9 @@ CREATE TABLE IF NOT EXISTS quota_snapshots (
   raw_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_quota_app_time ON quota_snapshots(app, captured_at);
+-- "latest snapshot per (app, account, window)" — one index seek per key instead of a window
+-- function over the whole history (22ms → 0.6ms at 11k rows); also serves insert_quota's dedup probe.
+CREATE INDEX IF NOT EXISTS idx_quota_latest ON quota_snapshots(app, account, window_kind, captured_at DESC, id DESC);
 
 -- models.dev 主库（$/1M）+ LiteLLM 分档列（$/token 换算后统一 $/1M）
 CREATE TABLE IF NOT EXISTS prices (

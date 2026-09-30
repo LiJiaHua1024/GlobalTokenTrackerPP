@@ -440,16 +440,20 @@ impl super::Store {
     /// per identity key (`ROW_NUMBER` top-1; a `MAX(captured_at)=` join would
     /// return every row tied at the max timestamp, which is how WorkBuddy's
     /// batch-updated `session_ctx` watermarks flooded the quota page).
+    ///
+    /// Distinct keys first, then one indexed top-1 lookup per key
+    /// (`idx_quota_latest`) — the old `ROW_NUMBER()` over the whole history
+    /// (with `raw_json` dragged through the sort) took 22ms on 11k rows.
     pub fn latest_quotas(&self) -> Result<Vec<QuotaRow>> {
-        let mut st = self.conn().prepare(
-            "SELECT app, account, captured_at, window_kind, used, limit_value,
-                    used_percent, resets_at
-             FROM (SELECT *, ROW_NUMBER() OVER (
-                       PARTITION BY app, account, window_kind
-                       ORDER BY captured_at DESC, id DESC) rn
-                   FROM quota_snapshots)
-             WHERE rn = 1
-             ORDER BY app, window_kind, account",
+        let mut st = self.conn().prepare_cached(
+            "SELECT s.app, s.account, s.captured_at, s.window_kind, s.used, s.limit_value,
+                    s.used_percent, s.resets_at
+             FROM (SELECT DISTINCT app, account, window_kind FROM quota_snapshots) k
+             JOIN quota_snapshots s ON s.id = (
+                 SELECT id FROM quota_snapshots
+                 WHERE app = k.app AND account IS k.account AND window_kind = k.window_kind
+                 ORDER BY captured_at DESC, id DESC LIMIT 1)
+             ORDER BY s.app, s.window_kind, s.account",
         )?;
         let rows = st.query_map([], |r| {
             Ok(QuotaRow {
@@ -501,7 +505,11 @@ impl super::Store {
     /// Models seen in events that resolved to no price (unpriced badge list).
     pub fn unpriced_models(&self) -> Result<Vec<(String, u64)>> {
         let mut st = self.conn().prepare(
-            "SELECT COALESCE(model, request_model, '?'), COUNT(*) FROM usage_events
+            // INDEXED BY: the planner has no statistics and prefers the wider
+            // pricing_model index + table lookups for these 14k rows; the
+            // partial index (created by every open's migration) covers the query.
+            "SELECT COALESCE(model, request_model, '?'), COUNT(*)
+             FROM usage_events INDEXED BY idx_events_unpriced
              WHERE pricing_model IS NULL AND cost_source='unpriced'
              GROUP BY 1 ORDER BY 2 DESC",
         )?;

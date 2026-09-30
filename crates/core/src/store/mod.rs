@@ -232,7 +232,32 @@ impl Store {
                  active_ms=excluded.active_ms, status=excluded.status,
                  error=excluded.error, raw_ref=excluded.raw_ref,
                  completeness=excluded.completeness
-               WHERE excluded.completeness >= usage_events.completeness"#,
+               WHERE excluded.completeness >= usage_events.completeness
+                 -- Only when something actually differs. A source that re-emits
+                 -- the same row every pass (OpenCode's in-flight message) used
+                 -- to be a "write" each time: every idle tick then looked like
+                 -- new data and paid a full view reload.
+                 AND (usage_events.session_id, usage_events.project, usage_events.account_id,
+                      usage_events.provider_id, usage_events.model, usage_events.request_model,
+                      usage_events.pricing_model, usage_events.ts_start, usage_events.ts_end,
+                      usage_events.input_tokens, usage_events.output_tokens,
+                      usage_events.reasoning_tokens, usage_events.cache_read_tokens,
+                      usage_events.cache_write_5m_tokens, usage_events.cache_write_1h_tokens,
+                      usage_events.credits, usage_events.cost_usd, usage_events.cost_source,
+                      usage_events.provenance, usage_events.duration_ms, usage_events.ttft_ms,
+                      usage_events.active_ms, usage_events.status, usage_events.error,
+                      usage_events.raw_ref, usage_events.completeness)
+                     IS NOT
+                     (excluded.session_id, excluded.project, excluded.account_id,
+                      excluded.provider_id, excluded.model, excluded.request_model,
+                      excluded.pricing_model, excluded.ts_start, excluded.ts_end,
+                      excluded.input_tokens, excluded.output_tokens,
+                      excluded.reasoning_tokens, excluded.cache_read_tokens,
+                      excluded.cache_write_5m_tokens, excluded.cache_write_1h_tokens,
+                      excluded.credits, excluded.cost_usd, excluded.cost_source,
+                      excluded.provenance, excluded.duration_ms, excluded.ttft_ms,
+                      excluded.active_ms, excluded.status, excluded.error,
+                      excluded.raw_ref, excluded.completeness)"#,
             params![
                 ev.dedup_key,
                 ev.app,
@@ -388,6 +413,35 @@ mod tests {
             )
             .unwrap();
         assert_eq!(total, 500);
+    }
+
+    /// Re-emitting a row unchanged must not count as a write (idle ticks would
+    /// otherwise look like new data), while any real change still lands.
+    #[test]
+    fn identical_reupsert_is_not_a_write() {
+        let s = Store::open_memory().unwrap();
+        let e = ev("same", 300, Some(0.02));
+        assert!(s.upsert_event(&e).unwrap()); // first insert
+        assert!(!s.upsert_event(&e).unwrap()); // identical → nothing to do
+        assert!(!s.upsert_event(&e).unwrap());
+        // a genuine change (a cost the price book just learned) still writes
+        let mut repriced = e.clone();
+        repriced.cost_usd = Some(0.03);
+        assert!(s.upsert_event(&repriced).unwrap());
+        // and NULL-vs-NULL columns compare equal (IS NOT, not <>)
+        let mut nul = ev("nul", 10, None);
+        nul.project = None;
+        assert!(s.upsert_event(&nul).unwrap());
+        assert!(!s.upsert_event(&nul).unwrap());
+        let cost: f64 = s
+            .conn()
+            .query_row(
+                "SELECT cost_usd FROM usage_events WHERE dedup_key='same'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cost, 0.03);
     }
 
     #[test]
@@ -820,6 +874,60 @@ mod tests {
         let rows = s.latest_quotas().unwrap();
         assert_eq!(rows.len(), 3); // exactly one per (app, kind)
         assert_eq!(rows.iter().filter(|r| r.app == "workbuddy").count(), 1);
+    }
+
+    /// The indexed rewrite must agree with the original window-function query
+    /// on awkward data: NULL accounts (`IS`, not `=`), snapshots tied on
+    /// `captured_at` (id breaks the tie) and several windows per app.
+    #[test]
+    fn latest_quotas_matches_the_window_function_oracle() {
+        let s = Store::open_memory().unwrap();
+        let mut n = 0i64;
+        for (app, account, kind) in [
+            ("claude", None, "5h_block"),
+            ("claude", None, "weekly"),
+            ("claude", Some("acct-a"), "weekly"),
+            ("codex", Some("acct-a"), "weekly"),
+            ("codex", None, "credits"),
+            ("cursor", Some("acct-b"), "monthly"),
+        ] {
+            for captured_at in [100i64, 200, 200, 300, 300, 300, 150] {
+                n += 1;
+                s.conn()
+                    .execute(
+                        "INSERT INTO quota_snapshots(app,account,captured_at,window_kind,used,limit_value,used_percent,resets_at,raw_json)
+                         VALUES (?1,?2,?3,?4,?5,NULL,?6,NULL,?7)",
+                        params![app, account, captured_at, kind, n as f64, n as f64 / 7.0, "x".repeat(50)],
+                    )
+                    .unwrap();
+            }
+        }
+        type Row = (String, Option<String>, i64, String, Option<f64>);
+        let oracle: Vec<Row> = s
+            .conn()
+            .prepare(
+                "SELECT app, account, captured_at, window_kind, used
+                 FROM (SELECT *, ROW_NUMBER() OVER (
+                           PARTITION BY app, account, window_kind
+                           ORDER BY captured_at DESC, id DESC) rn
+                       FROM quota_snapshots)
+                 WHERE rn = 1 ORDER BY app, window_kind, account",
+            )
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        let got: Vec<_> = s
+            .latest_quotas()
+            .unwrap()
+            .into_iter()
+            .map(|q| (q.app, q.account, q.captured_at, q.window_kind, q.used))
+            .collect();
+        assert_eq!(got.len(), 6);
+        assert_eq!(got, oracle);
     }
 
     #[test]
