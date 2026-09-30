@@ -21,6 +21,7 @@ pub mod codex;
 pub mod commandcode;
 pub mod cursor;
 pub mod devin;
+pub mod dsh;
 pub mod grok;
 pub mod kimi_code;
 pub mod minimax_code;
@@ -128,6 +129,7 @@ pub fn registry() -> Vec<Box<dyn SourceAdapter>> {
         Box::new(cline::Cline),
         Box::new(commandcode::CommandCode),
         Box::new(antigravity::Antigravity),
+        Box::new(dsh::Dsh),
     ]
 }
 

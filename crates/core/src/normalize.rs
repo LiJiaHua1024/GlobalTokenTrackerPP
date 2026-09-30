@@ -64,6 +64,17 @@ pub fn ts_ms(v: &Value) -> Option<i64> {
         })
 }
 
+/// Longest call duration we accept when it is derived from log timestamps
+/// (an idle gap between prompts is not a call).
+pub const MAX_DERIVED_DURATION_MS: i64 = 30 * 60 * 1000;
+
+/// `end − start` for adapters that infer a call's duration from timestamps;
+/// `None` unless it lies in `(0, MAX_DERIVED_DURATION_MS]`.
+pub fn derived_duration(start: Option<i64>, end: Option<i64>) -> Option<i64> {
+    let d = end? - start?;
+    (d > 0 && d <= MAX_DERIVED_DURATION_MS).then_some(d)
+}
+
 /// Epoch ms from a JSON number that may be s/ms/µs/ns or an ISO string.
 pub fn epoch_ms(v: &Value) -> Option<i64> {
     if let Some(s) = text(v) {

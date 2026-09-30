@@ -24,6 +24,7 @@ pub mod apps {
     pub const KIMI_CODE: &str = "kimi_code";
     pub const CLINE: &str = "cline";
     pub const COMMANDCODE: &str = "commandcode";
+    pub const DSH: &str = "dsh";
 }
 
 /// Where the raw record came from (spec §5 `provenance`).

@@ -233,6 +233,7 @@ pub fn app_display(app: &str) -> &str {
         "cline" => "Cline",
         "commandcode" => "Command Code",
         "gemini_antigravity" => "Antigravity",
+        "dsh" => "DeepSeek Harness",
         other => other,
     }
 }
