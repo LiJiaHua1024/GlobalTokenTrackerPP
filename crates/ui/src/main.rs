@@ -1153,13 +1153,7 @@ impl Component for Shell {
                 self.prices_refreshing = false;
                 match res {
                     Ok(r) => {
-                        diag!(
-                            "[prices] synced: dev={} litellm={} llmpricing={} repriced={}",
-                            r.models_dev,
-                            r.litellm,
-                            r.llmpricing,
-                            r.repriced
-                        );
+                        diag!("[prices] synced: {} repriced={}", r.summary(), r.repriced);
                         // A successful sync rewrites the price table and its
                         // sync stamp; repriced>0 additionally changes
                         // visible USD.

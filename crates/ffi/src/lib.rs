@@ -271,17 +271,17 @@ pub unsafe extern "C" fn gtt_update_prices(ctx: *mut GttContext) -> *mut c_char 
             #[derive(Serialize)]
             struct PricingResult {
                 ok: bool,
-                models_dev: usize,
-                litellm: usize,
-                llmpricing: usize,
                 repriced: u64,
+                /// Rows written per source tag (a source can take several downloads).
+                sources: Vec<(&'static str, usize)>,
+                /// One line per download that failed (network, malformed doc).
+                failed: Vec<String>,
             }
             to_json_c_string(&PricingResult {
                 ok: true,
-                models_dev: report.models_dev,
-                litellm: report.litellm,
-                llmpricing: report.llmpricing,
                 repriced: report.repriced,
+                sources: report.sources,
+                failed: report.failed,
             })
         }
         Err(e) => to_error_c_string(e),

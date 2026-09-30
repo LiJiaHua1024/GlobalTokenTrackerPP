@@ -1,14 +1,20 @@
 //! Pricing pipeline (spec §7.2–§7.4): alias BFS → price lookup → USD math.
 //!
-//! Lookup order: `price_overrides` (user) → models.dev (provider-anchored) →
-//! LiteLLM (prefixed keys) → unpriced. Never guess, never spread across a
-//! family — unpriced is flagged, counted 0, and routed to the overrides UI.
+//! Lookup order: `price_overrides` (user) → the price book → unpriced. The
+//! book is not "whichever feed ranks highest": nine sources are polled and a
+//! model's price is what most of them agree on (see [`consensus`]), so one
+//! feed's mistake cannot become a wrong bill. Never guess, never spread
+//! across a family — unpriced is flagged, counted 0, and routed to the
+//! overrides UI.
 
+pub mod consensus;
+mod feeds;
 mod seed;
 
 use crate::model::{CostSource, UsageEvent};
 use crate::store::{Store, now_ms};
 use anyhow::{Context, Result};
+#[cfg(test)]
 use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -35,53 +41,77 @@ pub enum Resolution {
     Unpriced,
 }
 
-pub struct PriceBook {
-    /// normalized model key → price (models.dev ∪ litellm ∪ seed).
+/// The consensus half of a [`PriceBook`]: derived from the `prices` table only,
+/// so it is shared between loads while that table is unchanged.
+struct Consensus {
+    /// normalized model key → the consensus price of its model. Every spelling
+    /// any source used for a model points at the same price.
     map: HashMap<String, Price>,
+    /// Spelling-insensitive twin of `map` (`claude-opus-4.6` ≡ `…-4-6`), for a
+    /// tool that writes the id in a form no source does.
+    by_canon: HashMap<String, Price>,
+}
+
+pub struct PriceBook {
+    consensus: std::sync::Arc<Consensus>,
     /// user overrides, keyed by the RAW model name (pre-normalization) too.
     overrides: HashMap<String, Price>,
+}
+
+/// `(ledger path, fingerprint of prices, consensus)` of the last load. The
+/// engine reloads the book on every scan tick (~every 30s); recomputing the
+/// vote over ~10k quotes each time cost ~15ms for a table that changes twice a
+/// day. In-memory databases are never cached (each is its own world).
+type CachedConsensus = (String, (i64, i64, f64), std::sync::Arc<Consensus>);
+static CONSENSUS: std::sync::Mutex<Option<CachedConsensus>> = std::sync::Mutex::new(None);
+
+fn shared_consensus(store: &Store) -> Result<std::sync::Arc<Consensus>> {
+    let path = store.conn().path().unwrap_or_default().to_string();
+    let fingerprint: (i64, i64, f64) = store.conn().query_row(
+        "SELECT COUNT(*), COALESCE(MAX(fetched_at), 0), COALESCE(SUM(input + output), 0) FROM prices",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    if !path.is_empty()
+        && let Some((p, f, c)) = CONSENSUS.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+        && *p == path
+        && *f == fingerprint
+    {
+        return Ok(c.clone());
+    }
+    let mut map = HashMap::new();
+    let mut by_canon = HashMap::new();
+    for g in consensus::groups(store.conn())? {
+        let price = g.verdict.price;
+        for k in g.keys {
+            map.insert(k, price);
+        }
+        by_canon.insert(g.canon, price);
+    }
+    let c = std::sync::Arc::new(Consensus { map, by_canon });
+    if !path.is_empty() {
+        *CONSENSUS.lock().unwrap_or_else(|e| e.into_inner()) = Some((path, fingerprint, c.clone()));
+    }
+    Ok(c)
 }
 
 impl PriceBook {
     pub fn empty() -> Self {
         Self {
-            map: HashMap::new(),
+            consensus: std::sync::Arc::new(Consensus {
+                map: HashMap::new(),
+                by_canon: HashMap::new(),
+            }),
             overrides: HashMap::new(),
         }
     }
 
     pub fn load(store: &Store) -> Result<Self> {
         seed::ensure_seeded(store)?;
-        let mut map = HashMap::new();
-        // Seed rows load first; live-synced sources overwrite on key collision.
-        // Precedence on key collision: seed < litellm < models.dev < llmpricing
-        // (live). llmpricing.dev merges models.dev + OpenRouter + AA and has
-        // the widest coverage of the labs our users actually run.
-        let mut st = store.conn().prepare(
-            "SELECT model_id, input, output, cache_read, cache_write,
-                    tier_above_200k_input, tier_1h_cache_write, tier_batch
-             FROM prices
-             ORDER BY CASE source
-                 WHEN 'seed' THEN 0 WHEN 'litellm' THEN 1
-                 WHEN 'models.dev' THEN 2 ELSE 3 END",
-        )?;
-        for r in st.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                Price {
-                    input: r.get::<_, f64>(1).unwrap_or(0.0),
-                    output: r.get::<_, f64>(2).unwrap_or(0.0),
-                    cache_read: r.get::<_, f64>(3).unwrap_or(0.0),
-                    cache_write: r.get::<_, f64>(4).unwrap_or(0.0),
-                    tier_above_200k_input: r.get(5)?,
-                    tier_1h_cache_write: r.get(6)?,
-                    tier_batch: r.get(7)?,
-                },
-            ))
-        })? {
-            let (k, v) = r?;
-            map.insert(k, v);
-        }
+        // One vote per source per model; see `consensus` for how they are
+        // weighed. (The bundled seed only speaks for models no live source
+        // knows.)
+        let consensus = shared_consensus(store)?;
 
         let mut overrides = HashMap::new();
         let mut st = store.conn().prepare(
@@ -103,7 +133,10 @@ impl PriceBook {
             let (k, v) = r?;
             overrides.insert(k, v);
         }
-        Ok(Self { map, overrides })
+        Ok(Self {
+            consensus,
+            overrides,
+        })
     }
 
     /// Fill `pricing_model`/`cost_usd`/`cost_source` on an event. Adapter-set
@@ -181,7 +214,11 @@ impl PriceBook {
     }
 
     fn lookup(&self, cand: &str, _provider: Option<&str>) -> Option<Price> {
-        self.map.get(cand).copied()
+        self.consensus
+            .map
+            .get(cand)
+            .or_else(|| self.consensus.by_canon.get(&consensus::canon_key(cand)))
+            .copied()
     }
 }
 
@@ -201,11 +238,23 @@ pub const PRICE_TTL_SECS: i64 = 12 * 3600;
 const LAST_ATTEMPT_KEY: &str = "prices_last_attempt";
 
 pub struct RefreshReport {
-    pub models_dev: usize,
-    pub litellm: usize,
-    pub llmpricing: usize,
+    /// Rows written per source tag (a source can take several downloads).
+    pub sources: Vec<(&'static str, usize)>,
+    /// One line per download that failed (network, or a malformed document).
+    pub failed: Vec<String>,
     /// Formerly-unpriced events that gained a price after the refresh.
     pub repriced: u64,
+}
+
+impl RefreshReport {
+    /// `models.dev 1997, openrouter 376, …` for logs and the CLI.
+    pub fn summary(&self) -> String {
+        self.sources
+            .iter()
+            .map(|(s, n)| format!("{s} {n}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
 }
 
 /// Newest `fetched_at` among live (non-seed) sources; `None` = never synced.
@@ -231,7 +280,7 @@ pub fn prices_stale(store: &Store) -> Result<bool> {
 
 fn http_get(url: &str) -> Result<String> {
     let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(60)))
+        .timeout_global(Some(Duration::from_secs(30)))
         .build()
         .new_agent();
     let mut resp = agent
@@ -242,105 +291,157 @@ fn http_get(url: &str) -> Result<String> {
     Ok(resp.body_mut().read_to_string()?)
 }
 
-/// Fetch models.dev + LiteLLM + llmpricing.dev price maps, upsert into
-/// `prices`, then reprice any event still marked `unpriced` so newly-covered
-/// models gain estimates. Offline/failed fetch leaves the existing book
+type Import = Box<dyn Fn(&rusqlite::Connection, &str, i64) -> Result<usize>>;
+
+struct Feed {
+    url: String,
+    tag: &'static str,
+    import: Import,
+}
+
+const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/models";
+const VERCEL_URL: &str = "https://ai-gateway.vercel.sh/v1/models";
+const HELICONE_URL: &str = "https://www.helicone.ai/api/llm-costs";
+const LANGFUSE_URL: &str = "https://raw.githubusercontent.com/langfuse/langfuse/main/worker/src/constants/default-model-prices.json";
+const LLM_PRICES_URL: &str = "https://www.llm-prices.com/current-v1.json";
+const PORTKEY_BASE: &str = "https://raw.githubusercontent.com/Portkey-AI/models/main/pricing";
+/// Portkey publishes one file per *host*; these are the model makers' own
+/// (first-party list prices, MIT-licensed). `qwen`/`qwq` narrows DashScope,
+/// which also resells Kimi and GLM at its own prices. Z.ai's international
+/// file is used, not the CNY-list `zhipu` one, so two files never fight over
+/// one id.
+const PORTKEY_FILES: &[(&str, &[&str])] = &[
+    ("anthropic", &[]),
+    ("openai", &[]),
+    ("google", &[]),
+    ("x-ai", &[]),
+    ("mistral-ai", &[]),
+    ("deepseek", &[]),
+    ("moonshot", &[]),
+    ("z-ai", &[]),
+    ("minimax", &[]),
+    ("cohere", &[]),
+    ("perplexity-ai", &[]),
+    ("dashscope", &["qwen", "qwq"]),
+];
+
+fn feeds() -> Vec<Feed> {
+    let mut v = vec![
+        Feed {
+            url: MODELS_DEV_URL.into(),
+            tag: "models.dev",
+            import: Box::new(feeds::import_models_dev),
+        },
+        Feed {
+            url: LITELLM_URL.into(),
+            tag: "litellm",
+            import: Box::new(feeds::import_litellm),
+        },
+        Feed {
+            url: LLMPRICING_URL.into(),
+            tag: "llmpricing",
+            import: Box::new(feeds::import_llmpricing),
+        },
+        Feed {
+            url: OPENROUTER_URL.into(),
+            tag: "openrouter",
+            import: Box::new(feeds::import_openrouter),
+        },
+        Feed {
+            url: VERCEL_URL.into(),
+            tag: "vercel",
+            import: Box::new(feeds::import_vercel),
+        },
+        Feed {
+            url: HELICONE_URL.into(),
+            tag: "helicone",
+            import: Box::new(feeds::import_helicone),
+        },
+        Feed {
+            url: LANGFUSE_URL.into(),
+            tag: "langfuse",
+            import: Box::new(feeds::import_langfuse),
+        },
+        Feed {
+            url: LLM_PRICES_URL.into(),
+            tag: "llm-prices",
+            import: Box::new(feeds::import_llm_prices),
+        },
+    ];
+    for (provider, prefixes) in PORTKEY_FILES {
+        v.push(Feed {
+            url: format!("{PORTKEY_BASE}/{provider}.json"),
+            tag: "portkey",
+            import: Box::new(move |c, body, now| feeds::import_portkey(c, body, now, prefixes)),
+        });
+    }
+    v
+}
+
+/// Give up on the rest of a refresh after this many downloads in a row failed
+/// to *connect*: the network is down, and every remaining feed would burn its
+/// full timeout.
+const MAX_CONSECUTIVE_FETCH_FAILURES: usize = 4;
+
+/// Fetch every price feed, upsert into `prices`, then reprice any event still
+/// marked `unpriced` so newly-covered models gain estimates. Feeds are
+/// independent — one outage or a malformed document costs that feed only, and
+/// the book keeps that source's previous rows. All failing → Err, book
 /// untouched (seed fallback). `prices_last_attempt` is stamped up front so a
 /// persistent outage throttles to `PRICE_TTL_SECS` rather than every scan.
 pub fn refresh(store: &Store) -> Result<RefreshReport> {
     let now = now_ms();
     store.set_state(LAST_ATTEMPT_KEY, &now.to_string())?;
     let mut report = RefreshReport {
-        models_dev: 0,
-        litellm: 0,
-        llmpricing: 0,
+        sources: Vec::new(),
+        failed: Vec::new(),
         repriced: 0,
     };
-    // Each source is independent: a single outage must not block the others.
-    // All failing → Err, book untouched.
-    let mut errs = Vec::new();
-    let mut get_json = |url: &str, tag: &str| match http_get(url) {
-        Ok(b) => match serde_json::from_str::<Value>(&b) {
-            Ok(v) => Some(v),
+    // Feeds are handled strictly one at a time — download, parse into the few
+    // typed fields we need, write, drop — so the transient heap is one
+    // document's worth instead of every full JSON DOM at once (was a 50–80MB
+    // spike at every launch).
+    let mut succeeded = 0;
+    let mut fetch_failures = 0;
+    for feed in feeds() {
+        let body = match http_get(&feed.url) {
+            Ok(b) => {
+                fetch_failures = 0;
+                b
+            }
             Err(e) => {
-                errs.push(format!("{tag} parse: {e}"));
-                None
-            }
-        },
-        Err(e) => {
-            errs.push(format!("{tag} fetch: {e}"));
-            None
-        }
-    };
-    let md = get_json(MODELS_DEV_URL, "models.dev");
-    let ll = get_json(LITELLM_URL, "litellm");
-    let lp = get_json(LLMPRICING_URL, "llmpricing");
-    if md.is_none() && ll.is_none() && lp.is_none() {
-        anyhow::bail!("all price sources failed: {}", errs.join("; "));
-    }
-    let tx = store.conn().unchecked_transaction()?;
-
-    // models.dev: {provider: {models: {id: {cost: {input,output,cache_read,cache_write}}}}}
-    if let Some(md) = md {
-        let mut st = tx.prepare(
-            "INSERT OR REPLACE INTO prices(provider, model_id, input, output, cache_read, cache_write, source, fetched_at)
-             VALUES ('models.dev', ?1, ?2, ?3, ?4, ?5, 'models.dev', ?6)",
-        )?;
-        for prov in md.as_object().into_iter().flatten() {
-            for (id, m) in prov.1["models"].as_object().into_iter().flatten() {
-                let c = &m["cost"];
-                if !c.is_object() {
-                    continue;
+                report.failed.push(format!("{} fetch: {e:#}", feed.tag));
+                fetch_failures += 1;
+                if fetch_failures >= MAX_CONSECUTIVE_FETCH_FAILURES {
+                    report.failed.push("network unreachable — stopped".into());
+                    break;
                 }
-                let f = |k: &str| c[k].as_f64().unwrap_or(0.0);
-                st.execute(rusqlite::params![
-                    normalize_key(id),
-                    f("input"),
-                    f("output"),
-                    f("cache_read"),
-                    f("cache_write"),
-                    now
-                ])?;
-                report.models_dev += 1;
+                continue;
             }
+        };
+        // Its own transaction: nothing is written unless the whole document
+        // parsed, and the write lock is never held across a download.
+        let written = (|| -> Result<usize> {
+            let tx = store.conn().unchecked_transaction()?;
+            let n = (feed.import)(&tx, &body, now)?;
+            tx.commit()?;
+            Ok(n)
+        })();
+        drop(body);
+        match written {
+            Ok(n) => {
+                succeeded += 1;
+                match report.sources.iter_mut().find(|(t, _)| *t == feed.tag) {
+                    Some((_, total)) => *total += n,
+                    None => report.sources.push((feed.tag, n)),
+                }
+            }
+            Err(e) => report.failed.push(format!("{} parse: {e:#}", feed.tag)),
         }
     }
-
-    // LiteLLM: {model: {input_cost_per_token, output_cost_per_token,
-    //   cache_read_input_token_cost, cache_creation_input_token_cost,
-    //   input_cost_per_token_above_200k_tokens,
-    //   cache_creation_input_token_cost_above_1hr,
-    //   input_cost_per_token_batches}} — all $/token → ×1e6 to $/1M.
-    if let Some(ll) = ll {
-        let mut st = tx.prepare(
-            "INSERT OR REPLACE INTO prices(provider, model_id, input, output, cache_read, cache_write,
-                    tier_above_200k_input, tier_1h_cache_write, tier_batch, source, fetched_at)
-             VALUES ('litellm', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'litellm', ?9)",
-        )?;
-        let m = |v: &Value, k: &str| v[k].as_f64().map(|x| x * 1e6);
-        for (id, v) in ll.as_object().into_iter().flatten() {
-            if !v["input_cost_per_token"].is_number() {
-                continue; // skip spec entries ("sample_spec", defaults)
-            }
-            st.execute(rusqlite::params![
-                normalize_key(id),
-                m(v, "input_cost_per_token").unwrap_or(0.0),
-                m(v, "output_cost_per_token").unwrap_or(0.0),
-                m(v, "cache_read_input_token_cost").unwrap_or(0.0),
-                m(v, "cache_creation_input_token_cost").unwrap_or(0.0),
-                m(v, "input_cost_per_token_above_200k_tokens"),
-                m(v, "cache_creation_input_token_cost_above_1hr"),
-                m(v, "input_cost_per_token_batches"),
-                now
-            ])?;
-            report.litellm += 1;
-        }
+    if succeeded == 0 {
+        anyhow::bail!("all price sources failed: {}", report.failed.join("; "));
     }
-
-    if let Some(lp) = lp {
-        report.llmpricing = upsert_llmpricing(&tx, &lp, now)?;
-    }
-    tx.commit()?;
 
     // Re-price events that were unpriced at ingest — a grown price book may
     // now cover them.
@@ -355,6 +456,7 @@ pub fn refresh(store: &Store) -> Result<RefreshReport> {
 /// bargain host never understates the user's actual provider cost. The
 /// source exposes no cache-write price → column stays NULL (honest absence,
 /// not a guessed multiplier).
+#[cfg(test)]
 fn upsert_llmpricing(conn: &rusqlite::Connection, lp: &Value, now: i64) -> Result<usize> {
     let mut st = conn.prepare(
         "INSERT OR REPLACE INTO prices(provider, model_id, input, output, cache_read, cache_write, source, fetched_at)
@@ -728,17 +830,19 @@ mod tests {
     }
 
     #[test]
-    fn llmpricing_wins_key_collisions_not_overrides() {
+    fn the_book_bills_the_consensus_not_the_highest_ranked_feed() {
         let s = Store::open_memory().unwrap();
-        put_price(&s, "models.dev", "glm-9", 9.0, 9.0);
-        upsert_llmpricing(s.conn(), &llmpricing_fixture(), now_ms()).unwrap();
+        // Two feeds say 1.4/4.4, the (formerly top-ranked) llmpricing row says
+        // $9 — fixed precedence would have billed the outlier.
+        put_price(&s, "models.dev", "glm-9", 1.4, 4.4);
+        put_price(&s, "openrouter", "glm-9", 1.4, 4.4);
+        put_price(&s, "llmpricing", "glm-9", 9.0, 9.0);
         let book = PriceBook::load(&s).unwrap();
-        // live priority: llmpricing (aggregation of models.dev+OR+AA) wins.
         let Resolution::Priced(_, _, p) = book.resolve("glm-9", None, None) else {
             panic!("priced");
         };
-        assert_eq!(p.input, 1.4);
-        // user override still outranks every live source.
+        assert_eq!((p.input, p.output), (1.4, 4.4));
+        // user override still outranks every source.
         s.conn()
             .execute(
                 "INSERT INTO price_overrides(model_key, input, output, updated_at)
@@ -751,6 +855,96 @@ mod tests {
             panic!("priced");
         };
         assert_eq!((via, p.input), ("override", 42.0));
+    }
+
+    #[test]
+    fn every_spelling_of_a_model_resolves_to_the_same_price() {
+        let s = Store::open_memory().unwrap();
+        put_price(&s, "openrouter", "claude-opus-4.6", 5.0, 25.0);
+        put_price(&s, "vercel", "claude-opus-4.6", 5.0, 25.0);
+        // The bundled seed once carried a zero-price hyphen twin of a dotted id.
+        put_price(&s, "seed", "claude-opus-4-6", 0.0, 0.0);
+        let book = PriceBook::load(&s).unwrap();
+        for spelling in [
+            "claude-opus-4.6",
+            "claude-opus-4-6",
+            "Claude-Opus-4.6",
+            "anthropic/claude-opus-4-6",
+        ] {
+            match book.resolve(spelling, None, None) {
+                Resolution::Priced(_, via, p) => {
+                    assert_eq!((p.input, p.output), (5.0, 25.0), "{spelling}");
+                    assert_ne!(via, "override");
+                }
+                Resolution::Unpriced => panic!("{spelling} unpriced"),
+            }
+        }
+        // A spelling no source ever used still finds it by canonical form.
+        assert!(matches!(
+            book.resolve("claude-opus-4.6-20260101", None, None),
+            Resolution::Priced(..)
+        ));
+    }
+
+    #[test]
+    fn price_rows_show_the_consensus_and_who_agreed() {
+        let s = Store::open_memory().unwrap();
+        put_price(&s, "portkey", "gpt-5", 1.25, 10.0);
+        put_price(&s, "langfuse", "gpt-5", 1.25, 10.0);
+        put_price(&s, "litellm", "gpt-5", 0.625, 5.0);
+        let rows = s.price_rows(10).unwrap();
+        let r = rows.iter().find(|r| r.model == "gpt-5").unwrap();
+        assert_eq!((r.input, r.output), (1.25, 10.0));
+        assert_eq!((r.agree, r.total), (2, 3));
+        assert!(r.disputed());
+        assert_eq!(r.source, "portkey");
+        assert_eq!(r.quotes.len(), 3);
+        // The page shows exactly what billing uses.
+        let book = PriceBook::load(&s).unwrap();
+        let Resolution::Priced(_, _, p) = book.resolve("gpt-5", None, None) else {
+            panic!("priced");
+        };
+        assert_eq!((p.input, p.output), (r.input, r.output));
+    }
+
+    #[test]
+    fn price_search_ignores_case_and_separators_and_ranks_prefixes_first() {
+        use crate::store::filter_prices;
+        let s = Store::open_memory().unwrap();
+        for src in ["openrouter", "vercel"] {
+            put_price(&s, src, "claude-opus-4.6", 5.0, 25.0);
+        }
+        put_price(&s, "litellm", "claude-opus-4-6", 5.0, 25.0);
+        put_price(&s, "openrouter", "claude-sonnet-4.6", 3.0, 15.0);
+        put_price(&s, "portkey", "gpt-5-mini", 0.25, 2.0);
+        put_price(&s, "portkey", "mini-lm", 0.1, 0.1);
+        // gpt-5: the sources disagree.
+        put_price(&s, "portkey", "gpt-5", 1.25, 10.0);
+        put_price(&s, "langfuse", "gpt-5", 1.25, 10.0);
+        put_price(&s, "litellm", "gpt-5", 0.625, 5.0);
+        let rows = s.price_rows(100).unwrap();
+        let names = |q: &str, disputed: bool| -> Vec<String> {
+            filter_prices(&rows, q, disputed)
+                .into_iter()
+                .map(|r| r.model)
+                .collect()
+        };
+        // Any separator style, any case, either spelling of the version.
+        for q in ["opus 4.6", "OPUS-4-6", "claude opus 4-6", "  opus,4.6 "] {
+            assert_eq!(names(q, false).len(), 1, "{q}");
+            assert!(names(q, false)[0].starts_with("claude-opus-4"), "{q}");
+        }
+        // Words are ANDed.
+        assert_eq!(names("gpt mini", false), ["gpt-5-mini"]);
+        assert!(names("gpt zzz", false).is_empty());
+        // Ids that start with the query come before ids that merely contain it.
+        assert_eq!(names("mini", false), ["mini-lm", "gpt-5-mini"]);
+        // Nothing typed = everything, alphabetical.
+        assert_eq!(names("", false).len(), rows.len());
+        assert_eq!(names("   ", false).len(), rows.len());
+        // The dispute filter composes with the search.
+        assert_eq!(names("", true), ["gpt-5"]);
+        assert!(names("opus", true).is_empty());
     }
 
     #[test]

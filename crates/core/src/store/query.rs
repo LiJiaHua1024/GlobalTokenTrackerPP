@@ -54,14 +54,111 @@ pub struct QuotaRow {
     pub resets_at: Option<i64>,
 }
 
+/// One source's say on a model, for the corroboration tooltip.
+#[derive(Debug, Clone, Serialize)]
+pub struct PriceQuote {
+    pub source: String,
+    /// The id this source uses for the model.
+    pub key: String,
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub stance: crate::pricing::consensus::Stance,
+}
+
+/// A model as the price book resolves it — the consensus of every source.
 #[derive(Debug, Clone, Serialize)]
 pub struct PriceRow {
+    /// Display id (the spelling most sources use).
     pub model: String,
     pub input: f64,
     pub output: f64,
     pub cache_read: f64,
     pub cache_write: f64,
+    /// Whose numbers these are: the most trusted source among those agreeing.
     pub source: String,
+    /// Sources within tolerance of the shown price…
+    pub agree: u32,
+    /// …out of the sources that quoted a price at all.
+    pub total: u32,
+    /// What each source said, most trusted first.
+    pub quotes: Vec<PriceQuote>,
+    /// Search text: every spelling of the id, lowercase alphanumerics only.
+    hay: String,
+}
+
+impl PriceRow {
+    /// `hay` (the search text) is derived from the display id and the ids every
+    /// source uses for the model.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        model: String,
+        (input, output, cache_read, cache_write): (f64, f64, f64, f64),
+        source: String,
+        agree: u32,
+        total: u32,
+        quotes: Vec<PriceQuote>,
+    ) -> Self {
+        let hay = std::iter::once(model.as_str())
+            .chain(quotes.iter().map(|q| q.key.as_str()))
+            .map(flatten)
+            .collect::<Vec<_>>()
+            .join(" ");
+        Self {
+            model,
+            input,
+            output,
+            cache_read,
+            cache_write,
+            source,
+            agree,
+            total,
+            quotes,
+            hay,
+        }
+    }
+
+    /// Sources disagree on this model (at least one voted against the price).
+    pub fn disputed(&self) -> bool {
+        self.agree < self.total
+    }
+
+    fn matches(&self, tokens: &[String]) -> bool {
+        tokens.iter().all(|t| self.hay.contains(t.as_str()))
+    }
+}
+
+/// Lowercase alphanumerics: `Claude-Opus 4.6` → `claudeopus46`, so a query
+/// finds a model whatever separators either side used.
+fn flatten(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Rows matching `query` (every whitespace/comma separated word must occur in
+/// some spelling of the id; separators are ignored), best matches first —
+/// ids that *start* with the query, then the rest, each alphabetical.
+/// `disputed_only` keeps only models the sources disagree on. An empty query
+/// with the toggle off matches everything.
+pub fn filter_prices(rows: &[PriceRow], query: &str, disputed_only: bool) -> Vec<PriceRow> {
+    let tokens: Vec<String> = query
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .map(flatten)
+        .filter(|t| !t.is_empty())
+        .collect();
+    let hits = rows
+        .iter()
+        .filter(|r| (!disputed_only || r.disputed()) && r.matches(&tokens));
+    let Some(first) = tokens.first() else {
+        return hits.cloned().collect();
+    };
+    let (mut head, mut tail): (Vec<PriceRow>, Vec<PriceRow>) = hits
+        .cloned()
+        .partition(|r| flatten(&r.model).starts_with(first.as_str()));
+    head.append(&mut tail);
+    head
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -477,36 +574,45 @@ impl super::Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
-    /// Effective price book rows for the prices page: one row per model_id —
-    /// the row that `PriceBook::load` precedence would actually resolve
-    /// (seed < litellm < models.dev < llmpricing; ties → newest fetched_at).
+    /// The price book as the prices page shows it: one row per *model* (all
+    /// spellings merged), carrying the consensus price that `PriceBook::load`
+    /// bills with and what each source said about it. Sorted by id.
     pub fn price_rows(&self, limit: i64) -> Result<Vec<PriceRow>> {
-        let mut st = self.conn().prepare(
-            "SELECT model_id, input, output, cache_read, cache_write, source FROM (
-                 SELECT model_id, input, output, cache_read, cache_write, source,
-                        ROW_NUMBER() OVER (
-                          PARTITION BY model_id
-                          ORDER BY CASE source
-                              WHEN 'seed' THEN 0 WHEN 'litellm' THEN 1
-                              WHEN 'models.dev' THEN 2 ELSE 3 END DESC,
-                              fetched_at DESC
-                        ) AS rn
-                 FROM prices
-             ) WHERE rn = 1
-             ORDER BY model_id LIMIT ?1",
-        )?;
-        let rows = st.query_map(params![limit], |r| {
-            // Columns are nullable — llmpricing rows carry NULL cache_write.
-            Ok(PriceRow {
-                model: r.get(0)?,
-                input: r.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
-                output: r.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
-                cache_read: r.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
-                cache_write: r.get::<_, Option<f64>>(4)?.unwrap_or(0.0),
-                source: r.get(5)?,
+        use crate::pricing::consensus;
+        let groups = consensus::groups(self.conn())?;
+        Ok(groups
+            .into_iter()
+            .take(usize::try_from(limit).unwrap_or(usize::MAX))
+            .map(|g| {
+                let v = &g.verdict;
+                let quotes = g
+                    .quotes
+                    .iter()
+                    .zip(&g.stances)
+                    .map(|(q, st)| PriceQuote {
+                        source: q.source.clone(),
+                        key: q.key.clone(),
+                        input: q.price.input,
+                        output: q.price.output,
+                        cache_read: q.price.cache_read,
+                        stance: *st,
+                    })
+                    .collect();
+                PriceRow::new(
+                    g.keys[0].clone(),
+                    (
+                        v.price.input,
+                        v.price.output,
+                        v.price.cache_read,
+                        v.price.cache_write,
+                    ),
+                    v.source.clone(),
+                    v.agree as u32,
+                    v.total as u32,
+                    quotes,
+                )
             })
-        })?;
-        Ok(rows.collect::<std::result::Result<_, _>>()?)
+            .collect())
     }
 
     /// Models seen in events that resolved to no price (unpriced badge list).

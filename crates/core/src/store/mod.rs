@@ -9,8 +9,8 @@ use std::path::Path;
 
 pub use cursor::{CursorAction, FileCursor, tail_fingerprint};
 pub use query::{
-    ActivityDay, AppSummary, DailyRow, EventRow, MODEL_EXPR, PriceRow, QuotaRow, ShareRow,
-    SourceHealth, Totals,
+    ActivityDay, AppSummary, DailyRow, EventRow, MODEL_EXPR, PriceQuote, PriceRow, QuotaRow,
+    ShareRow, SourceHealth, Totals, filter_prices,
 };
 
 const SCHEMA: &str = include_str!("schema.sql");
