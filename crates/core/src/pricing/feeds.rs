@@ -380,14 +380,19 @@ struct LlEntry {
     cache_creation_input_token_cost_above_1hr: Num,
     #[serde(default)]
     input_cost_per_token_batches: Num,
+    #[serde(default)]
+    output_cost_per_token_above_200k_tokens: Num,
+    #[serde(default)]
+    cache_read_input_token_cost_above_200k_tokens: Num,
 }
 
 pub(super) fn import_litellm(conn: &Connection, body: &str, now: i64) -> Result<usize> {
     let entries: Entries<Loose<LlEntry>> = serde_json::from_str(body)?;
     let mut st = conn.prepare(
         "INSERT OR REPLACE INTO prices(provider, model_id, input, output, cache_read, cache_write,
-                tier_above_200k_input, tier_1h_cache_write, tier_batch, source, fetched_at)
-         VALUES ('litellm', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'litellm', ?9)",
+                tier_above_200k_input, tier_1h_cache_write, tier_batch,
+                tier_above_200k_output, tier_above_200k_cache_read, source, fetched_at)
+         VALUES ('litellm', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'litellm', ?11)",
     )?;
     let per_1m = |n: Num| n.0.map(|x| x * 1e6);
     let mut n = 0usize;
@@ -405,6 +410,8 @@ pub(super) fn import_litellm(conn: &Connection, body: &str, now: i64) -> Result<
             per_1m(e.input_cost_per_token_above_200k_tokens),
             per_1m(e.cache_creation_input_token_cost_above_1hr),
             per_1m(e.input_cost_per_token_batches),
+            per_1m(e.output_cost_per_token_above_200k_tokens),
+            per_1m(e.cache_read_input_token_cost_above_200k_tokens),
             now
         ])?;
         n += 1;
@@ -1056,8 +1063,9 @@ mod tests {
     fn reference_litellm(conn: &Connection, ll: &Value, now: i64) -> Result<usize> {
         let mut st = conn.prepare(
             "INSERT OR REPLACE INTO prices(provider, model_id, input, output, cache_read, cache_write,
-                    tier_above_200k_input, tier_1h_cache_write, tier_batch, source, fetched_at)
-             VALUES ('litellm', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'litellm', ?9)",
+                    tier_above_200k_input, tier_1h_cache_write, tier_batch,
+                tier_above_200k_output, tier_above_200k_cache_read, source, fetched_at)
+             VALUES ('litellm', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'litellm', ?11)",
         )?;
         let m = |v: &Value, k: &str| v[k].as_f64().map(|x| x * 1e6);
         let mut n = 0;
@@ -1074,6 +1082,8 @@ mod tests {
                 m(v, "input_cost_per_token_above_200k_tokens"),
                 m(v, "cache_creation_input_token_cost_above_1hr"),
                 m(v, "input_cost_per_token_batches"),
+                m(v, "output_cost_per_token_above_200k_tokens"),
+                m(v, "cache_read_input_token_cost_above_200k_tokens"),
                 now
             ])?;
             n += 1;
@@ -1117,7 +1127,7 @@ mod tests {
                 "SELECT provider||'|'||model_id||'|'||COALESCE(input,'N')||'|'||COALESCE(output,'N')||'|'||
                         COALESCE(cache_read,'N')||'|'||COALESCE(cache_write,'N')||'|'||
                         COALESCE(tier_above_200k_input,'N')||'|'||COALESCE(tier_1h_cache_write,'N')||'|'||
-                        COALESCE(tier_batch,'N')||'|'||source||'|'||fetched_at
+                        COALESCE(tier_batch,'N')||'|'||COALESCE(tier_above_200k_output,'N')||'|'||COALESCE(tier_above_200k_cache_read,'N')||'|'||source||'|'||fetched_at
                  FROM prices WHERE source != 'seed' ORDER BY 1",
             )
             .unwrap();
@@ -1179,7 +1189,8 @@ mod tests {
                            "litellm_provider": "openai", "supports_vision": true},
                 "claude-x": {"input_cost_per_token": 3e-6, "output_cost_per_token": 15e-6, "cache_creation_input_token_cost": 3.75e-6,
                              "input_cost_per_token_above_200k_tokens": 6e-6, "cache_creation_input_token_cost_above_1hr": 6e-6,
-                             "input_cost_per_token_batches": 1.5e-6},
+                             "input_cost_per_token_batches": 1.5e-6,
+                             "output_cost_per_token_above_200k_tokens": 22.5e-6, "cache_read_input_token_cost_above_200k_tokens": 0.6e-6},
                 "int-cost": {"input_cost_per_token": 1, "output_cost_per_token": 2},
                 "string-cost": {"input_cost_per_token": "0.000001"},
                 "no-input": {"output_cost_per_token": 1e-6},
@@ -1192,6 +1203,27 @@ mod tests {
             reference_litellm,
         );
         same_rows(&json!(null), import_litellm, reference_litellm);
+    }
+
+    #[test]
+    fn litellm_imports_long_context_output_and_cache_read_tiers() {
+        let s = Store::open_memory().unwrap();
+        let body =
+            json!({"claude-x": {"input_cost_per_token": 3e-6, "output_cost_per_token": 15e-6,
+            "output_cost_per_token_above_200k_tokens": 22.5e-6,
+            "cache_read_input_token_cost_above_200k_tokens": 0.6e-6}})
+            .to_string();
+        assert_eq!(import_litellm(s.conn(), &body, 1).unwrap(), 1);
+        let (out, cr): (Option<f64>, Option<f64>) = s
+            .conn()
+            .query_row(
+                "SELECT tier_above_200k_output, tier_above_200k_cache_read FROM prices WHERE model_id='claude-x'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!((out.unwrap() - 22.5).abs() < 1e-9);
+        assert!((cr.unwrap() - 0.6).abs() < 1e-9);
     }
 
     #[test]

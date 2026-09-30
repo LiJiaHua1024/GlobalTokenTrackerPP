@@ -49,9 +49,10 @@ enum Cmd {
     OtelSetup,
     /// Poll vendor quota channels (codex wham / cursor RPC) once.
     Quota,
-    /// Price book: show freshness; --update pulls models.dev + LiteLLM +
-    /// llmpricing.dev and
-    /// reprices events still marked unpriced.
+    /// Price book: show freshness; --update pulls every price source listed in
+    /// the pricing rules (bundled, auto-updated from the repo), reprices events
+    /// still marked unpriced and, when the rules changed, re-prices all
+    /// book-priced events.
     Prices {
         #[arg(long)]
         update: bool,
@@ -134,10 +135,18 @@ fn main() -> Result<()> {
             if update {
                 let r = pricing::refresh(&engine.store)?;
                 println!(
-                    "synced: {}; repriced {} unpriced events",
+                    "synced: {}; repriced {} events{}",
                     r.summary(),
-                    r.repriced
+                    r.repriced,
+                    if r.rules_repass {
+                        " (pricing rules changed: full repass)"
+                    } else {
+                        ""
+                    }
                 );
+                for f in &r.failed {
+                    eprintln!("  failed: {f}");
+                }
             }
         }
         Cmd::Quota => {

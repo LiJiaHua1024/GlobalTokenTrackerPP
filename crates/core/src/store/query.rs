@@ -579,7 +579,7 @@ impl super::Store {
     /// bills with and what each source said about it. Sorted by id.
     pub fn price_rows(&self, limit: i64) -> Result<Vec<PriceRow>> {
         use crate::pricing::consensus;
-        let groups = consensus::groups(self.conn())?;
+        let groups = consensus::groups(self.conn(), &crate::pricing::rules::current(self))?;
         Ok(groups
             .into_iter()
             .take(usize::try_from(limit).unwrap_or(usize::MAX))

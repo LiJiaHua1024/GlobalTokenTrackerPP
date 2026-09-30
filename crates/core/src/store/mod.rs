@@ -189,16 +189,17 @@ impl Store {
             self.conn
                 .execute_batch("ALTER TABLE sync_cursors ADD COLUMN adapter_state TEXT")?;
         }
-        let version: i64 = self.conn.query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
-            [],
-            |r| r.get(0),
-        )?;
-        if version < SCHEMA_VERSION {
-            self.conn.execute(
-                "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
-                params![SCHEMA_VERSION, now_ms()],
+        // Long-context output / cache-read tiers on `prices` — idempotent.
+        for col in ["tier_above_200k_output", "tier_above_200k_cache_read"] {
+            let has: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('prices') WHERE name=?1",
+                [col],
+                |r| r.get(0),
             )?;
+            if has == 0 {
+                self.conn
+                    .execute_batch(&format!("ALTER TABLE prices ADD COLUMN {col} REAL"))?;
+            }
         }
         // OpenCode used to book output WITHOUT reasoning (its `tokens.reasoning`
         // is separate); the project convention is reasoning ⊂ output. One-time
@@ -218,6 +219,17 @@ impl Store {
                 [OPENCODE_MIG],
             )?;
             tx.commit()?;
+        }
+        let version: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+            [],
+            |r| r.get(0),
+        )?;
+        if version < SCHEMA_VERSION {
+            self.conn.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
+                params![SCHEMA_VERSION, now_ms()],
+            )?;
         }
         Ok(())
     }
@@ -425,6 +437,45 @@ mod tests {
     }
 
     #[test]
+    fn opencode_output_gains_reasoning_exactly_once() {
+        let dir = std::env::temp_dir().join(format!("gtt_mig_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ledger.db");
+        let out = |s: &Store, key: &str| -> i64 {
+            s.conn()
+                .query_row(
+                    "SELECT output_tokens FROM usage_events WHERE dedup_key=?1",
+                    [key],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        {
+            let s = Store::open(&path).unwrap();
+            let mut oc = ev("oc", 5, Some(0.0));
+            oc.app = apps::OPENCODE.into();
+            oc.reasoning_tokens = 30;
+            let mut other = ev("cl", 5, Some(0.0));
+            other.reasoning_tokens = 30;
+            s.upsert_event(&oc).unwrap();
+            s.upsert_event(&other).unwrap();
+            // Simulate a ledger written before the migration existed.
+            s.conn()
+                .execute("DELETE FROM app_state WHERE key LIKE 'mig_opencode%'", [])
+                .unwrap();
+        }
+        let s = Store::open(&path).unwrap();
+        assert_eq!(out(&s, "oc"), 35);
+        assert_eq!(out(&s, "cl"), 5); // other tools already count it in output
+        drop(s);
+        let s = Store::open(&path).unwrap();
+        assert_eq!(out(&s, "oc"), 35); // no double add
+        drop(s);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn upsert_upgrades_snapshot_to_terminal() {
         let s = Store::open_memory().unwrap();
         assert!(s.upsert_event(&ev("k1", 0, None)).unwrap()); // interim: no output/cost
@@ -467,45 +518,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(cost, 0.03);
-    }
-
-    #[test]
-    fn opencode_output_gains_reasoning_exactly_once() {
-        let dir = std::env::temp_dir().join(format!("gtt_mig_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("ledger.db");
-        let out = |s: &Store, key: &str| -> i64 {
-            s.conn()
-                .query_row(
-                    "SELECT output_tokens FROM usage_events WHERE dedup_key=?1",
-                    [key],
-                    |r| r.get(0),
-                )
-                .unwrap()
-        };
-        {
-            let s = Store::open(&path).unwrap();
-            let mut oc = ev("oc", 5, Some(0.0));
-            oc.app = apps::OPENCODE.into();
-            oc.reasoning_tokens = 30;
-            let mut other = ev("cl", 5, Some(0.0));
-            other.reasoning_tokens = 30;
-            s.upsert_event(&oc).unwrap();
-            s.upsert_event(&other).unwrap();
-            // Simulate a ledger written before the migration existed.
-            s.conn()
-                .execute("DELETE FROM app_state WHERE key LIKE 'mig_opencode%'", [])
-                .unwrap();
-        }
-        let s = Store::open(&path).unwrap();
-        assert_eq!(out(&s, "oc"), 35);
-        assert_eq!(out(&s, "cl"), 5); // other tools already count it in output
-        drop(s);
-        let s = Store::open(&path).unwrap();
-        assert_eq!(out(&s, "oc"), 35); // no double add
-        drop(s);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

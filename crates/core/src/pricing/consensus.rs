@@ -17,7 +17,7 @@
 //!    bundled seed list 0/0 for models that plainly cost money). The bundled
 //!    seed only votes when no live source knows the model — it is a snapshot
 //!    of one of the live feeds, not an independent witness.
-//! 3. Voters are clustered by (input, output) within [`TOLERANCE`]. The
+//! 3. Voters are clustered by (input, output) within the rules' tolerance. The
 //!    heaviest cluster with at least two members wins; its numbers come from
 //!    its most trusted member. Two voters that disagree → the more trusted one.
 //!    Three or more that all disagree → the median by output price, so an
@@ -26,47 +26,11 @@
 //!    what each one said, so the UI can show corroboration and flag disputes
 //!    instead of hiding them.
 
+use super::rules::Rules;
 use super::{Price, normalize_key};
 use anyhow::Result;
 use rusqlite::Connection;
 use std::collections::HashMap;
-
-/// Two quotes agree when input **and** output are within this fraction of
-/// each other. Wide enough for rounding and the odd 5% reseller fee, narrow
-/// enough that regional (+10–20%), batch (−50%) and flex prices are dissent.
-pub const TOLERANCE: f64 = 0.06;
-
-/// Sources by trust: earlier wins ties and supplies the numbers of the winning
-/// cluster; the weight is the vote's strength. Weights discount feeds that
-/// are partly derived from others (llmpricing.dev republishes models.dev and
-/// OpenRouter) or known to mix price modes (LiteLLM). Unlisted sources rank
-/// last with weight 0.5.
-const TRUST: &[(&str, f64)] = &[
-    ("portkey", 1.0),
-    ("langfuse", 1.0),
-    ("llm-prices", 1.0),
-    ("openrouter", 1.0),
-    ("vercel", 1.0),
-    ("models.dev", 1.0),
-    ("helicone", 0.9),
-    ("litellm", 0.8),
-    ("llmpricing", 0.6),
-    ("seed", 0.0),
-];
-
-fn rank(source: &str) -> usize {
-    TRUST
-        .iter()
-        .position(|(s, _)| *s == source)
-        .unwrap_or(TRUST.len())
-}
-
-fn weight(source: &str) -> f64 {
-    TRUST
-        .iter()
-        .find(|(s, _)| *s == source)
-        .map_or(0.5, |(_, w)| *w)
-}
 
 /// Spelling-insensitive id: [`normalize_key`], then a dot between digits
 /// becomes a hyphen (`claude-opus-4.6` ≡ `claude-opus-4-6`,
@@ -137,12 +101,16 @@ fn usable(p: &Price) -> bool {
         && (p.input > 0.0 || p.output > 0.0)
 }
 
-fn near(a: f64, b: f64) -> bool {
-    a == b || (a - b).abs() <= TOLERANCE * a.max(b)
+/// Two quotes agree when input **and** output are within `tol` (a fraction)
+/// of each other — wide enough for rounding and the odd 5% reseller fee,
+/// narrow enough that regional (+10–20%), batch (−50%) and flex prices are
+/// dissent.
+fn near(a: f64, b: f64, tol: f64) -> bool {
+    a == b || (a - b).abs() <= tol * a.max(b)
 }
 
-fn close(a: &Price, b: &Price) -> bool {
-    near(a.input, b.input) && near(a.output, b.output)
+fn close(a: &Price, b: &Price, tol: f64) -> bool {
+    near(a.input, b.input, tol) && near(a.output, b.output, tol)
 }
 
 /// A source that lists a model under two spellings (`claude-opus-4-6` and
@@ -151,7 +119,7 @@ fn close(a: &Price, b: &Price) -> bool {
 /// the most *other* sources corroborate, the first (by id) on a tie.
 /// `candidates` are indices into `quotes`, ascending; the result keeps that
 /// order.
-fn one_vote_per_source(quotes: &[Quote], candidates: &[usize]) -> Vec<usize> {
+fn one_vote_per_source(quotes: &[Quote], candidates: &[usize], tol: f64) -> Vec<usize> {
     candidates
         .iter()
         .copied()
@@ -171,7 +139,7 @@ fn one_vote_per_source(quotes: &[Quote], candidates: &[usize]) -> Vec<usize> {
                     let other = quotes[o].source.as_str();
                     if other != src
                         && !seen.contains(&other)
-                        && close(&quotes[k].price, &quotes[o].price)
+                        && close(&quotes[k].price, &quotes[o].price, tol)
                     {
                         seen.push(other);
                     }
@@ -194,10 +162,15 @@ fn one_vote_per_source(quotes: &[Quote], candidates: &[usize]) -> Vec<usize> {
 /// Decide the price for one model. `quotes` must be ordered most trusted
 /// first (see [`Group::quotes`]).
 pub fn decide(quotes: &[Quote]) -> (Verdict, Vec<Stance>) {
+    decide_with(quotes, &Rules::bundled())
+}
+
+/// [`decide`] under explicit rules (tolerance, source weights).
+pub fn decide_with(quotes: &[Quote], rules: &Rules) -> (Verdict, Vec<Stance>) {
     let live = quotes.iter().any(|q| q.source != "seed");
     let votes = |q: &Quote| (q.source != "seed" || !live) && usable(&q.price);
     let candidates: Vec<usize> = (0..quotes.len()).filter(|&i| votes(&quotes[i])).collect();
-    let idx = one_vote_per_source(quotes, &candidates);
+    let idx = one_vote_per_source(quotes, &candidates, rules.tolerance);
 
     let stance_all = |f: &dyn Fn(usize) -> Stance| (0..quotes.len()).map(f).collect::<Vec<_>>();
 
@@ -231,13 +204,17 @@ pub fn decide(quotes: &[Quote]) -> (Verdict, Vec<Stance>) {
     for &i in &idx {
         match clusters
             .iter_mut()
-            .find(|c| close(&quotes[c[0]].price, &quotes[i].price))
+            .find(|c| close(&quotes[c[0]].price, &quotes[i].price, rules.tolerance))
         {
             Some(c) => c.push(i),
             None => clusters.push(vec![i]),
         }
     }
-    let power = |c: &Vec<usize>| c.iter().map(|&i| weight(&quotes[i].source)).sum::<f64>();
+    let power = |c: &Vec<usize>| {
+        c.iter()
+            .map(|&i| rules.weight(&quotes[i].source))
+            .sum::<f64>()
+    };
 
     let best = clusters
         .iter()
@@ -295,6 +272,12 @@ pub fn decide(quotes: &[Quote]) -> (Verdict, Vec<Stance>) {
         .tier_1h_cache_write
         .or_else(|| first(|p| p.tier_1h_cache_write));
     price.tier_batch = price.tier_batch.or_else(|| first(|p| p.tier_batch));
+    price.tier_above_200k_output = price
+        .tier_above_200k_output
+        .or_else(|| first(|p| p.tier_above_200k_output));
+    price.tier_above_200k_cache_read = price
+        .tier_above_200k_cache_read
+        .or_else(|| first(|p| p.tier_above_200k_cache_read));
 
     let stances = stance_all(&|i| {
         let q = &quotes[i];
@@ -305,7 +288,7 @@ pub fn decide(quotes: &[Quote]) -> (Verdict, Vec<Stance>) {
             Stance::Ignored
         } else if !usable(&q.price) {
             Stance::NoData
-        } else if close(&q.price, &price) {
+        } else if close(&q.price, &price, rules.tolerance) {
             Stance::Agrees
         } else {
             Stance::Dissents
@@ -326,10 +309,11 @@ pub fn decide(quotes: &[Quote]) -> (Verdict, Vec<Stance>) {
 
 /// Read every stored quote, group by canonical id and decide each group.
 /// Sorted by display id.
-pub fn groups(conn: &Connection) -> Result<Vec<Group>> {
+pub fn groups(conn: &Connection, rules: &Rules) -> Result<Vec<Group>> {
     let mut st = conn.prepare(
         "SELECT model_id, input, output, cache_read, cache_write,
-                tier_above_200k_input, tier_1h_cache_write, tier_batch, source
+                tier_above_200k_input, tier_1h_cache_write, tier_batch, source,
+                tier_above_200k_output, tier_above_200k_cache_read
          FROM prices",
     )?;
     let mut by_canon: HashMap<String, Vec<Quote>> = HashMap::new();
@@ -345,6 +329,8 @@ pub fn groups(conn: &Connection) -> Result<Vec<Group>> {
                 tier_above_200k_input: f(5)?,
                 tier_1h_cache_write: f(6)?,
                 tier_batch: f(7)?,
+                tier_above_200k_output: f(9)?,
+                tier_above_200k_cache_read: f(10)?,
             },
             source: r.get(8)?,
         })
@@ -363,11 +349,12 @@ pub fn groups(conn: &Connection) -> Result<Vec<Group>> {
             // Trust order; ties (a source under two spellings) by id, so the
             // outcome never depends on row order.
             quotes.sort_by(|a, b| {
-                rank(&a.source)
-                    .cmp(&rank(&b.source))
+                rules
+                    .rank(&a.source)
+                    .cmp(&rules.rank(&b.source))
                     .then_with(|| a.key.cmp(&b.key))
             });
-            let (verdict, stances) = decide(&quotes);
+            let (verdict, stances) = decide_with(&quotes, rules);
             let keys = display_order(&quotes);
             Group {
                 canon,
@@ -412,7 +399,8 @@ mod tests {
 
     /// `decide` wants trust order, exactly what `groups` provides.
     fn ordered(mut v: Vec<Quote>) -> Vec<Quote> {
-        v.sort_by_key(|q| rank(&q.source));
+        let rules = Rules::bundled();
+        v.sort_by_key(|q| rules.rank(&q.source));
         v
     }
 
@@ -656,7 +644,7 @@ mod tests {
         put("openrouter", "gemini-3.1-pro", 2.0, 12.0);
         put("vercel", "gemini-3.1-pro", 2.0, 12.0);
         put("seed", "gemini-3-1-pro", 0.0, 0.0);
-        let g = groups(c).unwrap();
+        let g = groups(c, &Rules::bundled()).unwrap();
         assert_eq!(g.len(), 3);
         let gem = g.iter().find(|g| g.canon == "gemini-3-1-pro").unwrap();
         assert_eq!(gem.keys[0], "gemini-3.1-pro");
@@ -683,7 +671,7 @@ mod tests {
         let conn =
             Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let t = std::time::Instant::now();
-        let g = groups(&conn).unwrap();
+        let g = groups(&conn, &Rules::bundled()).unwrap();
         eprintln!("groups(): {:?} for {} models", t.elapsed(), g.len());
         let (mut unanimous, mut majority, mut disputed, mut single, mut none) = (0, 0, 0, 0, 0);
         for x in &g {

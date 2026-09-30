@@ -5,19 +5,31 @@
 //! model's price is what most of them agree on (see [`consensus`]), so one
 //! feed's mistake cannot become a wrong bill. Never guess, never spread
 //! across a family — unpriced is flagged, counted 0, and routed to the
-//! overrides UI.
+//! overrides UI. The knobs (feeds, trust, peels, routing placeholders,
+//! aliases, long-context threshold) are data: see [`rules`].
 
 pub mod consensus;
 mod feeds;
+pub mod rules;
 mod seed;
 
 use crate::model::{CostSource, UsageEvent};
 use crate::store::{Store, now_ms};
 use anyhow::{Context, Result};
+use rules::Rules;
 #[cfg(test)]
 use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
+
+/// Bump when the pricing function itself changes in a way that alters
+/// already-booked costs; together with the rules fingerprint it decides
+/// whether `reprice_if_rules_changed` has work to do.
+const PRICING_LOGIC_VERSION: u32 = 2;
+/// app_state key: `<logic version>:<rules fingerprint>` of the last full repass.
+const APPLIED_KEY: &str = "pricing_applied";
+/// Long-context tier threshold used by [`compute`] (rules carry the live one).
+const DEFAULT_LONG_CONTEXT: u64 = 200_000;
 
 /// USD per **1M** tokens (models.dev convention; LiteLLM rows are converted
 /// from $/token at import).
@@ -32,11 +44,14 @@ pub struct Price {
     pub tier_above_200k_input: Option<f64>,
     pub tier_1h_cache_write: Option<f64>,
     pub tier_batch: Option<f64>,
+    /// Long-context output and cache-read tiers.
+    pub tier_above_200k_output: Option<f64>,
+    pub tier_above_200k_cache_read: Option<f64>,
 }
 
 #[derive(Debug)]
 pub enum Resolution {
-    /// (pricing_model, via) — via: override|exact|prefix|seed
+    /// (pricing_model, via) — via: override|alias|exact|prefix|seed
     Priced(String, &'static str, Price),
     Unpriced,
 }
@@ -56,22 +71,25 @@ pub struct PriceBook {
     consensus: std::sync::Arc<Consensus>,
     /// user overrides, keyed by the RAW model name (pre-normalization) too.
     overrides: HashMap<String, Price>,
+    rules: Rules,
 }
 
-/// `(ledger path, fingerprint of prices, consensus)` of the last load. The
-/// engine reloads the book on every scan tick (~every 30s); recomputing the
-/// vote over ~10k quotes each time cost ~15ms for a table that changes twice a
-/// day. In-memory databases are never cached (each is its own world).
-type CachedConsensus = (String, (i64, i64, f64), std::sync::Arc<Consensus>);
+/// `(ledger path, fingerprint of prices + rules, consensus)` of the last load.
+/// The engine reloads the book on every scan tick (~every 30s); recomputing
+/// the vote over ~10k quotes each time cost ~15ms for a table that changes
+/// twice a day. In-memory databases are never cached (each is its own world).
+type CacheKey = ((i64, i64, f64), String);
+type CachedConsensus = (String, CacheKey, std::sync::Arc<Consensus>);
 static CONSENSUS: std::sync::Mutex<Option<CachedConsensus>> = std::sync::Mutex::new(None);
 
-fn shared_consensus(store: &Store) -> Result<std::sync::Arc<Consensus>> {
+fn shared_consensus(store: &Store, rules: &Rules) -> Result<std::sync::Arc<Consensus>> {
     let path = store.conn().path().unwrap_or_default().to_string();
-    let fingerprint: (i64, i64, f64) = store.conn().query_row(
+    let table: (i64, i64, f64) = store.conn().query_row(
         "SELECT COUNT(*), COALESCE(MAX(fetched_at), 0), COALESCE(SUM(input + output), 0) FROM prices",
         [],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
+    let fingerprint: CacheKey = (table, rules.fingerprint());
     if !path.is_empty()
         && let Some((p, f, c)) = CONSENSUS.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
         && *p == path
@@ -81,7 +99,7 @@ fn shared_consensus(store: &Store) -> Result<std::sync::Arc<Consensus>> {
     }
     let mut map = HashMap::new();
     let mut by_canon = HashMap::new();
-    for g in consensus::groups(store.conn())? {
+    for g in consensus::groups(store.conn(), rules)? {
         let price = g.verdict.price;
         for k in g.keys {
             map.insert(k, price);
@@ -103,15 +121,17 @@ impl PriceBook {
                 by_canon: HashMap::new(),
             }),
             overrides: HashMap::new(),
+            rules: Rules::bundled(),
         }
     }
 
     pub fn load(store: &Store) -> Result<Self> {
         seed::ensure_seeded(store)?;
+        let rules = rules::current(store);
         // One vote per source per model; see `consensus` for how they are
         // weighed. (The bundled seed only speaks for models no live source
         // knows.)
-        let consensus = shared_consensus(store)?;
+        let consensus = shared_consensus(store, &rules)?;
 
         let mut overrides = HashMap::new();
         let mut st = store.conn().prepare(
@@ -136,42 +156,49 @@ impl PriceBook {
         Ok(Self {
             consensus,
             overrides,
+            rules,
         })
+    }
+
+    pub fn rules(&self) -> &Rules {
+        &self.rules
+    }
+
+    /// The one pricing function: `(pricing_model, cost_usd, cost_source)` for
+    /// an event as if it carried no cost yet. Ingest (`apply`) and every
+    /// repricing path go through it, so they cannot diverge. Estimated iff the
+    /// match needed a peel (`prefix`).
+    pub fn price(&self, ev: &UsageEvent) -> (Option<String>, f64, CostSource) {
+        // 1) Response-side real model wins (spec §7.3); fall back to the
+        //    client-requested alias only when no response model exists.
+        let Some(raw) = ev.model.as_deref().or(ev.request_model.as_deref()) else {
+            return (None, 0.0, CostSource::Unpriced);
+        };
+        match self.resolve(raw, ev.request_model.as_deref(), ev.provider_id.as_deref()) {
+            Resolution::Priced(key, via, price) => (
+                Some(key),
+                compute_at(ev, &price, self.rules.long_context_threshold),
+                if via == "prefix" {
+                    CostSource::Estimated
+                } else {
+                    CostSource::Computed
+                },
+            ),
+            Resolution::Unpriced => (None, 0.0, CostSource::Unpriced),
+        }
     }
 
     /// Fill `pricing_model`/`cost_usd`/`cost_source` on an event. Adapter-set
     /// costs (official/provider_reported) are never overwritten — only the
     /// pricing_model key is resolved for them.
     pub fn apply(&self, ev: &mut UsageEvent) {
-        // 1) Response-side real model wins (spec §7.3); fall back to the
-        //    client-requested alias only when no response model exists.
-        let raw = ev.model.clone().or_else(|| ev.request_model.clone());
-        let Some(raw) = raw else {
-            if ev.cost_usd.is_none() && ev.cost_source.is_none() {
-                ev.cost_usd = Some(0.0);
-                ev.cost_source = Some(CostSource::Unpriced);
-            }
-            return;
-        };
-        match self.resolve(&raw, ev.request_model.as_deref(), ev.provider_id.as_deref()) {
-            Resolution::Priced(key, via, price) => {
-                ev.pricing_model = Some(key);
-                if ev.cost_usd.is_none() {
-                    ev.cost_usd = Some(compute(ev, &price));
-                    ev.cost_source =
-                        Some(if via == "prefix" || ev.model.as_deref() == Some("auto") {
-                            CostSource::Estimated
-                        } else {
-                            CostSource::Computed
-                        });
-                }
-            }
-            Resolution::Unpriced => {
-                if ev.cost_usd.is_none() {
-                    ev.cost_usd = Some(0.0);
-                    ev.cost_source = Some(CostSource::Unpriced);
-                }
-            }
+        let (pricing_model, cost, source) = self.price(ev);
+        if pricing_model.is_some() {
+            ev.pricing_model = pricing_model;
+        }
+        if ev.cost_usd.is_none() {
+            ev.cost_usd = Some(cost);
+            ev.cost_source = Some(source);
         }
     }
 
@@ -190,27 +217,58 @@ impl PriceBook {
             }
         }
 
-        // BFS candidate queue (spec §7.2): progressive peels of vendor noise.
-        for cand in candidates(raw) {
-            if let Some(p) = self.lookup(&cand, provider) {
-                let via = if cand == normalize_key(raw) {
-                    "exact"
-                } else {
-                    "prefix"
-                };
-                return Resolution::Priced(cand, via, p);
+        // Rule aliases: an explicit "this name is that model".
+        for name in std::iter::once(raw).chain(request) {
+            if let Some(target) = self.alias_target(name)
+                && let Some(p) = self.lookup(&target, provider)
+            {
+                return Resolution::Priced(target, "alias", p);
+            }
+        }
+
+        // A router placeholder names no model: price the request alias or
+        // nothing — never a namesake row in some feed.
+        if !self.is_routing(raw) {
+            // BFS candidate queue (spec §7.2): progressive peels of vendor noise.
+            let primary = primary_keys(raw);
+            for cand in candidates_with(raw, &self.rules) {
+                if let Some(p) = self.lookup(&cand, provider) {
+                    let via = if primary.contains(&cand) {
+                        "exact"
+                    } else {
+                        "prefix"
+                    };
+                    return Resolution::Priced(cand, via, p);
+                }
             }
         }
         // Same for the request alias (e.g. `gpt-reserve` → real model may be
         // absent; alias itself can still resolve, e.g. `sonnet` family).
-        if let Some(req) = request.filter(|r| *r != raw) {
-            for cand in candidates(req) {
+        if let Some(req) = request.filter(|r| *r != raw && !self.is_routing(r)) {
+            for cand in candidates_with(req, &self.rules) {
                 if let Some(p) = self.lookup(&cand, provider) {
                     return Resolution::Priced(cand, "prefix", p);
                 }
             }
         }
         Resolution::Unpriced
+    }
+
+    fn is_routing(&self, model: &str) -> bool {
+        let key = normalize_key(model);
+        self.rules
+            .routing_models
+            .iter()
+            .any(|r| normalize_key(r) == key)
+    }
+
+    fn alias_target(&self, model: &str) -> Option<String> {
+        let key = normalize_key(model);
+        self.rules
+            .aliases
+            .iter()
+            .find(|(from, _)| normalize_key(from) == key)
+            .map(|(_, to)| normalize_key(to))
     }
 
     fn lookup(&self, cand: &str, _provider: Option<&str>) -> Option<Price> {
@@ -224,13 +282,6 @@ impl PriceBook {
 
 // ── Live price refresh (network) ──────────────────────────────────────────
 
-const MODELS_DEV_URL: &str = "https://models.dev/api.json";
-const LITELLM_URL: &str =
-    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
-/// LLM Pricing (llmpricing.dev): static JSON, no key, CC BY 4.0.
-/// Models carry `reference` (official list) and `cheapest` (best host) quotes
-/// in $/1M — we book `reference`, falling back to `cheapest` when absent.
-const LLMPRICING_URL: &str = "https://llmpricing.dev/api/models.json";
 /// Auto-refresh cadence for the UI path.
 pub const PRICE_TTL_SECS: i64 = 12 * 3600;
 /// app_state key recording the last refresh ATTEMPT (success or failure) so a
@@ -239,11 +290,15 @@ const LAST_ATTEMPT_KEY: &str = "prices_last_attempt";
 
 pub struct RefreshReport {
     /// Rows written per source tag (a source can take several downloads).
-    pub sources: Vec<(&'static str, usize)>,
+    pub sources: Vec<(String, usize)>,
     /// One line per download that failed (network, or a malformed document).
     pub failed: Vec<String>,
-    /// Formerly-unpriced events that gained a price after the refresh.
+    /// Events whose booked price changed after the refresh (formerly
+    /// unpriced ones that gained a price, plus a rules repass).
     pub repriced: u64,
+    /// The pricing rules or logic changed and every book-priced row was
+    /// re-priced (rollups rebuilt) — the UI must rebuild its aggregates.
+    pub rules_repass: bool,
 }
 
 impl RefreshReport {
@@ -278,9 +333,9 @@ pub fn prices_stale(store: &Store) -> Result<bool> {
     Ok(last.is_none_or(|t| (now_ms() - t) / 1000 > PRICE_TTL_SECS))
 }
 
-fn http_get(url: &str) -> Result<String> {
+fn http_get_secs(url: &str, secs: u64) -> Result<String> {
     let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(30)))
+        .timeout_global(Some(Duration::from_secs(secs)))
         .build()
         .new_agent();
     let mut resp = agent
@@ -291,91 +346,33 @@ fn http_get(url: &str) -> Result<String> {
     Ok(resp.body_mut().read_to_string()?)
 }
 
-type Import = Box<dyn Fn(&rusqlite::Connection, &str, i64) -> Result<usize>>;
-
-struct Feed {
-    url: String,
-    tag: &'static str,
-    import: Import,
+fn http_get(url: &str) -> Result<String> {
+    http_get_secs(url, 30)
 }
 
-const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/models";
-const VERCEL_URL: &str = "https://ai-gateway.vercel.sh/v1/models";
-const HELICONE_URL: &str = "https://www.helicone.ai/api/llm-costs";
-const LANGFUSE_URL: &str = "https://raw.githubusercontent.com/langfuse/langfuse/main/worker/src/constants/default-model-prices.json";
-const LLM_PRICES_URL: &str = "https://www.llm-prices.com/current-v1.json";
-const PORTKEY_BASE: &str = "https://raw.githubusercontent.com/Portkey-AI/models/main/pricing";
-/// Portkey publishes one file per *host*; these are the model makers' own
-/// (first-party list prices, MIT-licensed). `qwen`/`qwq` narrows DashScope,
-/// which also resells Kimi and GLM at its own prices. Z.ai's international
-/// file is used, not the CNY-list `zhipu` one, so two files never fight over
-/// one id.
-const PORTKEY_FILES: &[(&str, &[&str])] = &[
-    ("anthropic", &[]),
-    ("openai", &[]),
-    ("google", &[]),
-    ("x-ai", &[]),
-    ("mistral-ai", &[]),
-    ("deepseek", &[]),
-    ("moonshot", &[]),
-    ("z-ai", &[]),
-    ("minimax", &[]),
-    ("cohere", &[]),
-    ("perplexity-ai", &[]),
-    ("dashscope", &["qwen", "qwq"]),
-];
+type Import = Box<dyn Fn(&rusqlite::Connection, &str, i64) -> Result<usize>>;
 
-fn feeds() -> Vec<Feed> {
-    let mut v = vec![
-        Feed {
-            url: MODELS_DEV_URL.into(),
-            tag: "models.dev",
-            import: Box::new(feeds::import_models_dev),
-        },
-        Feed {
-            url: LITELLM_URL.into(),
-            tag: "litellm",
-            import: Box::new(feeds::import_litellm),
-        },
-        Feed {
-            url: LLMPRICING_URL.into(),
-            tag: "llmpricing",
-            import: Box::new(feeds::import_llmpricing),
-        },
-        Feed {
-            url: OPENROUTER_URL.into(),
-            tag: "openrouter",
-            import: Box::new(feeds::import_openrouter),
-        },
-        Feed {
-            url: VERCEL_URL.into(),
-            tag: "vercel",
-            import: Box::new(feeds::import_vercel),
-        },
-        Feed {
-            url: HELICONE_URL.into(),
-            tag: "helicone",
-            import: Box::new(feeds::import_helicone),
-        },
-        Feed {
-            url: LANGFUSE_URL.into(),
-            tag: "langfuse",
-            import: Box::new(feeds::import_langfuse),
-        },
-        Feed {
-            url: LLM_PRICES_URL.into(),
-            tag: "llm-prices",
-            import: Box::new(feeds::import_llm_prices),
-        },
-    ];
-    for (provider, prefixes) in PORTKEY_FILES {
-        v.push(Feed {
-            url: format!("{PORTKEY_BASE}/{provider}.json"),
-            tag: "portkey",
-            import: Box::new(move |c, body, now| feeds::import_portkey(c, body, now, prefixes)),
-        });
-    }
-    v
+/// The importer for a feed's `format`; `None` for a format this build does not
+/// know (a newer rules document may list one).
+fn importer(spec: &rules::FeedSpec) -> Option<Import> {
+    Some(match spec.format.as_str() {
+        "models_dev" => Box::new(feeds::import_models_dev),
+        "litellm" => Box::new(feeds::import_litellm),
+        "llmpricing" => Box::new(feeds::import_llmpricing),
+        "openrouter" => Box::new(feeds::import_openrouter),
+        "vercel" => Box::new(feeds::import_vercel),
+        "helicone" => Box::new(feeds::import_helicone),
+        "langfuse" => Box::new(feeds::import_langfuse),
+        "llm_prices" => Box::new(feeds::import_llm_prices),
+        "portkey" => {
+            let prefixes = spec.prefixes.clone();
+            Box::new(move |c, body, now| {
+                let refs: Vec<&str> = prefixes.iter().map(String::as_str).collect();
+                feeds::import_portkey(c, body, now, &refs)
+            })
+        }
+        _ => return None,
+    })
 }
 
 /// Give up on the rest of a refresh after this many downloads in a row failed
@@ -383,12 +380,14 @@ fn feeds() -> Vec<Feed> {
 /// full timeout.
 const MAX_CONSECUTIVE_FETCH_FAILURES: usize = 4;
 
-/// Fetch every price feed, upsert into `prices`, then reprice any event still
-/// marked `unpriced` so newly-covered models gain estimates. Feeds are
-/// independent — one outage or a malformed document costs that feed only, and
-/// the book keeps that source's previous rows. All failing → Err, book
-/// untouched (seed fallback). `prices_last_attempt` is stamped up front so a
-/// persistent outage throttles to `PRICE_TTL_SECS` rather than every scan.
+/// Fetch the pricing rules and every price feed they list, upsert into
+/// `prices`, then reprice events: still-`unpriced` ones (a grown book may now
+/// cover them) and, when the rules or pricing logic changed, every
+/// book-priced row. Feeds are independent — one outage or a malformed
+/// document costs that feed only, and the book keeps that source's previous
+/// rows. All feeds failing and no rules repass → Err, book untouched (seed
+/// fallback). `prices_last_attempt` is stamped up front so a persistent
+/// outage throttles to `PRICE_TTL_SECS` rather than every scan.
 pub fn refresh(store: &Store) -> Result<RefreshReport> {
     let now = now_ms();
     store.set_state(LAST_ATTEMPT_KEY, &now.to_string())?;
@@ -396,14 +395,27 @@ pub fn refresh(store: &Store) -> Result<RefreshReport> {
         sources: Vec::new(),
         failed: Vec::new(),
         repriced: 0,
+        rules_repass: false,
     };
+    // Rules first: they say which feeds to read. A bad or unreachable
+    // document keeps the previous rules.
+    if let Some(url) = rules::remote_url()
+        && let Err(e) = http_get_secs(&url, 10).and_then(|raw| rules::store_remote(store, &raw))
+    {
+        report.failed.push(format!("rules: {e:#}"));
+    }
+    let rules = rules::current(store);
     // Feeds are handled strictly one at a time — download, parse into the few
     // typed fields we need, write, drop — so the transient heap is one
     // document's worth instead of every full JSON DOM at once (was a 50–80MB
     // spike at every launch).
     let mut succeeded = 0;
     let mut fetch_failures = 0;
-    for feed in feeds() {
+    for feed in &rules.feeds {
+        let Some(import) = importer(feed) else {
+            report.failed.push(format!("{} unknown format", feed.tag));
+            continue;
+        };
         let body = match http_get(&feed.url) {
             Ok(b) => {
                 fetch_failures = 0;
@@ -423,7 +435,7 @@ pub fn refresh(store: &Store) -> Result<RefreshReport> {
         // parsed, and the write lock is never held across a download.
         let written = (|| -> Result<usize> {
             let tx = store.conn().unchecked_transaction()?;
-            let n = (feed.import)(&tx, &body, now)?;
+            let n = import(&tx, &body, now)?;
             tx.commit()?;
             Ok(n)
         })();
@@ -433,20 +445,26 @@ pub fn refresh(store: &Store) -> Result<RefreshReport> {
                 succeeded += 1;
                 match report.sources.iter_mut().find(|(t, _)| *t == feed.tag) {
                     Some((_, total)) => *total += n,
-                    None => report.sources.push((feed.tag, n)),
+                    None => report.sources.push((feed.tag.clone(), n)),
                 }
             }
             Err(e) => report.failed.push(format!("{} parse: {e:#}", feed.tag)),
         }
     }
-    if succeeded == 0 {
-        anyhow::bail!("all price sources failed: {}", report.failed.join("; "));
-    }
 
     // Re-price events that were unpriced at ingest — a grown price book may
     // now cover them.
-    let book = PriceBook::load(store)?;
-    report.repriced = reprice_unpriced(store, &book)?;
+    if succeeded > 0 {
+        let book = PriceBook::load(store)?;
+        report.repriced += reprice_unpriced(store, &book)?;
+    }
+    if let Some(n) = reprice_if_rules_changed(store)? {
+        report.repriced += n;
+        report.rules_repass = true;
+    }
+    if succeeded == 0 && !report.rules_repass {
+        anyhow::bail!("all price sources failed: {}", report.failed.join("; "));
+    }
     Ok(report)
 }
 
@@ -485,16 +503,19 @@ fn upsert_llmpricing(conn: &rusqlite::Connection, lp: &Value, now: i64) -> Resul
     Ok(n)
 }
 
-/// Re-resolve `unpriced` events against the current book. Bounded by the
-/// unpriced count; one transaction.
-pub fn reprice_unpriced(store: &Store, book: &PriceBook) -> Result<u64> {
-    let mut st = store.conn().prepare(
+/// Re-price the rows selected by `filter` (a SQL predicate on `usage_events`)
+/// with the book's one pricing function, writing only rows whose booked
+/// price actually changes. Returns how many changed. One transaction.
+fn reprice_rows(store: &Store, book: &PriceBook, filter: &str) -> Result<u64> {
+    let mut st = store.conn().prepare(&format!(
         "SELECT rowid, model, request_model, provider_id,
                 input_tokens, output_tokens, reasoning_tokens,
-                cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens
-         FROM usage_events WHERE cost_source='unpriced'",
-    )?;
-    let rows: Vec<(i64, UsageEvent)> = st
+                cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens,
+                cost_usd, cost_source, pricing_model
+         FROM usage_events WHERE {filter}"
+    ))?;
+    type Old = (Option<f64>, Option<String>, Option<String>);
+    let rows: Vec<(i64, UsageEvent, Old)> = st
         .query_map([], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
@@ -510,6 +531,7 @@ pub fn reprice_unpriced(store: &Store, book: &PriceBook) -> Result<u64> {
                     cache_write_1h_tokens: r.get::<_, i64>(9)? as u64,
                     ..Default::default()
                 },
+                (r.get(10)?, r.get(11)?, r.get(12)?),
             ))
         })?
         .collect::<std::result::Result<_, _>>()?;
@@ -520,28 +542,70 @@ pub fn reprice_unpriced(store: &Store, book: &PriceBook) -> Result<u64> {
         let mut up = tx.prepare(
             "UPDATE usage_events SET cost_usd=?1, cost_source=?2, pricing_model=?3 WHERE rowid=?4",
         )?;
-        for (rowid, ev) in &rows {
-            if let Resolution::Priced(key, via, p) = book.resolve(
-                ev.model.as_deref().unwrap_or(""),
-                ev.request_model.as_deref(),
-                ev.provider_id.as_deref(),
-            ) {
-                up.execute(rusqlite::params![
-                    compute(ev, &p),
-                    if via == "prefix" || ev.model.as_deref() == Some("auto") {
-                        "estimated"
-                    } else {
-                        "computed"
-                    },
-                    key,
-                    rowid
-                ])?;
+        for (rowid, ev, (old_cost, old_src, old_pm)) in &rows {
+            let (pm, cost, src) = book.price(ev);
+            let same = old_src.as_deref() == Some(src.as_str())
+                && *old_pm == pm
+                && old_cost.is_some_and(|c| (c - cost).abs() < 5e-10);
+            if !same {
+                up.execute(rusqlite::params![cost, src.as_str(), pm, rowid])?;
                 n += 1;
             }
         }
     }
     tx.commit()?;
     Ok(n)
+}
+
+/// Repricing only touches rows that carry tokens: metadata-tier adapters
+/// (Cursor/Qoder) book zero-token rows as `unpriced` on purpose, and a
+/// resolvable model name must not turn them into a "computed $0".
+const HAS_TOKENS: &str = "(input_tokens + output_tokens + cache_read_tokens
+     + cache_write_5m_tokens + cache_write_1h_tokens) > 0";
+
+/// Derived data: a failed rebuild is logged, never fatal (the engine does the
+/// same), so it cannot block the repricing it follows.
+fn rebuild_rollups_best_effort(store: &Store) {
+    if let Err(e) = store.rebuild_rollups(&crate::viewmodel::local_utc_offset()) {
+        tracing::warn!("rollup rebuild failed: {e}");
+    }
+}
+
+/// Re-resolve `unpriced` events against the current book. Bounded by the
+/// unpriced count; one transaction. Rollups are rebuilt when anything moved
+/// (the cube reads events, but the rollup table must not go stale).
+pub fn reprice_unpriced(store: &Store, book: &PriceBook) -> Result<u64> {
+    let n = reprice_rows(
+        store,
+        book,
+        &format!("cost_source='unpriced' AND {HAS_TOKENS}"),
+    )?;
+    if n > 0 {
+        rebuild_rollups_best_effort(store);
+    }
+    Ok(n)
+}
+
+/// One full repass when the pricing rules or the pricing logic differ from
+/// what the ledger was last priced under: every book-priced row
+/// (computed/estimated/unpriced) is re-priced by the shared function — a
+/// priced row may become unpriced. Adapter-reported costs are never touched.
+/// `None` = nothing to do; `Some(n)` = `n` rows changed.
+pub fn reprice_if_rules_changed(store: &Store) -> Result<Option<u64>> {
+    let rules = rules::current(store);
+    let marker = format!("{PRICING_LOGIC_VERSION}:{}", rules.fingerprint());
+    if store.get_state(APPLIED_KEY)?.as_deref() == Some(marker.as_str()) {
+        return Ok(None);
+    }
+    let book = PriceBook::load(store)?;
+    let n = reprice_rows(
+        store,
+        &book,
+        &format!("cost_source IN ('computed','estimated','unpriced') AND {HAS_TOKENS}"),
+    )?;
+    rebuild_rollups_best_effort(store);
+    store.set_state(APPLIED_KEY, &marker)?;
+    Ok(Some(n))
 }
 
 /// Stage 1 normalization (spec §7.2.1): last `/` segment, drop `:` suffix,
@@ -553,9 +617,34 @@ pub fn normalize_key(raw: &str) -> String {
     s.strip_suffix("[1m]").map_or(s.clone(), |s| s.to_string())
 }
 
+/// The keys a raw id is looked up under before any peeling: its normalized
+/// head, plus — for `provider:model` shapes such as `custom-local:glm-5.3` —
+/// the model after the first `:`. A tail that does not look like a model id
+/// (`:free`, `:0`, `:70b-instruct`) is a tag, not a name, and adds nothing.
+/// (`normalize_key` itself stays head-only: it also keys feed imports.)
+fn primary_keys(raw: &str) -> Vec<String> {
+    let mut keys = vec![normalize_key(raw)];
+    let tail = raw.rsplit_once('/').map_or(raw, |(_, t)| t);
+    if let Some((_, after)) = tail.split_once(':')
+        && after.starts_with(|c: char| c.is_ascii_alphabetic())
+        && after.contains('-')
+    {
+        let k = normalize_key(after);
+        if !k.is_empty() && !keys.contains(&k) {
+            keys.push(k);
+        }
+    }
+    keys
+}
+
+/// [`candidates_with`] under the bundled rules.
+pub fn candidates(raw: &str) -> Vec<String> {
+    candidates_with(raw, &Rules::bundled())
+}
+
 /// Peel prefixes/suffixes progressively (spec §7.2.2). Yields most-specific
 /// first; exact-match phase covers all of these before prefix matching.
-pub fn candidates(raw: &str) -> Vec<String> {
+pub fn candidates_with(raw: &str, rules: &Rules) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let push = |s: String, out: &mut Vec<String>, seen: &mut std::collections::HashSet<String>| {
@@ -563,42 +652,44 @@ pub fn candidates(raw: &str) -> Vec<String> {
             out.push(s);
         }
     };
-    let base = normalize_key(raw);
-    push(base.clone(), &mut out, &mut seen);
+    let seeds = primary_keys(raw);
+    for s in &seeds {
+        push(s.clone(), &mut out, &mut seen);
+    }
 
-    let mut queue = std::collections::VecDeque::from([base]);
+    let mut queue = std::collections::VecDeque::from(seeds);
     while let Some(c) = queue.pop_front() {
+        let mut peel = |rest: &str, out: &mut Vec<String>| {
+            push(rest.to_string(), out, &mut seen);
+            queue.push_back(rest.to_string());
+        };
         // vendor prefixes: openai./anthropic./moonshot./bedrock./global.
-        for p in ["openai.", "anthropic.", "moonshot.", "bedrock.", "global."] {
-            if let Some(rest) = c.strip_prefix(p) {
-                push(rest.to_string(), &mut out, &mut seen);
-                queue.push_back(rest.to_string());
+        for p in &rules.strip_prefixes {
+            if let Some(rest) = c.strip_prefix(p.as_str()) {
+                peel(rest, &mut out);
             }
         }
         // `rfind("claude-")` — bedrock-style `us.anthropic.claude-...` tails.
-        if let Some(i) = c.rfind("claude-").filter(|&i| i > 0) {
-            let rest = c[i..].to_string();
-            push(rest.clone(), &mut out, &mut seen);
-            queue.push_back(rest);
+        for m in &rules.anchor_markers {
+            if let Some(i) = c.rfind(m.as_str()).filter(|&i| i > 0) {
+                peel(&c[i..], &mut out);
+            }
         }
         // `-v<digits>` suffix.
         if let Some(stripped) = strip_num_suffix(&c, "-v") {
-            push(stripped.clone(), &mut out, &mut seen);
-            queue.push_back(stripped);
+            peel(&stripped, &mut out);
         }
-        // `-YYYYMMDD` date suffix.
+        // `-<digits>` date suffix (YYYYMMDD, YYMMDD, MMDD…).
         if let Some((head, date)) = c.rsplit_once('-')
-            && date.len() == 8
+            && rules.date_suffix_lengths.contains(&date.len())
             && date.bytes().all(|b| b.is_ascii_digit())
         {
-            push(head.to_string(), &mut out, &mut seen);
-            queue.push_back(head.to_string());
+            peel(head, &mut out);
         }
-        // reasoning-effort suffixes.
-        for suf in ["-minimal", "-low", "-medium", "-high", "-xhigh"] {
-            if let Some(head) = c.strip_suffix(suf) {
-                push(head.to_string(), &mut out, &mut seen);
-                queue.push_back(head.to_string());
+        // reasoning-effort / vendor suffixes.
+        for suf in &rules.strip_suffixes {
+            if let Some(head) = c.strip_suffix(suf.as_str()) {
+                peel(head, &mut out);
             }
         }
     }
@@ -610,15 +701,26 @@ fn strip_num_suffix(c: &str, marker: &str) -> Option<String> {
     (!tail.is_empty() && tail.bytes().all(|b| b.is_ascii_digit())).then(|| head.to_string())
 }
 
-/// USD for one event (spec §7.4): 4 components; LiteLLM tiers trigger on real
-/// context size; missing columns fall back to the fixed multipliers
-/// (cache_read 0.1×input, 5m write 1.25×, 1h write 2×).
+/// USD for one event (spec §7.4) at the default long-context threshold.
 pub fn compute(ev: &UsageEvent, p: &Price) -> f64 {
-    let context = ev.input_tokens + ev.cache_read_tokens + ev.cache_write_total();
-    let in_price = if context > 200_000 {
+    compute_at(ev, p, DEFAULT_LONG_CONTEXT)
+}
+
+/// USD for one event (spec §7.4): 4 components; LiteLLM tiers trigger on real
+/// context size above `threshold` (input, output and cache-read each use
+/// their tier, else the base price); missing columns fall back to the fixed
+/// multipliers (cache_read 0.1×input, 5m write 1.25×, 1h write 2×).
+pub fn compute_at(ev: &UsageEvent, p: &Price, threshold: u64) -> f64 {
+    let long = ev.input_tokens + ev.cache_read_tokens + ev.cache_write_total() > threshold;
+    let in_price = if long {
         p.tier_above_200k_input.unwrap_or(p.input)
     } else {
         p.input
+    };
+    let out_price = if long {
+        p.tier_above_200k_output.unwrap_or(p.output)
+    } else {
+        p.output
     };
     let cw_1h = p.tier_1h_cache_write.unwrap_or_else(|| {
         if p.cache_write > 0.0 {
@@ -632,14 +734,19 @@ pub fn compute(ev: &UsageEvent, p: &Price) -> f64 {
     } else {
         p.input * 1.25
     };
-    let cr = if p.cache_read > 0.0 {
+    let cr_base = if p.cache_read > 0.0 {
         p.cache_read
     } else {
         p.input * 0.1
     };
+    let cr = if long {
+        p.tier_above_200k_cache_read.unwrap_or(cr_base)
+    } else {
+        cr_base
+    };
 
     let usd = (ev.input_tokens as f64 * in_price
-        + ev.output_tokens as f64 * p.output
+        + ev.output_tokens as f64 * out_price
         + ev.cache_read_tokens as f64 * cr
         + ev.cache_write_5m_tokens as f64 * cw_5m
         + ev.cache_write_1h_tokens as f64 * cw_1h)
@@ -945,6 +1052,320 @@ mod tests {
         // The dispute filter composes with the search.
         assert_eq!(names("", true), ["gpt-5"]);
         assert!(names("opus", true).is_empty());
+    }
+
+    /// Two agreeing sources per model, so the vote is unambiguous.
+    fn put_model(s: &Store, model: &str, input: f64, output: f64) {
+        put_price(s, "models.dev", model, input, output);
+        put_price(s, "openrouter", model, input, output);
+    }
+
+    fn resolved(book: &PriceBook, raw: &str, req: Option<&str>) -> Option<(String, &'static str)> {
+        match book.resolve(raw, req, None) {
+            Resolution::Priced(k, via, _) => Some((k, via)),
+            Resolution::Unpriced => None,
+        }
+    }
+
+    fn sample_book() -> PriceBook {
+        let s = Store::open_memory().unwrap();
+        for (m, i, o) in [
+            ("deepseek-v4-pro", 1.0, 2.0),
+            ("glm-5.3", 3.0, 4.0),
+            ("deepseek-v3-2", 5.0, 6.0),
+            ("x-model", 7.0, 8.0),
+            ("claude-opus-5", 5.0, 25.0),
+            ("free", 9.0, 9.0),
+            ("70b-instruct", 9.5, 9.5),
+            ("auto", 1.5, 1.5),
+        ] {
+            put_model(&s, m, i, o);
+        }
+        PriceBook::load(&s).unwrap()
+    }
+
+    #[test]
+    fn six_digit_date_and_vendor_suffix_are_peeled() {
+        let b = sample_book();
+        assert_eq!(
+            resolved(&b, "deepseek-v4-pro-202606", None),
+            Some(("deepseek-v4-pro".into(), "prefix"))
+        );
+        assert_eq!(
+            resolved(&b, "deepseek-v3-2-volc", None),
+            Some(("deepseek-v3-2".into(), "prefix"))
+        );
+    }
+
+    #[test]
+    fn provider_colon_model_uses_the_model_after_the_colon() {
+        let b = sample_book();
+        assert_eq!(
+            resolved(&b, "custom-local:glm-5.3", None),
+            Some(("glm-5.3".into(), "exact"))
+        );
+        assert_eq!(
+            primary_keys("custom-local:deepseek-v4-flash"),
+            ["custom-local", "deepseek-v4-flash"]
+        );
+        // A tag is not a model: `:free`, `:0`, `:70b-instruct` add nothing.
+        assert_eq!(
+            primary_keys("anthropic/claude-opus-5:free"),
+            ["claude-opus-5"]
+        );
+        assert_eq!(primary_keys("llama3.1:70b-instruct"), ["llama3.1"]);
+        assert_eq!(primary_keys("bedrock/us.anthropic.claude-x-v1:0").len(), 1);
+        assert!(!candidates("anthropic/claude-opus-5:free").contains(&"free".to_string()));
+        assert!(!candidates("llama3.1:70b-instruct").contains(&"70b-instruct".to_string()));
+        assert_eq!(
+            resolved(&b, "anthropic/claude-opus-5:free", None),
+            Some(("claude-opus-5".into(), "exact"))
+        );
+        assert_eq!(resolved(&b, "llama3.1:70b-instruct", None), None);
+    }
+
+    #[test]
+    fn four_digit_peel_only_when_the_exact_id_is_absent() {
+        let s = Store::open_memory().unwrap();
+        put_model(&s, "x-model", 1.0, 2.0);
+        let b = PriceBook::load(&s).unwrap();
+        assert_eq!(
+            resolved(&b, "x-model-0423", None),
+            Some(("x-model".into(), "prefix"))
+        );
+        put_model(&s, "x-model-0423", 3.0, 4.0);
+        let b = PriceBook::load(&s).unwrap();
+        assert_eq!(
+            resolved(&b, "x-model-0423", None),
+            Some(("x-model-0423".into(), "exact"))
+        );
+    }
+
+    #[test]
+    fn routing_placeholder_is_never_priced_by_a_namesake_row() {
+        let b = sample_book(); // two sources price "auto"
+        assert_eq!(resolved(&b, "auto", None), None);
+        assert_eq!(resolved(&b, "Auto", None), None);
+        assert_eq!(
+            resolved(&b, "auto", Some("claude-opus-5")),
+            Some(("claude-opus-5".into(), "prefix"))
+        );
+        assert_eq!(resolved(&b, "auto", Some("auto")), None);
+    }
+
+    #[test]
+    fn rule_aliases_map_a_name_to_a_book_key() {
+        let mut b = sample_book();
+        assert_eq!(resolved(&b, "my-local-glm", None), None);
+        b.rules
+            .aliases
+            .insert("My-Local-GLM".into(), "glm-5.3".into());
+        assert_eq!(
+            resolved(&b, "my-local-glm", None),
+            Some(("glm-5.3".into(), "alias"))
+        );
+        assert_eq!(
+            resolved(&b, "something", Some("my-local-glm")),
+            Some(("glm-5.3".into(), "alias"))
+        );
+        // Alias-priced rows are computed, not estimated.
+        let ev = UsageEvent {
+            model: Some("my-local-glm".into()),
+            input_tokens: 1_000_000,
+            ..Default::default()
+        };
+        let (pm, cost, src) = b.price(&ev);
+        assert_eq!(
+            (pm.as_deref(), src),
+            (Some("glm-5.3"), CostSource::Computed)
+        );
+        assert!((cost - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn price_marks_only_peeled_matches_as_estimated() {
+        let b = sample_book();
+        let mk = |m: &str| UsageEvent {
+            model: Some(m.into()),
+            input_tokens: 1_000_000,
+            ..Default::default()
+        };
+        assert_eq!(b.price(&mk("glm-5.3")).2, CostSource::Computed);
+        assert_eq!(
+            b.price(&mk("deepseek-v4-pro-202606")).2,
+            CostSource::Estimated
+        );
+        assert_eq!(b.price(&mk("auto")).2, CostSource::Unpriced);
+        assert_eq!(b.price(&UsageEvent::default()).2, CostSource::Unpriced);
+    }
+
+    #[test]
+    fn every_bundled_feed_format_has_an_importer_and_unknown_ones_do_not() {
+        let r = Rules::bundled();
+        assert!(r.feeds.iter().all(|f| importer(f).is_some()));
+        let mut f = r.feeds[0].clone();
+        f.format = "hologram".into();
+        assert!(importer(&f).is_none());
+    }
+
+    #[test]
+    fn long_context_tiers_apply_above_the_threshold_only() {
+        let p = Price {
+            input: 3.0,
+            output: 15.0,
+            cache_read: 0.3,
+            tier_above_200k_input: Some(6.0),
+            tier_above_200k_output: Some(22.5),
+            tier_above_200k_cache_read: Some(0.6),
+            ..Default::default()
+        };
+        let ev = |input: u64| UsageEvent {
+            input_tokens: input,
+            output_tokens: 1_000_000,
+            cache_read_tokens: 1_000_000,
+            ..Default::default()
+        };
+        // 1M cache-read alone puts the context above 200k.
+        let long = compute(&ev(1_000_000), &p);
+        assert!((long - (6.0 + 22.5 + 0.6)).abs() < 1e-9, "{long}");
+        let short_ev = UsageEvent {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            cache_read_tokens: 0,
+            ..Default::default()
+        };
+        // At the threshold boundary itself the base prices still apply.
+        let at = UsageEvent {
+            input_tokens: 200_000,
+            output_tokens: 1_000_000,
+            ..Default::default()
+        };
+        assert!((compute(&at, &p) - (0.6 + 15.0)).abs() < 1e-9);
+        assert!((compute_at(&short_ev, &p, 2_000_000) - (3.0 + 15.0)).abs() < 1e-9);
+        // No tier columns → base prices even above the threshold.
+        let plain = Price {
+            input: 3.0,
+            output: 15.0,
+            cache_read: 0.3,
+            ..Default::default()
+        };
+        assert!((compute(&ev(1_000_000), &plain) - (3.0 + 15.0 + 0.3)).abs() < 1e-9);
+    }
+
+    fn event_row(s: &Store, key: &str) -> (f64, String, Option<String>) {
+        s.conn()
+            .query_row(
+                "SELECT cost_usd, cost_source, pricing_model FROM usage_events WHERE dedup_key=?1",
+                [key],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn rules_repass_reprices_book_rows_once_and_rebuilds_rollups() {
+        let s = Store::open_memory().unwrap();
+        put_model(&s, "auto", 1.5, 1.5);
+        put_model(&s, "claude-opus-5", 5.0, 25.0);
+        let mk = |key: &str, model: &str, cost: f64, src: CostSource| UsageEvent {
+            dedup_key: key.into(),
+            app: crate::model::apps::CLAUDE.into(),
+            pricing_model: (model != "auto").then(|| model.to_string()),
+            model: Some(model.into()),
+            ts_start: Some(1_800_000_000_000),
+            input_tokens: 1_000_000,
+            cost_usd: Some(cost),
+            cost_source: Some(src),
+            ..Default::default()
+        };
+        s.upsert_event(&mk("auto1", "auto", 1.5, CostSource::Estimated))
+            .unwrap();
+        s.upsert_event(&mk(
+            "rep",
+            "claude-opus-5",
+            9.0,
+            CostSource::ProviderReported,
+        ))
+        .unwrap();
+        s.upsert_event(&mk("stale", "claude-opus-5", 0.0001, CostSource::Computed))
+            .unwrap();
+        s.upsert_event(&mk("ok", "claude-opus-5", 5.0, CostSource::Computed))
+            .unwrap();
+        s.rebuild_rollups("+00:00").unwrap();
+
+        assert_eq!(reprice_if_rules_changed(&s).unwrap(), Some(2));
+        assert_eq!(event_row(&s, "auto1"), (0.0, "unpriced".into(), None));
+        assert_eq!(event_row(&s, "rep").0, 9.0); // adapter cost never touched
+        assert_eq!(event_row(&s, "rep").1, "provider_reported");
+        assert_eq!(
+            event_row(&s, "stale"),
+            (5.0, "computed".into(), Some("claude-opus-5".into()))
+        );
+        let marker = s.get_state(APPLIED_KEY).unwrap().unwrap();
+        assert!(marker.starts_with(&format!("{PRICING_LOGIC_VERSION}:")));
+        // Second run: nothing to do.
+        assert_eq!(reprice_if_rules_changed(&s).unwrap(), None);
+        // Rollups follow the new costs (9 + 5 + 5, the auto row now free).
+        let rolled: f64 = s
+            .conn()
+            .query_row("SELECT SUM(cost_usd) FROM daily_rollups", [], |r| r.get(0))
+            .unwrap();
+        assert!((rolled - 19.0).abs() < 1e-9, "{rolled}");
+        // New rules (here: an alias) invalidate the marker.
+        let mut newer = rules::Rules::bundled();
+        newer.revision = 9;
+        newer.aliases.insert("auto".into(), "claude-opus-5".into());
+        rules::store_remote(&s, &serde_json::to_string(&newer).unwrap()).unwrap();
+        assert_eq!(reprice_if_rules_changed(&s).unwrap(), Some(1));
+        assert_eq!(event_row(&s, "auto1").1, "computed");
+    }
+
+    #[test]
+    fn zero_token_unpriced_rows_stay_unpriced_when_the_model_resolves() {
+        let s = Store::open_memory().unwrap();
+        put_model(&s, "claude-opus-5", 5.0, 25.0);
+        let mk = |key: &str, tokens: u64| UsageEvent {
+            dedup_key: key.into(),
+            app: crate::model::apps::CLAUDE.into(),
+            model: Some("claude-opus-5".into()),
+            input_tokens: tokens,
+            cost_usd: Some(0.0),
+            cost_source: Some(CostSource::Unpriced),
+            ..Default::default()
+        };
+        // Metadata-tier activity record vs. a real usage row, same model.
+        s.upsert_event(&mk("meta", 0)).unwrap();
+        s.upsert_event(&mk("real", 1_000_000)).unwrap();
+        let book = PriceBook::load(&s).unwrap();
+        assert_eq!(reprice_unpriced(&s, &book).unwrap(), 1);
+        assert_eq!(event_row(&s, "meta"), (0.0, "unpriced".into(), None));
+        assert_eq!(
+            event_row(&s, "real"),
+            (5.0, "computed".into(), Some("claude-opus-5".into()))
+        );
+        // Same guard on the rules repass (a fresh marker, so it does run).
+        s.upsert_event(&mk("meta2", 0)).unwrap();
+        assert_eq!(reprice_if_rules_changed(&s).unwrap(), Some(0));
+        assert_eq!(event_row(&s, "meta"), (0.0, "unpriced".into(), None));
+        assert_eq!(event_row(&s, "meta2"), (0.0, "unpriced".into(), None));
+    }
+
+    #[test]
+    fn reprice_unpriced_uses_the_shared_function_and_rebuilds_rollups() {
+        let s = Store::open_memory().unwrap();
+        let mut e = unpriced_ev("u1", "brand-new-model-202606");
+        e.ts_start = Some(1_800_000_000_000);
+        s.upsert_event(&e).unwrap();
+        s.rebuild_rollups("+00:00").unwrap();
+        put_model(&s, "brand-new-model", 2.0, 10.0);
+        let book = PriceBook::load(&s).unwrap();
+        assert_eq!(reprice_unpriced(&s, &book).unwrap(), 1);
+        assert_eq!(event_row(&s, "u1").1, "estimated"); // peeled date suffix
+        let rolled: f64 = s
+            .conn()
+            .query_row("SELECT SUM(cost_usd) FROM daily_rollups", [], |r| r.get(0))
+            .unwrap();
+        assert!((rolled - 0.007).abs() < 1e-9, "{rolled}");
     }
 
     #[test]

@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS prices (
   provider TEXT NOT NULL, model_id TEXT NOT NULL,
   input REAL, output REAL, cache_read REAL, cache_write REAL,
   tier_above_200k_input REAL, tier_1h_cache_write REAL, tier_batch REAL,
+  tier_above_200k_output REAL, tier_above_200k_cache_read REAL,
   source TEXT NOT NULL, fetched_at INTEGER NOT NULL,
   PRIMARY KEY (provider, model_id)
 );

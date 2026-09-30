@@ -273,7 +273,7 @@ pub unsafe extern "C" fn gtt_update_prices(ctx: *mut GttContext) -> *mut c_char 
                 ok: bool,
                 repriced: u64,
                 /// Rows written per source tag (a source can take several downloads).
-                sources: Vec<(&'static str, usize)>,
+                sources: Vec<(String, usize)>,
                 /// One line per download that failed (network, malformed doc).
                 failed: Vec<String>,
             }
