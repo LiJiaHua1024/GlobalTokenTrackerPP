@@ -13,6 +13,7 @@ use crate::store::Store;
 use anyhow::Result;
 use std::path::PathBuf;
 
+pub mod antigravity;
 pub mod claude;
 pub mod cline;
 pub mod codebuddy;
@@ -120,6 +121,7 @@ pub fn registry() -> Vec<Box<dyn SourceAdapter>> {
         Box::new(kimi_code::KimiCode),
         Box::new(cline::Cline),
         Box::new(commandcode::CommandCode),
+        Box::new(antigravity::Antigravity),
     ]
 }
 
