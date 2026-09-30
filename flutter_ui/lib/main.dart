@@ -94,7 +94,10 @@ class GlobalTokenTrackerApp extends StatelessWidget {
             size: Size(scaledW, scaledH),
           ),
           child: FittedBox(
-            fit: BoxFit.fill,
+            // Uniform scaling only: BoxFit.fill would stretch one axis
+            // whenever the incoming constraints diverge from mq.size
+            // (DPI rounding, resize transients), distorting all text.
+            fit: BoxFit.contain,
             alignment: Alignment.topLeft,
             child: SizedBox(
               width: scaledW,
