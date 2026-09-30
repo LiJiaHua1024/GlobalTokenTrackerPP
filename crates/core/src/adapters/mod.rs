@@ -105,6 +105,12 @@ pub trait SourceAdapter: Send + Sync {
 }
 
 /// All adapters, ordered by spec priority. P0 set first.
+/// Drop every adapter's "seen it, nothing changed" memo — the manual refresh
+/// path (see `codebuddy::forget_scan_memo`).
+pub fn forget_scan_memos() {
+    codebuddy::forget_scan_memo();
+}
+
 pub fn registry() -> Vec<Box<dyn SourceAdapter>> {
     vec![
         Box::new(claude::Claude),

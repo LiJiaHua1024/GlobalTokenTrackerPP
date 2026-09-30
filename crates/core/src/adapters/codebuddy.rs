@@ -29,6 +29,33 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+/// `messages` directory mtimes seen at the end of a clean pass, keyed by
+/// conversation. Adapter objects live only for one scan (`Engine::new` builds
+/// a fresh registry each time), so this has to be process-wide.
+///
+/// A conversation whose `messages` directory has not changed since is skipped
+/// outright — before, every pass paid a cursor read, a JSON parse of the whole
+/// `seen` set and a directory listing for each of ~57 conversations (~80ms).
+/// Only directories that were already quiet for `QUIET` when scanned are
+/// trusted: NTFS stamps directory changes with a coarse clock, so a file added
+/// moments after our listing can carry the *same* timestamp and would
+/// otherwise be missed until the next change.
+fn dir_memo() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::SystemTime>>
+{
+    static M: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::time::SystemTime>>,
+    > = std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+const QUIET: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Forget which conversations were last seen unchanged (manual refresh: trust
+/// nothing, re-read everything against the cursors).
+pub fn forget_scan_memo() {
+    dir_memo().lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
 pub struct CodeBuddyIde {
     /// `session:`→cwd map is per-scan stable; without this cache the IDE
     /// session db was walked once per conversation (the dominant scan cost).
@@ -205,6 +232,37 @@ impl SourceAdapter for CodeBuddyIde {
     }
 
     fn scan_sqlite(&self, item: &SourceItem, store: &Store) -> Result<ScanOutcome> {
+        // Read the directory stamp BEFORE listing it: a file that lands after
+        // this read moves the stamp past what we record, so it is seen next pass.
+        let stamp = std::fs::metadata(item.path.join("messages"))
+            .and_then(|m| m.modified())
+            .ok();
+        if let Some(t) = stamp
+            && dir_memo()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&item.key)
+                == Some(&t)
+        {
+            return Ok(ScanOutcome::default());
+        }
+        let out = self.scan_conversation(item, store)?;
+        if let Some(t) = stamp
+            && std::time::SystemTime::now()
+                .duration_since(t)
+                .is_ok_and(|age| age >= QUIET)
+        {
+            dir_memo()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(item.key.clone(), t);
+        }
+        Ok(out)
+    }
+}
+
+impl CodeBuddyIde {
+    fn scan_conversation(&self, item: &SourceItem, store: &Store) -> Result<ScanOutcome> {
         let cur = store.load_cursor(&item.key)?;
         let mut state: ConvState = cur
             .state

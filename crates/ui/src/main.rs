@@ -730,6 +730,9 @@ impl Component for Shell {
                 // Manual refresh dismisses an open picker — the user moved on.
                 self.open_menu = None;
                 self.views_stale = true;
+                // A manual refresh is the "trust nothing" button: adapters that
+                // memoize quiet sources must re-read them from scratch.
+                globaltokentracker_core::adapters::forget_scan_memos();
                 self.start_scan(context);
             }
             Msg::SetRange(r) => {
