@@ -14,6 +14,9 @@ import '../core/ffi_bridge.dart';
 import '../core/models.dart';
 import '../core/theme.dart';
 
+/// Counts (requests/events) are raw quantities — never compact them to K/M.
+String _formatCount(num value) => NumberFormat.decimalPattern().format(value);
+
 /// Preset visual themes for the share card
 enum ShareCardStyle {
   m3Dynamic,
@@ -929,8 +932,7 @@ class ShareStatCard extends StatelessWidget {
                       Expanded(
                         child: _buildMetricTile(
                           title: '请求频次',
-                          value:
-                              '${themeProvider.formatTokens(span.events)} 次',
+                          value: '${_formatCount(span.events)} 次',
                           subtext:
                               '活跃: ${(span.activeMs / 1000 / 60).toStringAsFixed(0)} 分钟',
                           icon: Icons.bolt,
@@ -2484,7 +2486,7 @@ class _ShareCardDialogState extends State<ShareCardDialog> {
       buffer.writeln('💰 预估费用: \$${span.costUsd.toStringAsFixed(2)} USD');
     }
     if (_showActivity) {
-      buffer.writeln('⚡ API 请求: ${themeProvider.formatTokens(span.events)} 次 · '
+      buffer.writeln('⚡ API 请求: ${_formatCount(span.events)} 次 · '
           '专注时长: ${(span.activeMs / 1000 / 60).toStringAsFixed(0)} 分钟');
     }
 
