@@ -2250,6 +2250,7 @@ class _ShareCardDialogState extends State<ShareCardDialog> {
 
   Future<void> _switchRange(String range) async {
     if (_selectedRange == range) return;
+    final requested = range;
     setState(() {
       _selectedRange = range;
       _loadingRange = true;
@@ -2257,14 +2258,15 @@ class _ShareCardDialogState extends State<ShareCardDialog> {
 
     try {
       final newData = await FfiBridge.instance.getOverview(rangeKey: range);
-      if (mounted) {
+      // Drop responses superseded by a newer range switch.
+      if (mounted && _selectedRange == requested) {
         setState(() {
           _data = newData;
           _loadingRange = false;
         });
       }
     } catch (e) {
-      if (mounted) {
+      if (mounted && _selectedRange == requested) {
         setState(() {
           _loadingRange = false;
         });
