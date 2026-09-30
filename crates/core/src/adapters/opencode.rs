@@ -162,7 +162,7 @@ impl SourceAdapter for OpenCode {
                     .or_else(|| (m.created_col > 0).then_some(m.created_col)),
                 ts_end: m.completed.or_else(|| (m.updated > 0).then_some(m.updated)),
                 input_tokens: m.tin,
-                output_tokens: m.tout,
+                output_tokens: m.tout + m.treason,
                 reasoning_tokens: m.treason,
                 cache_read_tokens: m.tcr,
                 cache_write_5m_tokens: m.tcw,
@@ -409,6 +409,32 @@ mod tests {
         let again = OpenCode.scan_sqlite(&item(&src), &store).unwrap();
         assert_eq!(again.events.len(), 1);
         assert_eq!(again.events[0].dedup_key, "opencode:msg:m1");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn output_includes_reasoning_as_a_subset() {
+        let dir = tmpdir("reason");
+        let src = dir.join("opencode.db");
+        let c = fixture(&src);
+        c.execute(
+            "INSERT INTO session VALUES('s1','p','/proj','build',NULL,1,1)",
+            [],
+        )
+        .unwrap();
+        let data = r#"{"role":"assistant","modelID":"glm-x","providerID":"opencode-go","cost":0,
+            "tokens":{"total":47,"input":10,"output":5,"reasoning":30,
+            "cache":{"write":2,"read":0}},"time":{"created":100,"completed":200}}"#;
+        c.execute("INSERT INTO message VALUES('m1','s1',100,100,?1)", [data])
+            .unwrap();
+        drop(c);
+
+        let store = Store::open_memory().unwrap();
+        let out = OpenCode.scan_sqlite(&item(&src), &store).unwrap();
+        let e = &out.events[0];
+        assert_eq!(e.output_tokens, 35); // 5 output + 30 reasoning
+        assert_eq!(e.reasoning_tokens, 30);
+        assert_eq!(e.cache_write_5m_tokens, 2);
         std::fs::remove_dir_all(&dir).ok();
     }
 
