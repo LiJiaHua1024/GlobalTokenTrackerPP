@@ -134,6 +134,29 @@ class TrendBucket {
   }
 }
 
+class ActivityDay {
+  final String date;
+  final int events;
+  final int tokens;
+  final double costUsd;
+
+  ActivityDay({
+    required this.date,
+    required this.events,
+    required this.tokens,
+    required this.costUsd,
+  });
+
+  factory ActivityDay.fromJson(Map<String, dynamic> json) {
+    return ActivityDay(
+      date: json['date'] ?? '',
+      events: json['events'] ?? 0,
+      tokens: json['tokens'] ?? 0,
+      costUsd: (json['cost_usd'] as num?)?.toDouble() ?? 0.0,
+    );
+  }
+}
+
 class QuotaRow {
   final String app;
   final String? account;
@@ -203,6 +226,8 @@ class OverviewData {
   final List<AppSummary> byApp;
   final List<ShareRow> byModel;
   final List<TrendBucket> daily;
+  final List<TrendBucket> daily30d;
+  final List<ActivityDay> activity;
   final List<String> apps;
   final List<String> models;
   final List<QuotaRow> quotas;
@@ -217,6 +242,8 @@ class OverviewData {
     required this.byApp,
     required this.byModel,
     required this.daily,
+    this.daily30d = const [],
+    this.activity = const [],
     required this.apps,
     required this.models,
     required this.quotas,
@@ -238,6 +265,12 @@ class OverviewData {
           .toList(),
       daily: (json['daily'] as List? ?? [])
           .map((d) => TrendBucket.fromJson(d as Map<String, dynamic>))
+          .toList(),
+      daily30d: (json['daily_30d'] as List? ?? [])
+          .map((d) => TrendBucket.fromJson(d as Map<String, dynamic>))
+          .toList(),
+      activity: (json['activity'] as List? ?? [])
+          .map((a) => ActivityDay.fromJson(a as Map<String, dynamic>))
           .toList(),
       apps: (json['apps'] as List? ?? []).map((e) => e.toString()).toList(),
       models: (json['models'] as List? ?? []).map((e) => e.toString()).toList(),

@@ -3,7 +3,9 @@ import 'package:provider/provider.dart';
 import '../core/ffi_bridge.dart';
 import '../core/models.dart';
 import '../core/theme.dart';
+import '../widgets/charts/multi_model_trend_chart.dart';
 import '../widgets/charts/pie_donut_chart.dart';
+import '../widgets/charts/token_activity_calendar.dart';
 import '../widgets/charts/trend_chart.dart';
 import '../widgets/quota_card.dart';
 import '../widgets/share_card.dart';
@@ -308,6 +310,19 @@ class _OverviewPageState extends State<OverviewPage> {
             }),
             const SizedBox(height: 28),
 
+            // Token 活动日历热力图 (GitHub-style Contribution Heatmap)
+            TokenActivityCalendar(
+              activity: data.activity,
+            ),
+            const SizedBox(height: 24),
+
+            // 每日 Token 多模型趋势图 (Curved Multi-Series Spline Chart)
+            MultiModelTrendChart(
+              daily: data.daily,
+              daily30d: data.daily30d,
+            ),
+            const SizedBox(height: 28),
+
             // 饼状图/环形图 展示区 (4 大核心维度)
             Text(
               "用量与成本占比分布",
@@ -383,12 +398,14 @@ class _OverviewPageState extends State<OverviewPage> {
             }),
             const SizedBox(height: 28),
 
-            // 30 日趋势图
-            TrendChart(
-              daily: data.daily,
-              title: _selectedRange == 'today' ? '今日用量时间分布' : '每日 Token 趋势',
-            ),
-            const SizedBox(height: 28),
+            // 今日小时用量时间分布 (当选择“今日”时展示细粒度柱状图)
+            if (_selectedRange == 'today') ...[
+              TrendChart(
+                daily: data.daily,
+                title: '今日小时用量分布',
+              ),
+              const SizedBox(height: 28),
+            ],
 
             // 配额卡片区
             if (data.quotaGroups.isNotEmpty) ...[

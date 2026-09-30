@@ -1,7 +1,7 @@
 //! ViewModels — plain, serializable structs the UI shells render verbatim.
 //! All SQL/formatting lives here so shells stay dumb (Mac port = same VMs).
 
-use crate::store::{AppSummary, EventRow, QuotaRow, ShareRow, Store, Totals};
+use crate::store::{ActivityDay, AppSummary, EventRow, QuotaRow, ShareRow, Store, Totals};
 use anyhow::Result;
 use serde::Serialize;
 
@@ -167,6 +167,10 @@ pub struct OverviewVm {
     /// Trend buckets for the selected range: per local day, or per local hour
     /// for `Today`. Each bucket carries its tooltip payload (top-3 models).
     pub daily: Vec<TrendBucket>,
+    /// Rolling 30-day buckets with per-model breakdown for trend spline charts.
+    pub daily_30d: Vec<TrendBucket>,
+    /// Rolling 365-day per-day activity for the contribution heatmap.
+    pub activity: Vec<ActivityDay>,
     /// All tool names present in the ledger — the app-filter checkbox list
     /// must show tools even when the filter excludes them.
     pub apps: Vec<String>,
@@ -310,10 +314,41 @@ impl Store {
             .into_values()
             .map(|mut b| {
                 b.top.sort_by_key(|m| std::cmp::Reverse(m.1));
-                b.top.truncate(3);
+                b.top.truncate(20);
                 b
             })
             .collect();
+        let start_30d = day_start_ms(29);
+        let daily_30d: Vec<TrendBucket> = if range == Range::Month {
+            daily.clone()
+        } else {
+            let mut buckets_30d: std::collections::BTreeMap<String, TrendBucket> =
+                std::collections::BTreeMap::new();
+            for r in self.bucket_models(Some(start_30d), None, false, &tz, apps, models)? {
+                let key = r.bucket.clone();
+                let b = buckets_30d.entry(key.clone()).or_insert_with(|| TrendBucket {
+                    date: key,
+                    events: 0,
+                    tokens: 0,
+                    cost_usd: 0.0,
+                    top: Vec::new(),
+                });
+                b.events += r.events;
+                b.tokens += r.tokens;
+                b.cost_usd += r.cost_usd;
+                b.top.push((r.model, r.tokens));
+            }
+            buckets_30d
+                .into_values()
+                .map(|mut b| {
+                    b.top.sort_by_key(|m| std::cmp::Reverse(m.1));
+                    b.top.truncate(20);
+                    b
+                })
+                .collect()
+        };
+        let start_365d = day_start_ms(364);
+        let activity = self.activity_daily(Some(start_365d), None, &tz, apps, models)?;
         let span = self.totals(start, end, apps, models)?;
         let quotas = self.latest_quotas()?;
         Ok(OverviewVm {
@@ -324,6 +359,8 @@ impl Store {
             by_app: self.by_app(start, end, apps, models)?,
             by_model: self.by_model(start, end, apps, models)?,
             daily,
+            daily_30d,
+            activity,
             apps: self.app_names()?,
             models: self.model_names(apps)?,
             quota_groups: group_quotas(quotas.clone()),

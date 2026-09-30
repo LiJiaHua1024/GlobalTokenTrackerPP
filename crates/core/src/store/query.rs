@@ -120,6 +120,14 @@ pub struct DailyRow {
     pub credits: f64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ActivityDay {
+    pub date: String,
+    pub events: u64,
+    pub tokens: u64,
+    pub cost_usd: f64,
+}
+
 impl super::Store {
     /// Totals over `[from_ms, to_ms)`; `None,None` = all time.
     /// `apps`/`models` restrict scope; `Some(empty)` = honest empty result.
@@ -258,6 +266,43 @@ impl super::Store {
                 cache_write_tokens: r.get::<_, i64>(7)? as u64,
                 cost_usd: r.get(8)?,
                 credits: r.get(9)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
+    /// Per-day token & event activity for the heatmap calendar (past 365 days).
+    pub fn activity_daily(
+        &self,
+        from_ms: Option<i64>,
+        to_ms: Option<i64>,
+        utc_offset: &str,
+        apps: Option<&[String]>,
+        models: Option<&[String]>,
+    ) -> Result<Vec<ActivityDay>> {
+        let b = utc_offset.as_bytes();
+        anyhow::ensure!(
+            b.len() == 6
+                && matches!(b[0], b'+' | b'-')
+                && b[3] == b':'
+                && [1, 2, 4, 5].iter().all(|&i| b[i].is_ascii_digit()),
+            "invalid utc_offset: {utc_offset}"
+        );
+        let (w, p) = scope_where(from_ms, to_ms, apps, models);
+        let mut st = self.conn().prepare(&format!(
+            "SELECT strftime('%Y-%m-%d', ts_start/1000, 'unixepoch', '{utc_offset}') AS d,
+                    COUNT(*),
+                    COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens),0),
+                    COALESCE(SUM(cost_usd),0)
+             FROM usage_events {w}
+             GROUP BY d ORDER BY d"
+        ))?;
+        let rows = st.query_map(rusqlite::params_from_iter(p.iter()), |r| {
+            Ok(ActivityDay {
+                date: r.get(0)?,
+                events: r.get::<_, i64>(1)? as u64,
+                tokens: r.get::<_, i64>(2)? as u64,
+                cost_usd: r.get(3)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)

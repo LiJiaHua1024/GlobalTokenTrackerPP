@@ -82,7 +82,13 @@ $sha = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
 
 # 2. Portable Distribution Zip (extract and run directly without installation)
 $zipOut = Join-Path $dist "GlobalTokenTrackerPP-$ver-windows-x64.zip"
-if (Test-Path $zipOut) { Remove-Item $zipOut -Force }
+try {
+    if (Test-Path $zipOut) { Remove-Item $zipOut -Force -ErrorAction Stop }
+} catch {
+    Write-Warning "Could not overwrite $zipOut (file in use). Falling back to GlobalTokenTrackerPP-Portable.zip"
+    $zipOut = Join-Path $dist "GlobalTokenTrackerPP-Portable.zip"
+    if (Test-Path $zipOut) { Remove-Item $zipOut -Force -ErrorAction SilentlyContinue }
+}
 Write-Host "==> creating portable distribution zip: $zipOut" -ForegroundColor Cyan
 Compress-Archive -Path "$flutterDist\*" -DestinationPath $zipOut -CompressionLevel Optimal
 $zipMb  = [math]::Round((Get-Item $zipOut).Length / 1MB, 2)
