@@ -140,8 +140,17 @@ impl Engine {
         let pinned = AtomicU64::new(0);
         let mut segments: Vec<(&SourceItem, u64, Option<String>, Vec<u8>)> = Vec::new();
         let mut in_flight: u64 = 0;
-        for item in &jsonl {
-            let meta = match std::fs::metadata(&item.path) {
+        // The stat of every session file is the bulk of a no-change pass (515
+        // codex files ≈ 24ms sequentially, ~47µs each) and the calls are
+        // independent: fan them out on the eco pool, consume in order.
+        let metas: Vec<std::io::Result<std::fs::Metadata>> = eco_pool().install(|| {
+            jsonl
+                .par_iter()
+                .map(|i| std::fs::metadata(&i.path))
+                .collect()
+        });
+        for (item, meta) in jsonl.iter().zip(metas) {
+            let meta = match meta {
                 Ok(m) => m,
                 Err(e) => {
                     report
