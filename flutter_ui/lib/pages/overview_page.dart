@@ -215,7 +215,7 @@ class _OverviewPageState extends State<OverviewPage> {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       FilledButton.tonalIcon(
-                        onPressed: () => showShareCardDialog(
+                        onPressed: _loading ? null : () => showShareCardDialog(
                           context,
                           data,
                           _selectedRange,
