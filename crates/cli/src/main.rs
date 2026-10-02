@@ -211,38 +211,6 @@ fn csv_cell(out: &mut String, s: &str) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn csv_cell_quotes_delimiters_and_neutralizes_formulas() {
-        let mut out = String::new();
-        csv_cell(&mut out, "plain");
-        assert_eq!(out, "plain");
-
-        out.clear();
-        csv_cell(&mut out, "a,b\"c\nd");
-        assert_eq!(out, "\"a,b\"\"c\nd\"");
-
-        out.clear();
-        csv_cell(&mut out, "a\rb");
-        assert_eq!(out, "\"a\rb\"");
-
-        out.clear();
-        csv_cell(&mut out, "=1+1");
-        assert_eq!(out, "\"'=1+1\"");
-
-        out.clear();
-        csv_cell(&mut out, "@SUM(A1)");
-        assert_eq!(out, "\"'@SUM(A1)\"");
-
-        out.clear();
-        csv_cell(&mut out, "-2 is a version tag");
-        assert_eq!(out, "\"'-2 is a version tag\"");
-    }
-}
-
 fn export(engine: &Engine, span: &str, out: Option<&std::path::Path>) -> Result<()> {
     let (f, t) = span_ms(span);
     let rows = engine.store.export_rows(f, t)?;
@@ -482,4 +450,36 @@ fn norm_path(p: &str) -> String {
         globaltokentracker_core::sync::home(p)
     };
     abs.to_string_lossy().replace('/', "\\").to_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn csv_cell_quotes_delimiters_and_neutralizes_formulas() {
+        let mut out = String::new();
+        csv_cell(&mut out, "plain");
+        assert_eq!(out, "plain");
+
+        out.clear();
+        csv_cell(&mut out, "a,b\"c\nd");
+        assert_eq!(out, "\"a,b\"\"c\nd\"");
+
+        out.clear();
+        csv_cell(&mut out, "a\rb");
+        assert_eq!(out, "\"a\rb\"");
+
+        out.clear();
+        csv_cell(&mut out, "=1+1");
+        assert_eq!(out, "\"'=1+1\"");
+
+        out.clear();
+        csv_cell(&mut out, "@SUM(A1)");
+        assert_eq!(out, "\"'@SUM(A1)\"");
+
+        out.clear();
+        csv_cell(&mut out, "-2 is a version tag");
+        assert_eq!(out, "\"'-2 is a version tag\"");
+    }
 }
