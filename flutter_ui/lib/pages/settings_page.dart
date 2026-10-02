@@ -11,6 +11,10 @@ import '../widgets/update_dialog.dart';
 class SettingsPage extends StatelessWidget {
   const SettingsPage({Key? key}) : super(key: key);
 
+  // Resolved once per app run — a synchronous FFI call inside build() would
+  // re-run on every rebuild of this page.
+  static final String _dbPath = FfiBridge.instance.getDefaultDbPath();
+
   static const List<Map<String, dynamic>> _seedColors = [
     {'name': 'Google Blue', 'color': Color(0xFF1A73E8)},
     {'name': 'Emerald Green', 'color': Color(0xFF34A853)},
@@ -24,7 +28,6 @@ class SettingsPage extends StatelessWidget {
     final themeProvider = Provider.of<ThemeProvider>(context);
     final updateProvider = Provider.of<UpdateProvider>(context);
     final theme = Theme.of(context);
-    final dbPath = FfiBridge.instance.getDefaultDbPath();
 
     return Padding(
       padding: const EdgeInsets.all(24.0),
@@ -374,7 +377,7 @@ class SettingsPage extends StatelessWidget {
               title: const Text('本地 SQLite 账本文件位置', style: TextStyle(fontWeight: FontWeight.bold)),
               subtitle: Padding(
                 padding: const EdgeInsets.only(top: 6.0),
-                child: SelectableText(dbPath, style: TextStyle(fontFamily: 'Consolas', color: theme.colorScheme.outline)),
+                child: SelectableText(_dbPath, style: TextStyle(fontFamily: 'Consolas', color: theme.colorScheme.outline)),
               ),
             ),
           ),
