@@ -185,19 +185,22 @@ fn main() -> Result<()> {
 }
 
 fn csv_cell(out: &mut String, s: &str) {
-    // Excel/LibreOffice execute a cell starting with =+-@ (or tab) as a
-    // formula — a session id or raw_ref like "=1+1" must not evaluate when
-    // the export is opened (OWASP CSV injection). CR joins the quoted set:
-    // a bare \r inside an unquoted field corrupts row boundaries on re-read.
+    // Excel/LibreOffice evaluate a cell starting with =+-@ (or tab) as a
+    // formula (OWASP CSV injection). The guard apostrophe must sit INSIDE
+    // the quotes: outside, the field no longer starts with `"` and parses
+    // as an unquoted cell with literal quote characters. On import the cell
+    // value is '=…, and spreadsheets hide a leading apostrophe as their
+    // text marker. CR joins the quoted set: a bare \r in an unquoted field
+    // corrupts row boundaries on re-read.
     let guarded = matches!(
         s.as_bytes().first(),
         Some(b'=') | Some(b'+') | Some(b'-') | Some(b'@') | Some(b'\t')
     );
     if guarded || s.contains([',', '"', '\n', '\r']) {
+        out.push('"');
         if guarded {
             out.push('\'');
         }
-        out.push('"');
         out.push_str(&s.replace('"', "\"\""));
         out.push('"');
     } else {
@@ -225,15 +228,15 @@ mod tests {
 
         out.clear();
         csv_cell(&mut out, "=1+1");
-        assert_eq!(out, "'\"=1+1\"'");
+        assert_eq!(out, "\"'=1+1\"");
 
         out.clear();
         csv_cell(&mut out, "@SUM(A1)");
-        assert_eq!(out, "'\"@SUM(A1)\"'");
+        assert_eq!(out, "\"'@SUM(A1)\"");
 
         out.clear();
         csv_cell(&mut out, "-2 is a version tag");
-        assert_eq!(out, "'\"-2 is a version tag\"'");
+        assert_eq!(out, "\"'-2 is a version tag\"");
     }
 }
 
