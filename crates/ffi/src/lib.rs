@@ -12,6 +12,7 @@ use serde::Serialize;
 
 pub struct GttContext {
     inner: Mutex<Engine>,
+    db_path: PathBuf,
 }
 
 #[derive(Serialize)]
@@ -135,6 +136,7 @@ unsafe fn gtt_engine_open_impl(db_path: *const c_char) -> *mut GttContext {
 
     Box::into_raw(Box::new(GttContext {
         inner: Mutex::new(engine),
+        db_path: path,
     }))
 }
 
@@ -338,13 +340,16 @@ unsafe fn gtt_update_prices_impl(ctx: *mut GttContext) -> *mut c_char {
     if ctx.is_null() {
         return to_error_c_string("Engine context is null");
     }
-    let gtt = unsafe { &*ctx };
-    let engine = match gtt.inner.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
+    // Price feeds may take several seconds to download and parse. Use a
+    // separate Store connection so this background task never holds the
+    // Engine mutex and blocks overview/detail reads from the Flutter UI.
+    let db_path = unsafe { &*ctx }.db_path.clone();
+    let store = match Store::open(&db_path) {
+        Ok(store) => store,
+        Err(e) => return to_error_c_string(e),
     };
 
-    match globaltokentracker_core::pricing::refresh(&engine.store) {
+    match globaltokentracker_core::pricing::refresh(&store) {
         Ok(report) => {
             #[derive(Serialize)]
             struct PricingResult {

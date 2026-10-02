@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi' as ffi;
 import 'dart:io';
@@ -66,6 +67,8 @@ typedef _gtt_poll_quotas_c = ffi.Pointer<Utf8> Function(ffi.Pointer<ffi.Void> ct
 typedef _gtt_poll_quotas_dart = ffi.Pointer<Utf8> Function(ffi.Pointer<ffi.Void> ctx);
 
 class FfiBridge {
+  static const _autoPriceRefreshInterval = Duration(hours: 12);
+
   static FfiBridge? _instance;
   late ffi.DynamicLibrary _dylib;
   late String _resolvedDylibPath;
@@ -76,8 +79,42 @@ class FfiBridge {
   late _gtt_engine_close_dart _engineClose;
 
   ffi.Pointer<ffi.Void>? _context;
+  final StreamController<int> _priceUpdates = StreamController<int>.broadcast();
+  Future<Map<String, dynamic>>? _priceUpdateInFlight;
+  int _priceRevision = 0;
+  bool _autoPriceRefreshStarted = false;
+  Timer? _autoPriceRefreshTimer;
 
   static FfiBridge get instance => _instance ??= FfiBridge._();
+
+  Stream<int> get priceUpdates => _priceUpdates.stream;
+  int get priceRevision => _priceRevision;
+
+  /// Starts a quiet online price refresh and keeps it on a 12-hour cadence.
+  /// Call after the initial scan so the price writer does not contend with it.
+  void startAutomaticPriceRefresh() {
+    if (_autoPriceRefreshStarted) return;
+    _autoPriceRefreshStarted = true;
+    unawaited(_refreshPricesAutomatically());
+  }
+
+  Future<void> _refreshPricesAutomatically() async {
+    try {
+      await updatePrices();
+    } catch (_) {
+      // Keep automatic sync quiet. The pricing page still exposes the manual
+      // action and the timer retries after the same interval.
+      _scheduleAutomaticPriceRefresh();
+    }
+  }
+
+  void _scheduleAutomaticPriceRefresh() {
+    if (!_autoPriceRefreshStarted) return;
+    _autoPriceRefreshTimer?.cancel();
+    _autoPriceRefreshTimer = Timer(_autoPriceRefreshInterval, () {
+      unawaited(_refreshPricesAutomatically());
+    });
+  }
 
   FfiBridge._() {
     _loadDylib();
@@ -145,6 +182,9 @@ class FfiBridge {
   }
 
   void closeEngine() {
+    _autoPriceRefreshTimer?.cancel();
+    _autoPriceRefreshTimer = null;
+    _autoPriceRefreshStarted = false;
     if (_context != null && _context!.address != 0) {
       _engineClose(_context!);
       _context = null;
@@ -332,6 +372,25 @@ class FfiBridge {
   /// Offload the price-feed refresh (network downloads plus parsing of
   /// multi-megabyte JSON) to a background worker isolate.
   Future<Map<String, dynamic>> updatePrices() async {
+    final running = _priceUpdateInFlight;
+    if (running != null) return running;
+
+    late final Future<Map<String, dynamic>> update;
+    update = _runPriceUpdate().then((result) {
+      _priceRevision++;
+      _priceUpdates.add(_priceRevision);
+      _scheduleAutomaticPriceRefresh();
+      return result;
+    }).whenComplete(() {
+      if (identical(_priceUpdateInFlight, update)) {
+        _priceUpdateInFlight = null;
+      }
+    });
+    _priceUpdateInFlight = update;
+    return update;
+  }
+
+  Future<Map<String, dynamic>> _runPriceUpdate() async {
     if (_context == null) throw Exception("Engine not initialized");
     final ctxAddress = _context!.address;
     final dylibPath = _resolvedDylibPath;
@@ -351,7 +410,11 @@ class FfiBridge {
       final raw = ptr.toDartString();
       freeStringFunc(ptr);
 
-      return jsonDecode(raw) as Map<String, dynamic>;
+      final result = jsonDecode(raw) as Map<String, dynamic>;
+      if (result['ok'] == false) {
+        throw Exception(result['error'] ?? 'Price update failed');
+      }
+      return result;
     });
   }
 

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../core/ffi_bridge.dart';
@@ -29,6 +31,7 @@ class _OverviewPageState extends State<OverviewPage> {
   bool _loading = false;
   String? _error;
   OverviewData? _data;
+  late final StreamSubscription<int> _priceUpdatesSubscription;
 
   String _cacheKey(String range) =>
       '${range}_${_selectedApps.join(",")}_${_selectedModels.join(",")}';
@@ -36,11 +39,25 @@ class _OverviewPageState extends State<OverviewPage> {
   @override
   void initState() {
     super.initState();
+    _priceUpdatesSubscription = FfiBridge.instance.priceUpdates.listen((_) {
+      _overviewCache.clear();
+      if (mounted) unawaited(_loadData(_selectedRange, force: true));
+    });
+
     final key = _cacheKey(_selectedRange);
     if (_overviewCache.containsKey(key)) {
       _data = _overviewCache[key];
     }
-    _loadData(_selectedRange).then((_) => _autoScanOnce());
+    unawaited(_loadData(_selectedRange).then((_) async {
+      await _autoScanOnce();
+      FfiBridge.instance.startAutomaticPriceRefresh();
+    }));
+  }
+
+  @override
+  void dispose() {
+    unawaited(_priceUpdatesSubscription.cancel());
+    super.dispose();
   }
 
   Future<void> _loadData(String range, {bool force = false}) async {
@@ -118,11 +135,11 @@ class _OverviewPageState extends State<OverviewPage> {
   /// user having to know about the manual refresh button. The scan itself
   /// runs off the UI isolate; ranges switched meanwhile simply queue on the
   /// engine behind it.
-  static bool _autoScanRan = false;
+  static Future<void>? _autoScan;
 
-  Future<void> _autoScanOnce() async {
-    if (_autoScanRan) return;
-    _autoScanRan = true;
+  Future<void> _autoScanOnce() => _autoScan ??= _runAutoScanOnce();
+
+  Future<void> _runAutoScanOnce() async {
     try {
       final res = await FfiBridge.instance.scan();
       final ingested = (res['events_ingested'] as num?)?.toInt() ?? 0;

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
@@ -17,11 +19,21 @@ class _DetailsPageState extends State<DetailsPage> {
   final int _pageSize = 50;
   bool _loading = true;
   DetailData? _data;
+  late final StreamSubscription<int> _priceUpdatesSubscription;
 
   @override
   void initState() {
     super.initState();
+    _priceUpdatesSubscription = FfiBridge.instance.priceUpdates.listen((_) {
+      if (mounted) unawaited(_loadPage(_currentPage));
+    });
     _loadPage(0);
+  }
+
+  @override
+  void dispose() {
+    unawaited(_priceUpdatesSubscription.cancel());
+    super.dispose();
   }
 
   Future<void> _loadPage(int page) async {

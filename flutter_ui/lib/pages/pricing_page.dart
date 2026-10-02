@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import '../core/ffi_bridge.dart';
 import '../core/models.dart';
@@ -11,21 +13,35 @@ class PricingPage extends StatefulWidget {
 
 class _PricingPageState extends State<PricingPage> {
   static List<PriceRow>? _cachedPrices;
+  static int? _cachedPriceRevision;
   bool _loading = false;
   List<PriceRow> _prices = [];
   String _searchQuery = '';
+  late final StreamSubscription<int> _priceUpdatesSubscription;
 
   @override
   void initState() {
     super.initState();
-    if (_cachedPrices != null) {
+    final bridge = FfiBridge.instance;
+    _priceUpdatesSubscription = bridge.priceUpdates.listen((_) {
+      unawaited(_loadPrices(force: true));
+    });
+    if (_cachedPrices != null && _cachedPriceRevision == bridge.priceRevision) {
       _prices = _cachedPrices!;
     } else {
-      _loadPrices();
+      unawaited(_loadPrices(force: true));
     }
   }
 
+  @override
+  void dispose() {
+    unawaited(_priceUpdatesSubscription.cancel());
+    super.dispose();
+  }
+
   Future<void> _loadPrices({bool force = false}) async {
+    if (!mounted) return;
+
     if (!force && _cachedPrices != null) {
       setState(() {
         _prices = _cachedPrices!;
@@ -39,8 +55,16 @@ class _PricingPageState extends State<PricingPage> {
     });
 
     try {
-      final list = await FfiBridge.instance.getPrices();
+      final bridge = FfiBridge.instance;
+      final revision = bridge.priceRevision;
+      final list = await bridge.getPrices();
+      if (revision != bridge.priceRevision) {
+        if (!mounted) return;
+        await _loadPrices(force: true);
+        return;
+      }
       _cachedPrices = list;
+      _cachedPriceRevision = revision;
       if (mounted) {
         setState(() {
           _prices = list;
@@ -61,16 +85,22 @@ class _PricingPageState extends State<PricingPage> {
 
   Future<void> _updatePrices() async {
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('正在向 llmpricing.dev 同步最新模型价目...'), duration: Duration(seconds: 2)),
+      const SnackBar(content: Text('正在同步在线模型价目...'), duration: Duration(seconds: 2)),
     );
     try {
       final res = await FfiBridge.instance.updatePrices();
       final repriced = res['repriced'] ?? 0;
+      final failed = (res['failed'] as List?)?.length ?? 0;
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('价目同步完成，重新计算了 $repriced 条未定价事件')),
+          SnackBar(
+            content: Text(
+              failed == 0
+                  ? '价目同步完成，重新计算了 $repriced 条事件'
+                  : '价目已同步，$failed 个数据源失败，重新计算了 $repriced 条事件',
+            ),
+          ),
         );
-        _loadPrices(force: true);
       }
     } catch (e) {
       if (mounted) {
