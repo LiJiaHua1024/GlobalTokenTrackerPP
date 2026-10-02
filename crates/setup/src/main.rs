@@ -133,29 +133,21 @@ fn ensure_runtime(log: &dyn Fn(String)) {
     log("检查系统运行环境… 绿色原生架构，免安装外部运行时".into());
 }
 
-fn stop_running() {
-    // An older installer/uninstaller window left open inside dest would lock
-    // globaltokentracker-setup.exe and fail the payload copy. Skip self by
-    // image name — a renamed download must not taskkill its own process.
-    let self_name = env::current_exe()
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()));
-    for name in [
-        EXE_NAME,
-        SETUP_EXE_NAME,
-        "globaltokentracker_ui.exe",
-        "globaltokentrackerpp-setup.exe",
-    ] {
-        if self_name.as_deref() == Some(name) {
-            continue;
-        }
-        let _ = Command::new("taskkill")
-            .args(["/F", "/IM", name])
-            .creation_flags(CREATE_NO_WINDOW)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
+fn stop_running(dest: &Path) {
+    // Only instances running from THIS install dir are ours to stop — a
+    // taskkill by image name would also take down a second copy installed
+    // elsewhere (or a portable build the user is comparing against). Exclude
+    // our own PID: in console mode the uninstaller itself lives inside dest.
+    let prefix = dest.display().to_string();
+    let prefix = prefix.trim_end_matches(['\\', '/']).replace('\'', "''");
+    let script = format!(
+        "$dest='{prefix}';$me={};\
+         Get-Process | Where-Object {{ $_.Path -and $_.Id -ne $me -and \
+         $_.Path.TrimEnd('\\','/').StartsWith($dest,[StringComparison]::OrdinalIgnoreCase) }} | \
+         Stop-Process -Force -ErrorAction SilentlyContinue",
+        std::process::id()
+    );
+    let _ = ps(&script);
 }
 
 fn extract_payload(dest: &Path, log: &dyn Fn(String)) -> Result<u64> {
@@ -482,7 +474,7 @@ pub fn install_steps(
     step(5, "检查系统环境…");
     ensure_runtime(log);
     step(15, "结束正在运行的实例…");
-    stop_running();
+    stop_running(dest);
     fs::create_dir_all(dest)?;
     step(25, "释放程序文件…");
     let size = extract_payload(dest, log)?;
@@ -513,7 +505,7 @@ pub fn uninstall_steps(
     log: &dyn Fn(String),
 ) -> Result<()> {
     step(10, "结束正在运行的实例…");
-    stop_running();
+    stop_running(dest);
     step(40, "移除快捷方式与注册项…");
     let start = env::var_os("APPDATA")
         .map(PathBuf::from)
