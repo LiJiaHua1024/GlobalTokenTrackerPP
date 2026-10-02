@@ -74,6 +74,11 @@ impl Store {
     fn try_open(path: &Path) -> Result<Self> {
         let conn =
             Connection::open(path).with_context(|| format!("open ledger {}", path.display()))?;
+        // WAL allows read/write concurrency but writes still exclude each
+        // other; the default busy timeout is 0, so a scan, the price refresh
+        // thread, the OTel receiver and the CLI would collide with instant
+        // SQLITE_BUSY instead of waiting each other out.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let store = Self {
             conn,
             path: Some(path.to_path_buf()),
