@@ -27,6 +27,11 @@ use std::path::PathBuf;
 
 pub struct MiniMaxCode;
 
+/// Same wall-clock floor and skew allowance as the antigravity adapter:
+/// 2020-01-01 in epoch ms, plus one hour of tolerated skew.
+const MIN_TS_MS: i64 = 1_577_836_800_000;
+const SKEW_MS: i64 = 60 * 60 * 1000;
+
 /// `~/.minimax*` dirs (incl. `~/.minimax-<profile>`); falls back to real
 /// `~/.mavis*` dirs only when no `.minimax*` exists (post-migration `.mavis`
 /// is a junction into `.minimax` → same file, would double-count).
@@ -148,6 +153,7 @@ impl SourceAdapter for MiniMaxCode {
 
         let mut out = ScanOutcome::default();
         let mut max_id = cur.offset as i64;
+        let now = crate::store::now_ms();
         for row in rows {
             let (
                 id,
@@ -165,6 +171,11 @@ impl SourceAdapter for MiniMaxCode {
                 ws_dir,
             ) = row?;
             max_id = max_id.max(id);
+            // minimax stamps epoch ms; older builds wrote seconds. Scale a
+            // sub-2020 value up; anything still absurd stays undated rather
+            // than poisoning the 1970 rollups.
+            let ts = if ts > 0 && ts < MIN_TS_MS { ts * 1000 } else { ts };
+            let ts = (MIN_TS_MS..=now + SKEW_MS).contains(&ts).then_some(ts);
             let all_zero = input <= 0
                 && output <= 0
                 && reasoning <= 0
@@ -185,7 +196,7 @@ impl SourceAdapter for MiniMaxCode {
                 project,
                 model: model.clone(),
                 request_model: model,
-                ts_start: Some(ts),
+                ts_start: ts,
                 input_tokens: input.max(0) as u64,
                 output_tokens: output.max(0) as u64,
                 reasoning_tokens: reasoning.max(0) as u64,
@@ -278,6 +289,40 @@ mod tests {
         )
         .unwrap();
         (db, TmpDir(dir))
+    }
+
+    #[test]
+    fn seconds_timestamps_scale_and_zero_stays_undated() {
+        let (db, _dir) = fixture_db("ts-sanity");
+        {
+            let conn = Connection::open(&db).unwrap();
+            for (turn, ts) in [("t1", 1_779_256_800i64), ("t2", 0)] {
+                conn.execute(
+                    "INSERT INTO local_runtime_token_usage(session_id,agent_name,framework_type,
+                       turn_id,model,ts,input_tokens,output_tokens,reasoning_tokens,
+                       cache_read_tokens,cache_write_tokens,cost_usd,raw)
+                     VALUES('s1','main','pi-agent',?1,'minimax-m2.5',?2,
+                            100,10,0,0,0,NULL,NULL)",
+                    rusqlite::params![turn, ts],
+                )
+                .unwrap();
+            }
+        }
+        let store = Store::open_memory().unwrap();
+        let item = SourceItem {
+            key: db.to_string_lossy().to_string(),
+            path: db.clone(),
+            kind: SourceKind::Sqlite,
+        };
+        let out = scan_and_commit(&MiniMaxCode, &store, &item);
+        // The fixture seeds one believable row (id 1) and an all-zero one
+        // (id 2, skipped); our rows land as ids 3 and 4.
+        assert_eq!(out.events.len(), 3);
+        assert_eq!(out.events[0].ts_start, Some(1_779_256_800_300));
+        // Seconds-era row scaled ×1000 into the ms domain.
+        assert_eq!(out.events[1].ts_start, Some(1_779_256_800_000));
+        // A zero ts stays undated instead of poisoning the 1970 rollups.
+        assert_eq!(out.events[2].ts_start, None);
     }
 
     #[test]
