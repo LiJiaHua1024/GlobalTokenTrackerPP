@@ -55,6 +55,16 @@ if (-not (Test-Path (Join-Path $flutterDist 'globaltokentracker_ui.exe'))) {
     throw "missing build output: globaltokentracker_ui.exe in $flutterDist"
 }
 
+# Authenticode-sign the distributable binaries BEFORE anything is zipped or
+# hashed — the payload zip, the portable zip and the setup exe must all carry
+# the signature, and the printed SHA256 digests must match the signed files.
+# sign.ps1 skips with a notice when no GTT_SIGN_* credentials are configured.
+Write-Host '==> signing distributable binaries' -ForegroundColor Cyan
+$signTargets = @(Join-Path $flutterDist 'globaltokentracker_ui.exe')
+$ffiDll = Join-Path $flutterDist 'globaltokentracker_ffi.dll'
+if (Test-Path $ffiDll) { $signTargets += $ffiDll }
+& (Join-Path $PSScriptRoot 'sign.ps1') -File $signTargets
+
 Write-Host '==> staging payload.zip from Flutter Release distribution' -ForegroundColor Cyan
 New-Item -ItemType Directory -Force -Path $payloadDir | Out-Null
 if (Test-Path $payloadZip) { Remove-Item $payloadZip -Force }
@@ -77,6 +87,7 @@ New-Item -ItemType Directory -Force -Path $dist | Out-Null
 # 1. Self-extracting GUI Setup Installer
 $out = Join-Path $dist "GlobalTokenTrackerPP-Setup-$ver-win-x64.exe"
 Copy-Item (Join-Path $target 'globaltokentracker-setup.exe') $out -Force
+& (Join-Path $PSScriptRoot 'sign.ps1') -File $out
 $mb  = [math]::Round((Get-Item $out).Length / 1MB, 2)
 $sha = (Get-FileHash $out -Algorithm SHA256).Hash.ToLower()
 
