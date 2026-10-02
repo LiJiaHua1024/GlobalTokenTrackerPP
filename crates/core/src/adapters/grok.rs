@@ -154,6 +154,9 @@ impl SourceAdapter for Grok {
 }
 
 /// Minimal `%XX` decoder for the urlencoded cwd path segment (no url dep).
+/// Works on bytes: the input is tool-controlled text where a literal `%` can
+/// sit next to a multi-byte UTF-8 char, and slicing the `&str` at byte
+/// offsets there panics on a non-char boundary — every scan, forever.
 fn pct_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
@@ -161,9 +164,9 @@ fn pct_decode(s: &str) -> String {
     while i < b.len() {
         if b[i] == b'%'
             && i + 2 < b.len()
-            && let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+            && let (Some(h), Some(l)) = (hex_val(b[i + 1]), hex_val(b[i + 2]))
         {
-            out.push(v);
+            out.push(h * 16 + l);
             i += 3;
             continue;
         }
@@ -171,4 +174,30 @@ fn pct_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A literal `%` beside a multi-byte char used to panic on a non-char
+    /// boundary (`&s[i+1..i+3]`); the byte-wise decoder must pass it through.
+    #[test]
+    fn literal_percent_next_to_multibyte_is_not_a_crash() {
+        let s = "100%完成";
+        assert_eq!(pct_decode(s), s);
+        assert_eq!(pct_decode("a%41b%2Fc"), "aAb/c");
+        // Truncated escape and lone `%` pass through untouched.
+        assert_eq!(pct_decode("x%4"), "x%4");
+        assert_eq!(pct_decode("x%"), "x%");
+    }
 }
