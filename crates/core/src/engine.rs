@@ -221,9 +221,20 @@ impl Engine {
                         &mut report,
                     ) {
                         report.errors.push(format!("{}: {e:#}", item.path.display()));
+                        continue; // watermark stays put; the batch is re-read
                     }
                     report.events_skipped += outcome.skipped;
                     report.files_scanned += 1;
+                    if let Some(pc) = outcome.pending_cursor {
+                        self.store.save_cursor(
+                            adapter.id(),
+                            &pc.key,
+                            &pc.path,
+                            pc.offset,
+                            pc.mtime_ms,
+                            pc.state.as_deref(),
+                        )?;
+                    }
                 }
                 Err(e) => report
                     .errors

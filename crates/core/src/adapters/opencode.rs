@@ -16,7 +16,7 @@
 //! session-grain events (`opencode:session:*`) are purged and the watermark
 //! reset, otherwise old + new rows would double-count.
 
-use super::{Capability, ScanOutcome, SourceAdapter, SourceItem, SourceKind};
+use super::{Capability, PendingCursor, ScanOutcome, SourceAdapter, SourceItem, SourceKind};
 use crate::model::{CostSource, Provenance, UsageEvent, apps};
 use crate::store::Store;
 use anyhow::{Result, bail};
@@ -185,14 +185,13 @@ impl SourceAdapter for OpenCode {
             ));
         }
         if (max_updated as u64) > cur.offset || cur.state.as_deref() != Some(MSG_SCHEMA_STATE) {
-            store.save_cursor(
-                self.id(),
-                &item.key,
-                &item.path,
-                max_updated.max(0) as u64,
-                0,
-                Some(MSG_SCHEMA_STATE),
-            )?;
+            out.pending_cursor = Some(PendingCursor {
+                key: item.key.clone(),
+                path: item.path.clone(),
+                offset: max_updated.max(0) as u64,
+                mtime_ms: 0,
+                state: Some(MSG_SCHEMA_STATE.to_string()),
+            });
         }
         out.consumed = max_updated.max(0) as u64;
         Ok(out)
@@ -233,6 +232,7 @@ pub(crate) fn open_ro(path: &std::path::Path) -> Result<Connection> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::scan_and_commit;
 
     fn fixture(path: &std::path::Path) -> Connection {
         let c = Connection::open(path).unwrap();
@@ -329,7 +329,7 @@ mod tests {
 
         let store = Store::open_memory().unwrap();
         let it = item(&src);
-        let out = OpenCode.scan_sqlite(&it, &store).unwrap();
+        let out = scan_and_commit(&OpenCode, &store, &it);
         assert_eq!(out.events.len(), 2); // user row skipped
         let e0 = &out.events[0];
         assert_eq!(e0.dedup_key, "opencode:msg:m1");
@@ -387,7 +387,7 @@ mod tests {
             .save_cursor(apps::OPENCODE, &src.to_string_lossy(), &src, 500, 0, None)
             .unwrap();
 
-        let out = OpenCode.scan_sqlite(&item(&src), &store).unwrap();
+        let out = scan_and_commit(&OpenCode, &store, &item(&src));
         assert_eq!(out.events.len(), 1);
         assert_eq!(out.events[0].dedup_key, "opencode:msg:m1");
         // Legacy row must be gone once the engine ingests the scan.
@@ -406,7 +406,7 @@ mod tests {
         );
         // Incremental: the 1 s watermark overlap refetches the newest row,
         // but the same dedup_key merges in place — no double counting.
-        let again = OpenCode.scan_sqlite(&item(&src), &store).unwrap();
+        let again = scan_and_commit(&OpenCode, &store, &item(&src));
         assert_eq!(again.events.len(), 1);
         assert_eq!(again.events[0].dedup_key, "opencode:msg:m1");
         std::fs::remove_dir_all(&dir).ok();
@@ -430,7 +430,7 @@ mod tests {
         drop(c);
 
         let store = Store::open_memory().unwrap();
-        let out = OpenCode.scan_sqlite(&item(&src), &store).unwrap();
+        let out = scan_and_commit(&OpenCode, &store, &item(&src));
         let e = &out.events[0];
         assert_eq!(e.output_tokens, 35); // 5 output + 30 reasoning
         assert_eq!(e.reasoning_tokens, 30);
@@ -457,7 +457,7 @@ mod tests {
 
         let store = Store::open_memory().unwrap();
         let it = item(&src);
-        let out1 = OpenCode.scan_sqlite(&it, &store).unwrap();
+        let out1 = scan_and_commit(&OpenCode, &store, &it);
         assert_eq!(out1.events[0].output_tokens, 5);
 
         // Streaming completes: same row updated in place.
@@ -475,7 +475,7 @@ mod tests {
         .unwrap();
         drop(c);
 
-        let out2 = OpenCode.scan_sqlite(&it, &store).unwrap();
+        let out2 = scan_and_commit(&OpenCode, &store, &it);
         assert_eq!(out2.events.len(), 1);
         assert_eq!(out2.events[0].dedup_key, "opencode:msg:m1");
         assert_eq!(out2.events[0].output_tokens, 50);

@@ -9,7 +9,7 @@
 //! `credit_json` keys are md5 → unresolvable to model names; per-turn credits
 //! already flow through `rawUsage.credit`.
 
-use super::{Capability, ScanOutcome, SourceAdapter, SourceItem, SourceKind, complete_lines};
+use super::{Capability, PendingCursor, ScanOutcome, SourceAdapter, SourceItem, SourceKind, complete_lines};
 use crate::model::{Provenance, QuotaSnapshot, UsageEvent, apps};
 use crate::normalize::{epoch_ms, fnum, input_excludes_cache, num, text};
 use crate::store::Store;
@@ -183,14 +183,13 @@ impl SourceAdapter for WorkBuddy {
             });
         }
         if (max_updated as u64) > cur.offset {
-            store.save_cursor(
-                self.id(),
-                &item.key,
-                &item.path,
-                max_updated as u64,
-                0,
-                None,
-            )?;
+            out.pending_cursor = Some(PendingCursor {
+                key: item.key.clone(),
+                path: item.path.clone(),
+                offset: max_updated as u64,
+                mtime_ms: 0,
+                state: None,
+            });
         }
         Ok(out)
     }

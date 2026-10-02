@@ -19,7 +19,7 @@
 //! re-scanned naturally and collapse onto the same `cursor:{requestId}`
 //! dedup key via the completeness-UPSERT.
 
-use super::{Capability, ScanOutcome, SourceAdapter, SourceItem, SourceKind};
+use super::{Capability, PendingCursor, ScanOutcome, SourceAdapter, SourceItem, SourceKind};
 use crate::model::{Provenance, UsageEvent, apps};
 use crate::normalize::{epoch_ms, text};
 use crate::store::Store;
@@ -122,7 +122,13 @@ impl SourceAdapter for Cursor {
             });
         }
         if (max_row as u64) > cur.offset {
-            store.save_cursor(self.id(), &item.key, &item.path, max_row as u64, 0, None)?;
+            out.pending_cursor = Some(PendingCursor {
+                key: item.key.clone(),
+                path: item.path.clone(),
+                offset: max_row as u64,
+                mtime_ms: 0,
+                state: None,
+            });
         }
         Ok(out)
     }
@@ -131,6 +137,7 @@ impl SourceAdapter for Cursor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::scan_and_commit;
 
     fn make_db(path: &std::path::Path) -> rusqlite::Connection {
         let conn = rusqlite::Connection::open(path).unwrap();
@@ -181,7 +188,7 @@ mod tests {
             path: dbp.clone(),
             kind: SourceKind::Sqlite,
         };
-        let out = Cursor.scan_sqlite(&item, &store).unwrap();
+        let out = scan_and_commit(&Cursor, &store, &item);
         assert_eq!(out.events.len(), 1);
         let ev = &out.events[0];
         assert_eq!(ev.dedup_key, "cursor:r-1");
@@ -201,12 +208,12 @@ mod tests {
             )
             .unwrap();
         }
-        let out2 = Cursor.scan_sqlite(&item, &store).unwrap();
+        let out2 = scan_and_commit(&Cursor, &store, &item);
         assert_eq!(out2.events.len(), 1);
         assert_eq!(out2.events[0].dedup_key, "cursor:r-1");
 
         // Second scan with no new rows emits nothing.
-        let out3 = Cursor.scan_sqlite(&item, &store).unwrap();
+        let out3 = scan_and_commit(&Cursor, &store, &item);
         assert!(out3.events.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }

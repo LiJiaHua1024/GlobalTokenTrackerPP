@@ -19,7 +19,7 @@
 //! `.minimax*` dir exists at all. Profiles produce `~/.minimax-<name>` and are
 //! all collected.
 
-use super::{Capability, ScanOutcome, SourceAdapter, SourceItem, SourceKind};
+use super::{Capability, PendingCursor, ScanOutcome, SourceAdapter, SourceItem, SourceKind};
 use crate::model::{CostSource, Provenance, UsageEvent, apps};
 use crate::store::Store;
 use anyhow::Result;
@@ -205,7 +205,13 @@ impl SourceAdapter for MiniMaxCode {
             });
         }
         if (max_id as u64) > cur.offset {
-            store.save_cursor(self.id(), &item.key, &item.path, max_id as u64, 0, None)?;
+            out.pending_cursor = Some(PendingCursor {
+                key: item.key.clone(),
+                path: item.path.clone(),
+                offset: max_id as u64,
+                mtime_ms: 0,
+                state: None,
+            });
         }
         Ok(out)
     }
@@ -214,6 +220,7 @@ impl SourceAdapter for MiniMaxCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::scan_and_commit;
     use rusqlite::Connection;
 
     struct TmpDir(PathBuf);
@@ -282,7 +289,7 @@ mod tests {
             path: db.clone(),
             kind: SourceKind::Sqlite,
         };
-        let out = MiniMaxCode.scan_sqlite(&item, &store).unwrap();
+        let out = scan_and_commit(&MiniMaxCode, &store, &item);
         assert_eq!(out.events.len(), 1);
         let ev = &out.events[0];
         assert_eq!(ev.app, apps::MINIMAX_CODE);
@@ -299,7 +306,7 @@ mod tests {
         assert_eq!(out.skipped, 1);
 
         // Re-scan: watermark at id=2 → nothing new.
-        let out2 = MiniMaxCode.scan_sqlite(&item, &store).unwrap();
+        let out2 = scan_and_commit(&MiniMaxCode, &store, &item);
         assert!(out2.events.is_empty());
 
         // Append a row → only the new row arrives.
@@ -314,7 +321,7 @@ mod tests {
         )
         .unwrap();
         drop(conn);
-        let out3 = MiniMaxCode.scan_sqlite(&item, &store).unwrap();
+        let out3 = scan_and_commit(&MiniMaxCode, &store, &item);
         assert_eq!(out3.events.len(), 1);
         assert_eq!(out3.events[0].input_tokens, 2000);
         assert!(out3.events[0].cost_usd.is_none());
@@ -333,7 +340,7 @@ mod tests {
             path: db,
             kind: SourceKind::Sqlite,
         };
-        let out = MiniMaxCode.scan_sqlite(&item, &store).unwrap();
+        let out = scan_and_commit(&MiniMaxCode, &store, &item);
         assert!(out.events.is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }

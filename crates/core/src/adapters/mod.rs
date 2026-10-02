@@ -69,6 +69,21 @@ pub struct ScanOutcome {
     /// (e.g. Codex cumulative counters needed to delta future segments).
     pub new_state: Option<String>,
     pub notes: Vec<String>,
+    /// Watermark a SQLite adapter wants persisted. The engine saves it only
+    /// AFTER the returned events were ingested — the same ordering as the
+    /// JSONL path — so a crash or ingest failure replays the batch on the
+    /// next pass instead of silently skipping it forever.
+    pub pending_cursor: Option<PendingCursor>,
+}
+
+/// A deferred `sync_cursors` row for a SQLite source (see `ScanOutcome`).
+#[derive(Debug, Clone)]
+pub struct PendingCursor {
+    pub key: String,
+    pub path: PathBuf,
+    pub offset: u64,
+    pub mtime_ms: i64,
+    pub state: Option<String>,
 }
 
 pub trait SourceAdapter: Send + Sync {
@@ -143,4 +158,30 @@ pub(crate) fn complete_lines(data: &[u8]) -> (&[u8], u64) {
         // No newline at all: a single still-growing line — consume nothing.
         None => (&data[..0], 0),
     }
+}
+
+/// Test twin of the engine's SQLite flow: scan, "ingest", then persist the
+/// pending watermark. Multi-pass adapter tests call this so they exercise
+/// the real scan → ingest → persist ordering instead of the old
+/// persist-inside-scan contract.
+#[cfg(test)]
+pub(crate) fn scan_and_commit(
+    a: &dyn SourceAdapter,
+    store: &crate::store::Store,
+    item: &SourceItem,
+) -> ScanOutcome {
+    let out = a.scan_sqlite(item, store).unwrap();
+    if let Some(pc) = &out.pending_cursor {
+        store
+            .save_cursor(
+                a.id(),
+                &pc.key,
+                &pc.path,
+                pc.offset,
+                pc.mtime_ms,
+                pc.state.as_deref(),
+            )
+            .unwrap();
+    }
+    out
 }

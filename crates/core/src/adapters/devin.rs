@@ -19,7 +19,7 @@
 //! High-water mark: `message_nodes.row_id` AUTOINCREMENT, kept in
 //! `sync_cursors.last_byte_offset`.
 
-use super::{Capability, ScanOutcome, SourceAdapter, SourceItem, SourceKind};
+use super::{Capability, PendingCursor, ScanOutcome, SourceAdapter, SourceItem, SourceKind};
 use crate::model::{Provenance, UsageEvent, apps};
 use crate::normalize::{epoch_ms, fnum, num, num_opt, text};
 use crate::store::Store;
@@ -133,7 +133,13 @@ impl SourceAdapter for Devin {
             });
         }
         if (max_row as u64) > cur.offset {
-            store.save_cursor(self.id(), &item.key, &item.path, max_row as u64, 0, None)?;
+            out.pending_cursor = Some(PendingCursor {
+                key: item.key.clone(),
+                path: item.path.clone(),
+                offset: max_row as u64,
+                mtime_ms: 0,
+                state: None,
+            });
         }
         Ok(out)
     }
@@ -142,6 +148,7 @@ impl SourceAdapter for Devin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::scan_and_commit;
 
     fn src_db(path: &std::path::Path) -> rusqlite::Connection {
         let c = rusqlite::Connection::open(path).unwrap();
@@ -196,7 +203,7 @@ mod tests {
             path: src.clone(),
             kind: SourceKind::Sqlite,
         };
-        let out = Devin.scan_sqlite(&item, &store).unwrap();
+        let out = scan_and_commit(&Devin, &store, &item);
         assert_eq!(out.events.len(), 3); // 2 snapshots of r1 + r2
         let e = &out.events[0];
         assert_eq!(e.dedup_key, "devin:r1");
@@ -212,7 +219,7 @@ mod tests {
         // High-water mark advanced past all rows.
         assert_eq!(store.load_cursor(&item.key).unwrap().offset, 4);
         // Second scan returns nothing new.
-        assert!(Devin.scan_sqlite(&item, &store).unwrap().events.is_empty());
+        assert!(scan_and_commit(&Devin, &store, &item).events.is_empty());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

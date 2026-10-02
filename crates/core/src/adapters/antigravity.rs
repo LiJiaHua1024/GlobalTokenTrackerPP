@@ -55,7 +55,7 @@
 //! changed; unchanged files cost two `stat`s. Reads are read-only; a WAL
 //! database left without sidecars by a clean close is retried `immutable=1`.
 
-use super::{Capability, ScanOutcome, SourceAdapter, SourceItem, SourceKind};
+use super::{Capability, PendingCursor, ScanOutcome, SourceAdapter, SourceItem, SourceKind};
 use crate::model::{Provenance, UsageEvent, apps};
 use crate::store::Store;
 use anyhow::Result;
@@ -100,10 +100,17 @@ impl SourceAdapter for Antigravity {
             return Ok(ScanOutcome::default());
         }
         let conn = open_db(&item.path)?;
-        let (out, rows) = read_conversation(&conn, item, store)?;
+        let (mut out, rows) = read_conversation(&conn, item, store)?;
         // Fingerprint taken BEFORE the read: a write racing the read moves the
-        // file past it, so the next pass simply reads again.
-        store.save_cursor(self.id(), &item.key, &item.path, rows, 0, Some(&fp))?;
+        // file past it, so the next pass simply reads again. The engine
+        // persists the watermark only after the events are ingested.
+        out.pending_cursor = Some(PendingCursor {
+            key: item.key.clone(),
+            path: item.path.clone(),
+            offset: rows,
+            mtime_ms: 0,
+            state: Some(fp),
+        });
         Ok(out)
     }
 }
@@ -768,6 +775,7 @@ fn read_conversation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::scan_and_commit;
     use crate::pricing::{PriceBook, Resolution};
 
     // ---- tiny protobuf encoder for fixtures
@@ -938,7 +946,7 @@ mod tests {
         drop(c);
 
         let store = Store::open_memory().unwrap();
-        let out = Antigravity.scan_sqlite(&item(&db), &store).unwrap();
+        let out = scan_and_commit(&Antigravity, &store, &item(&db));
         assert_eq!(out.events.len(), 2, "{:?}", out.events);
         assert_eq!(out.skipped, 1);
 
@@ -1006,7 +1014,7 @@ mod tests {
         drop(c);
 
         let store = Store::open_memory().unwrap();
-        let out = Antigravity.scan_sqlite(&item(&db), &store).unwrap();
+        let out = scan_and_commit(&Antigravity, &store, &item(&db));
         assert_eq!(out.events.len(), 2);
         assert_eq!(out.events[0].ts_start, Some(t_a * 1000 + 500)); // by response id
         assert_eq!(out.events[1].ts_start, Some(t_b * 1000 + 500)); // by gen idx
@@ -1026,7 +1034,7 @@ mod tests {
         put_gen(&c, 0, &turn("r", Some("gemini-3-flash-a")).blob());
         drop(c);
         let store = Store::open_memory().unwrap();
-        let out = Antigravity.scan_sqlite(&item(&db), &store).unwrap();
+        let out = scan_and_commit(&Antigravity, &store, &item(&db));
         assert_eq!(out.events[0].ts_start, Some(created * 1000 + 500));
         // An absurd stamp (year 2000) is not believed either.
         let db2 = dir.join("skewed.db");
@@ -1036,7 +1044,7 @@ mod tests {
         g.stamp = Some(946_684_800);
         put_gen(&c, 0, &g.blob());
         drop(c);
-        let out = Antigravity.scan_sqlite(&item(&db2), &store).unwrap();
+        let out = scan_and_commit(&Antigravity, &store, &item(&db2));
         assert_eq!(out.events[0].ts_start, Some(created * 1000 + 500));
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1064,7 +1072,7 @@ mod tests {
         put_gen(&c, 3, &known.blob());
         drop(c);
         let store = Store::open_memory().unwrap();
-        let out = Antigravity.scan_sqlite(&item(&db), &store).unwrap();
+        let out = scan_and_commit(&Antigravity, &store, &item(&db));
         let m: Vec<_> = out.events.iter().map(|e| e.model.as_deref()).collect();
         assert_eq!(
             m,
@@ -1111,17 +1119,11 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let it = item(&db);
         assert_eq!(
-            Antigravity.scan_sqlite(&it, &store).unwrap().events.len(),
+            scan_and_commit(&Antigravity, &store, &it).events.len(),
             1
         );
         // Nothing changed → not even opened.
-        assert!(
-            Antigravity
-                .scan_sqlite(&it, &store)
-                .unwrap()
-                .events
-                .is_empty()
-        );
+        assert!(scan_and_commit(&Antigravity, &store, &it).events.is_empty());
 
         std::thread::sleep(std::time::Duration::from_millis(30));
         let c = Connection::open(&db).unwrap();
@@ -1129,7 +1131,7 @@ mod tests {
         drop(c);
         // Re-read: the old generation comes back too (the ledger UPSERT makes
         // that idempotent) alongside the new one.
-        let out = Antigravity.scan_sqlite(&it, &store).unwrap();
+        let out = scan_and_commit(&Antigravity, &store, &it);
         let ids: Vec<_> = out.events.iter().map(|e| e.dedup_key.as_str()).collect();
         assert_eq!(ids, ["agy:r1", "agy:r2"]);
         std::fs::remove_dir_all(&dir).ok();
@@ -1162,9 +1164,9 @@ mod tests {
                 store.upsert_event(e).unwrap();
             }
         };
-        let ea = Antigravity.scan_sqlite(&item(&a), &store).unwrap();
+        let ea = scan_and_commit(&Antigravity, &store, &item(&a));
         ingest(&ea.events);
-        let eb = Antigravity.scan_sqlite(&item(&b), &store).unwrap();
+        let eb = scan_and_commit(&Antigravity, &store, &item(&b));
         ingest(&eb.events);
         // The copy contributes only what is new to the ledger.
         let keys: Vec<_> = eb.events.iter().map(|e| e.dedup_key.as_str()).collect();
@@ -1176,7 +1178,7 @@ mod tests {
         let c = Connection::open(&a).unwrap();
         put_gen(&c, 1, &turn("orig-2", Some("gemini-pro-default")).blob());
         drop(c);
-        let ea = Antigravity.scan_sqlite(&item(&a), &store).unwrap();
+        let ea = scan_and_commit(&Antigravity, &store, &item(&a));
         ingest(&ea.events);
         let owner: String = store
             .conn()
@@ -1204,7 +1206,7 @@ mod tests {
             .unwrap();
         drop(c);
         let store = Store::open_memory().unwrap();
-        let out = Antigravity.scan_sqlite(&item(&db), &store).unwrap();
+        let out = scan_and_commit(&Antigravity, &store, &item(&db));
         assert!(out.events.is_empty());
         // Remembered: the second pass does not reopen it.
         assert!(store.load_cursor(&item(&db).key).unwrap().state.is_some());
@@ -1223,7 +1225,7 @@ mod tests {
         wal.push("-wal");
         assert!(!Path::new(&wal).exists(), "fixture must have no sidecars");
         let store = Store::open_memory().unwrap();
-        let out = Antigravity.scan_sqlite(&item(&db), &store).unwrap();
+        let out = scan_and_commit(&Antigravity, &store, &item(&db));
         assert_eq!(out.events.len(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1245,7 +1247,7 @@ mod tests {
         put_gen(&c, 3, &turn("ok", Some("gemini-pro-default")).blob());
         drop(c);
         let store = Store::open_memory().unwrap();
-        let out = Antigravity.scan_sqlite(&item(&db), &store).unwrap();
+        let out = scan_and_commit(&Antigravity, &store, &item(&db));
         assert_eq!(out.events.len(), 1);
         assert_eq!(out.events[0].dedup_key, "agy:ok");
         std::fs::remove_dir_all(&dir).ok();

@@ -12,7 +12,7 @@
 //! migration: `adapter_state = "rowid-v2"` resets the timestamp cursor so all
 //! rows rescan once (dedup keys unchanged → upsert is idempotent).
 
-use super::{Capability, ScanOutcome, SourceAdapter, SourceItem, SourceKind};
+use super::{Capability, PendingCursor, ScanOutcome, SourceAdapter, SourceItem, SourceKind};
 use crate::model::{Provenance, UsageEvent, apps};
 use crate::store::Store;
 use anyhow::Result;
@@ -164,14 +164,13 @@ impl SourceAdapter for ZCode {
         }
         let next = first_running_rowid.map_or(max_rowid, |r| r - 1);
         if next as u64 != cur.offset || !migrated {
-            store.save_cursor(
-                self.id(),
-                &item.key,
-                &item.path,
-                next.max(0) as u64,
-                0,
-                Some("rowid-v2"),
-            )?;
+            out.pending_cursor = Some(PendingCursor {
+                key: item.key.clone(),
+                path: item.path.clone(),
+                offset: next.max(0) as u64,
+                mtime_ms: 0,
+                state: Some("rowid-v2".into()),
+            });
         }
         Ok(out)
     }
@@ -180,6 +179,7 @@ impl SourceAdapter for ZCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::scan_and_commit;
     use rusqlite::Connection;
     use std::path::Path;
 
@@ -243,12 +243,12 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let item = item_for(&db);
         insert(&db, "a", "req-a", "completed", 1_000_000, 100);
-        let out = ZCode.scan_sqlite(&item, &store).unwrap();
+        let out = scan_and_commit(&ZCode, &store, &item);
         assert_eq!(out.events.len(), 1);
 
         // 60s-late insert — started_at long before the first row's.
         insert(&db, "b", "req-b", "completed", 940_000, 200);
-        let out = ZCode.scan_sqlite(&item, &store).unwrap();
+        let out = scan_and_commit(&ZCode, &store, &item);
         assert_eq!(out.events.len(), 1, "late insert must be caught");
         assert_eq!(out.events[0].dedup_key, "zcode:req-b:0");
         assert_eq!(out.events[0].input_tokens, 200);
@@ -266,12 +266,12 @@ mod tests {
         store
             .save_cursor("zcode", &item.key, &item.path, 1_790_519_732_267, 0, None)
             .unwrap();
-        let out = ZCode.scan_sqlite(&item, &store).unwrap();
+        let out = scan_and_commit(&ZCode, &store, &item);
         assert_eq!(out.events.len(), 1, "migration must rescan all rows");
         let cur = store.load_cursor(&item.key).unwrap();
         assert_eq!(cur.state.as_deref(), Some("rowid-v2"));
         // Second scan: nothing new.
-        let out = ZCode.scan_sqlite(&item, &store).unwrap();
+        let out = scan_and_commit(&ZCode, &store, &item);
         assert!(out.events.is_empty());
     }
 
@@ -285,7 +285,7 @@ mod tests {
         insert(&db, "a", "req-a", "completed", 1_000_000, 100);
         insert(&db, "b", "req-b", "running", 1_000_100, 0);
         insert(&db, "c", "req-c", "completed", 1_000_200, 300);
-        let out = ZCode.scan_sqlite(&item, &store).unwrap();
+        let out = scan_and_commit(&ZCode, &store, &item);
         assert_eq!(out.events.len(), 2);
         assert_eq!(out.skipped, 1);
 
@@ -299,7 +299,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        let out = ZCode.scan_sqlite(&item, &store).unwrap();
+        let out = scan_and_commit(&ZCode, &store, &item);
         assert!(
             out.events
                 .iter()

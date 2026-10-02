@@ -39,7 +39,7 @@
 //! project/provider (CLI data dir; editor hosts keep history in state.vscdb
 //! which we deliberately don't read — project stays None there).
 
-use super::{Capability, ScanOutcome, SourceAdapter, SourceItem, SourceKind};
+use super::{Capability, PendingCursor, ScanOutcome, SourceAdapter, SourceItem, SourceKind};
 use crate::model::{CostSource, Provenance, UsageEvent, apps};
 use crate::normalize::{epoch_ms, fnum, num};
 use crate::store::Store;
@@ -363,14 +363,13 @@ impl SourceAdapter for Cline {
             .into_iter()
             .find(|p| p.is_file());
         if let Some(fp) = fp {
-            store.save_cursor(
-                self.id(),
-                &item.key,
-                &fp,
-                state.len,
-                state.mtime_ms,
-                Some(&serde_json::to_string(&state)?),
-            )?;
+            out.pending_cursor = Some(PendingCursor {
+                key: item.key.clone(),
+                path: fp,
+                offset: state.len,
+                mtime_ms: state.mtime_ms,
+                state: Some(serde_json::to_string(&state)?),
+            });
         }
         Ok(out)
     }
@@ -379,6 +378,7 @@ impl SourceAdapter for Cline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::scan_and_commit;
 
     struct TmpDir(PathBuf);
     impl Drop for TmpDir {
@@ -450,7 +450,7 @@ mod tests {
             kind: SourceKind::Sqlite,
         };
         let store = Store::open_memory().unwrap();
-        let out = Cline.scan_sqlite(&item, &store).unwrap();
+        let out = scan_and_commit(&Cline, &store, &item);
         let keys: Vec<&str> = out.events.iter().map(|e| e.dedup_key.as_str()).collect();
         assert_eq!(
             keys,
@@ -482,7 +482,7 @@ mod tests {
         assert_eq!(e2.reasoning_tokens, 0);
 
         // Second scan, unchanged file → fast path, nothing re-emitted.
-        let out2 = Cline.scan_sqlite(&item, &store).unwrap();
+        let out2 = scan_and_commit(&Cline, &store, &item);
         assert!(out2.events.is_empty());
     }
 
@@ -497,7 +497,7 @@ mod tests {
             kind: SourceKind::Sqlite,
         };
         // First scan establishes cold=false (empty file).
-        Cline.scan_sqlite(&item, &store).unwrap();
+        scan_and_commit(&Cline, &store, &item);
         // User then deletes messages → file rewritten with a deleted_api_reqs
         // aggregate; the already-counted originals must not double.
         let msgs = format!(
@@ -514,7 +514,7 @@ mod tests {
             ),
         );
         std::fs::write(task.join("ui_messages.json"), msgs).unwrap();
-        let out = Cline.scan_sqlite(&item, &store).unwrap();
+        let out = scan_and_commit(&Cline, &store, &item);
         let keys: Vec<&str> = out.events.iter().map(|e| e.dedup_key.as_str()).collect();
         assert_eq!(keys, vec!["cline:t-1:1779256800500:started"]);
     }
@@ -534,7 +534,7 @@ mod tests {
             path: task.clone(),
             kind: SourceKind::Sqlite,
         };
-        let out = Cline.scan_sqlite(&item, &store).unwrap();
+        let out = scan_and_commit(&Cline, &store, &item);
         assert!(out.events.is_empty());
     }
 }

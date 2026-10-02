@@ -19,7 +19,7 @@
 //! owns the watermark: `adapter_state` persists processed file names and the
 //! last cumulative snapshot, making incremental scans O(new files).
 
-use super::{Capability, ScanOutcome, SourceAdapter, SourceItem, SourceKind};
+use super::{Capability, PendingCursor, ScanOutcome, SourceAdapter, SourceItem, SourceKind};
 use crate::model::{Provenance, UsageEvent, apps};
 use crate::normalize::{epoch_ms, num, text};
 use crate::store::Store;
@@ -382,14 +382,13 @@ impl CodeBuddyIde {
             return Ok(out);
         }
         if let Some(fp) = fp_file {
-            store.save_cursor(
-                self.id(),
-                &item.key,
-                &fp,
-                state.seen.len() as u64,
-                0,
-                Some(&serde_json::to_string(&state)?),
-            )?;
+            out.pending_cursor = Some(PendingCursor {
+                key: item.key.clone(),
+                path: fp,
+                offset: state.seen.len() as u64,
+                mtime_ms: 0,
+                state: Some(serde_json::to_string(&state)?),
+            });
         }
         Ok(out)
     }
@@ -398,6 +397,7 @@ impl CodeBuddyIde {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::scan_and_commit;
 
     fn msg(dir: &Path, name: &str, role: &str, created: &str, extra: Option<Value>) {
         let mut v = serde_json::json!({"role": role, "id": name, "createdAt": created});
@@ -448,7 +448,7 @@ mod tests {
             path: conv.clone(),
             kind: SourceKind::Sqlite,
         };
-        let out = CodeBuddyIde::default().scan_sqlite(&item, &store).unwrap();
+        let out = scan_and_commit(&CodeBuddyIde::default(), &store, &item);
         assert_eq!(out.events.len(), 2);
         let first = &out.events[0];
         assert_eq!(first.dedup_key, "codebuddy_ide:convX:req-1000-50");
@@ -467,7 +467,7 @@ mod tests {
         assert_eq!(second.credits, Some(0.5));
 
         // Re-scan: cursor state persists → zero new events.
-        let out2 = CodeBuddyIde::default().scan_sqlite(&item, &store).unwrap();
+        let out2 = scan_and_commit(&CodeBuddyIde::default(), &store, &item);
         assert_eq!(out2.events.len(), 0);
 
         std::fs::remove_dir_all(&dir).ok();
