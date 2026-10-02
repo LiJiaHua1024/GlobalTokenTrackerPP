@@ -2307,9 +2307,15 @@ class _ShareCardDialogState extends State<ShareCardDialog> {
 
       // Ultra crisp 3.0 pixel ratio rendering
       final ui.Image image = await boundary.toImage(pixelRatio: 3.0);
-      final ByteData? byteData =
-          await image.toByteData(format: ui.ImageByteFormat.png);
-      return byteData?.buffer.asUint8List();
+      try {
+        final ByteData? byteData =
+            await image.toByteData(format: ui.ImageByteFormat.png);
+        return byteData?.buffer.asUint8List();
+      } finally {
+        // The engine image leaks native memory until disposed — every share
+        // used to leave one behind.
+        image.dispose();
+      }
     } catch (e) {
       debugPrint('Failed to capture card: $e');
       return null;
