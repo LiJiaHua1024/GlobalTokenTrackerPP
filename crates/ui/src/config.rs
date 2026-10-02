@@ -116,7 +116,7 @@ impl UiConfig {
 
     pub fn save(&self) {
         if let Ok(s) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(config_path(), s);
+            let _ = globaltokentracker_core::store::atomic_write(&config_path(), s.as_bytes());
         }
     }
 

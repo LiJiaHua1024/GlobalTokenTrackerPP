@@ -225,7 +225,7 @@ pub fn install_claude_env() -> Result<PathBuf> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(&path, serde_json::to_string_pretty(&doc)? + "\n")?;
+    crate::store::atomic_write(&path, (serde_json::to_string_pretty(&doc)? + "\n").as_bytes())?;
     Ok(path)
 }
 

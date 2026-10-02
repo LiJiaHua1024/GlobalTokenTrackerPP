@@ -112,7 +112,7 @@ fn codex_refresh(auth: &mut Value, path: &Path) -> Result<()> {
         }
     }
     auth["last_refresh"] = serde_json::json!(jiff::Timestamp::now().to_string());
-    std::fs::write(path, serde_json::to_string_pretty(auth)?)?;
+    crate::store::atomic_write(path, serde_json::to_string_pretty(auth)?.as_bytes())?;
     Ok(())
 }
 
