@@ -13,6 +13,7 @@ import 'package:provider/provider.dart';
 import '../core/ffi_bridge.dart';
 import '../core/models.dart';
 import '../core/theme.dart';
+import 'receipt_card.dart';
 
 /// Counts (requests/events) are raw quantities — never compact them to K/M.
 String _formatCount(num value) => NumberFormat.decimalPattern().format(value);
@@ -23,6 +24,7 @@ enum ShareCardStyle {
   midnightDark,
   auroraGlow,
   crispMinimal,
+  receipt,
 }
 
 extension ShareCardStyleExtension on ShareCardStyle {
@@ -36,6 +38,8 @@ extension ShareCardStyleExtension on ShareCardStyle {
         return '极光幻境';
       case ShareCardStyle.crispMinimal:
         return '现代极简';
+      case ShareCardStyle.receipt:
+        return '超市小票';
     }
   }
 
@@ -49,6 +53,8 @@ extension ShareCardStyleExtension on ShareCardStyle {
         return Icons.auto_awesome;
       case ShareCardStyle.crispMinimal:
         return Icons.light_mode_outlined;
+      case ShareCardStyle.receipt:
+        return Icons.receipt_long_outlined;
     }
   }
 }
@@ -120,7 +126,7 @@ class ShareCardPalette {
   });
 
   static ShareCardPalette resolve(ShareCardStyle style, ThemeData appTheme) {
-    switch (style) {
+  switch (style) {
       case ShareCardStyle.m3Dynamic:
         final cs = appTheme.colorScheme;
         final isDark = appTheme.brightness == Brightness.dark;
@@ -438,6 +444,10 @@ class ShareCardPalette {
           glowColor: const Color(0xFF2563EB),
           isDark: false,
         );
+      case ShareCardStyle.receipt:
+        // The receipt renders its own thermal-paper palette, so this is never
+        // reached in practice. Reuse MD3 rather than leaving the lookup broken.
+        return resolve(ShareCardStyle.m3Dynamic, appTheme);
     }
   }
 }
@@ -2213,6 +2223,8 @@ class ShareCardDialog extends StatefulWidget {
 
 class _ShareCardDialogState extends State<ShareCardDialog> {
   final GlobalKey _cardBoundaryKey = GlobalKey();
+  final GlobalKey<ReceiptShareCardState> _receiptKey =
+      GlobalKey<ReceiptShareCardState>();
   final TextEditingController _handleController = TextEditingController();
 
   late String _selectedRange;
@@ -2231,6 +2243,27 @@ class _ShareCardDialogState extends State<ShareCardDialog> {
 
   bool _isCopying = false;
   bool _copySuccess = false;
+
+  /// True while the receipt is still feeding out of the slot. Export is locked
+  /// for the duration — capturing mid-feed would yield a half-printed slip.
+  bool _isPrinting = false;
+
+  /// Raised whenever the user lands on the receipt style, and cleared once the
+  /// slip has consumed it, so the feed replays on every switch back and forth
+  /// without re-firing on unrelated rebuilds.
+  bool _receiptAutoPrint = false;
+
+  bool get _isReceipt => _selectedStyle == ShareCardStyle.receipt;
+
+  void _selectStyle(ShareCardStyle style) {
+    setState(() {
+      _selectedStyle = style;
+      if (style == ShareCardStyle.receipt) {
+        _isPrinting = false;
+        _receiptAutoPrint = true;
+      }
+    });
+  }
 
   @override
   void initState() {
@@ -2299,6 +2332,10 @@ class _ShareCardDialogState extends State<ShareCardDialog> {
   }
 
   Future<Uint8List?> _captureCardPng() async {
+    // Every export path funnels through here, so this is the one place that
+    // needs to refuse a half-printed receipt.
+    if (_isPrinting) return null;
+
     try {
       // Find the render object
       final boundary = _cardBoundaryKey.currentContext?.findRenderObject()
@@ -2613,26 +2650,65 @@ class _ShareCardDialogState extends State<ShareCardDialog> {
                               FittedBox(
                                 fit: BoxFit.scaleDown,
                                 alignment: Alignment.topCenter,
-                                child: RepaintBoundary(
-                                  key: _cardBoundaryKey,
-                                  child: SizedBox(
-                                    width: 640,
-                                    child: ShareStatCard(
-                                      data: _data,
-                                      periodLabel: _getRangeLabel(_selectedRange),
-                                      rangeKey: _selectedRange,
-                                      style: _selectedStyle,
-                                      customHandle: _handleController.text,
-                                      showCost: _showCost,
-                                      showActivity: _showActivity,
-                                      showModels: _showModels,
-                                      showTools: _showTools,
-                                      showTrend: _showTrend,
-                                      showHeatmap: _showHeatmap,
-                                      showCache: _showCache,
-                                      trendChartType: _trendChartType,
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    // Chrome around the slip: inside the
+                                    // FittedBox so it scales with the paper,
+                                    // outside the boundary so it never reaches
+                                    // the exported image.
+                                    if (_isReceipt) const ReceiptPrinter(),
+                                    RepaintBoundary(
+                                      key: _cardBoundaryKey,
+                                      child: SizedBox(
+                                        width: _isReceipt ? kReceiptWidth : 640,
+                                        child: _isReceipt
+                                            ? ReceiptShareCard(
+                                                key: _receiptKey,
+                                                data: _data,
+                                                periodLabel: _getRangeLabel(
+                                                  _selectedRange,
+                                                ),
+                                                rangeKey: _selectedRange,
+                                                customHandle:
+                                                    _handleController.text,
+                                                showCost: _showCost,
+                                                showModels: _showModels,
+                                                showTools: _showTools,
+                                                showCache: _showCache,
+                                                // Switching to this style is the
+                                                // trigger; the slip prints itself.
+                                                autoPrint: _receiptAutoPrint,
+                                                onPrintingChanged: (printing) {
+                                                  if (mounted) {
+                                                    setState(
+                                                      () => _isPrinting = printing,
+                                                    );
+                                                  }
+                                                },
+                                              )
+                                            : ShareStatCard(
+                                                data: _data,
+                                                periodLabel: _getRangeLabel(
+                                                  _selectedRange,
+                                                ),
+                                                rangeKey: _selectedRange,
+                                                style: _selectedStyle,
+                                                customHandle:
+                                                    _handleController.text,
+                                                showCost: _showCost,
+                                                showActivity: _showActivity,
+                                                showModels: _showModels,
+                                                showTools: _showTools,
+                                                showTrend: _showTrend,
+                                                showHeatmap: _showHeatmap,
+                                                showCache: _showCache,
+                                                trendChartType:
+                                                    _trendChartType,
+                                              ),
+                                      ),
                                     ),
-                                  ),
+                                  ],
                                 ),
                               ),
                             ],
@@ -2696,7 +2772,7 @@ class _ShareCardDialogState extends State<ShareCardDialog> {
                                 label: Text(s.label),
                                 selected: isSelected,
                                 onSelected: (_) {
-                                  setState(() => _selectedStyle = s);
+                                  _selectStyle(s);
                                 },
                               );
                             }).toList(),

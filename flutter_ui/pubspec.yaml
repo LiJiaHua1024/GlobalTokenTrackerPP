@@ -20,7 +20,6 @@ dependencies:
   pasteboard: ^0.5.0
   file_picker: ^13.1.0
   crypto: ^3.0.3
-
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -30,3 +29,9 @@ flutter:
   uses-material-design: true
   assets:
     - assets/
+  fonts:
+    # Bitmap-inspired monospace standing in for the ROM font a thermal printer
+    # burns into its own print head. SIL OFL 1.1 — see assets/fonts/Doto-OFL.txt.
+    - family: Doto
+      fonts:
+        - asset: assets/fonts/Doto.ttf
