@@ -120,6 +120,9 @@ pub struct Shell {
     scanning: bool,
     /// A filesystem event arrived while a scan was running — rescan when it ends.
     pending_rescan: bool,
+    /// Bumped on every range/filter change; a scan started earlier carries
+    /// its starting value and its result is dropped when it lands stale.
+    scan_seq: u64,
     last_error: Option<String>,
     config: UiConfig,
     theme: Theme,
@@ -188,7 +191,7 @@ pub enum MenuKind {
 }
 
 pub enum Msg {
-    Loaded(LoadOutcome),
+    Loaded(LoadOutcome, u64),
     Failed(String),
     Tick,
     Rescan,
@@ -196,7 +199,7 @@ pub enum Msg {
     Tray(tray::TrayAction),
     Nav(Option<String>),
     DetailPage(i64),
-    DetailLoaded(Arc<Vec<EventRow>>, u64, i64),
+    DetailLoaded(Arc<Vec<EventRow>>, u64, i64, u64),
     /// A light page-table query finished (`Page` says which slot to free).
     PageData(Page, Result<PageData, String>),
     ToggleEdit,
@@ -525,7 +528,8 @@ impl Component for Shell {
         context.spawn_background(move |_| {
             power::worker("gtt-scan");
             match load_all(range, app_filter, model_filter, true, true) {
-                Ok(s) => Msg::Loaded(s),
+                // Shell::create inits scan_seq to 0 — this is that scan.
+                Ok(s) => Msg::Loaded(s, 0),
                 Err(e) => Msg::Failed(e),
             }
         });
@@ -571,6 +575,8 @@ impl Component for Shell {
             page,
             scanning: true,
             pending_rescan: false,
+            // Matches the initial scan spawned in create() below.
+            scan_seq: 0,
             last_error: None,
             app_filter: config.apps.clone(),
             model_filter: config.models.clone(),
@@ -601,7 +607,20 @@ impl Component for Shell {
 
     fn update(&mut self, message: Msg, context: &ComponentContext<Self>) {
         match message {
-            Msg::Loaded(outcome) => {
+            Msg::Loaded(outcome, seq) => {
+                // A range/filter change bumped scan_seq while this scan ran:
+                // the result is stale — drop it, close out the indicator and
+                // let the pending follow-up scan (queued by that change) run.
+                if seq != self.scan_seq {
+                    self.scanning = false;
+                    if self.pending_rescan {
+                        self.pending_rescan = false;
+                        self.start_scan(context);
+                    } else {
+                        arm_refresh(context, self.config.refresh_secs);
+                    }
+                    return;
+                }
                 let mut fresh = false;
                 let price_due = match outcome {
                     LoadOutcome::Fresh(s) => {
@@ -736,7 +755,7 @@ impl Component for Shell {
                 // A manual refresh is the "trust nothing" button: adapters that
                 // memoize quiet sources must re-read them from scratch.
                 globaltokentracker_core::adapters::forget_scan_memos();
-                self.start_scan(context);
+                self.request_scan(context);
             }
             Msg::SetRange(r) => {
                 self.open_menu = None;
@@ -798,16 +817,14 @@ impl Component for Shell {
                 self.config.apps = self.app_filter.clone();
                 self.config.save();
                 self.views_stale = true;
-                self.scanning = false;
-                self.start_scan(context);
+                self.request_scan(context);
             }
             Msg::SetApps(filter) => {
                 self.app_filter = filter;
                 self.config.apps = self.app_filter.clone();
                 self.config.save();
                 self.views_stale = true;
-                self.scanning = false;
-                self.start_scan(context);
+                self.request_scan(context);
             }
             Msg::ToggleModel(model, on) => {
                 let all: Vec<String> = self
@@ -835,16 +852,14 @@ impl Component for Shell {
                 self.config.models = self.model_filter.clone();
                 self.config.save();
                 self.views_stale = true;
-                self.scanning = false;
-                self.start_scan(context);
+                self.request_scan(context);
             }
             Msg::SetModels(filter) => {
                 self.model_filter = filter;
                 self.config.models = self.model_filter.clone();
                 self.config.save();
                 self.views_stale = true;
-                self.scanning = false;
-                self.start_scan(context);
+                self.request_scan(context);
             }
             Msg::SetRefreshSecs(secs) => {
                 if REFRESH_OPTIONS.iter().any(|(s, _)| *s == secs)
@@ -1048,6 +1063,7 @@ impl Component for Shell {
             }
             Msg::DetailPage(page) => {
                 self.open_menu = None;
+                let seq = self.scan_seq;
                 let apps = self.app_filter.clone();
                 let models = self.model_filter.clone();
                 context.spawn_background(move |_| {
@@ -1055,12 +1071,16 @@ impl Component for Shell {
                     match Store::open(&db_path()).and_then(|s| {
                         s.detail(page, DETAIL_PAGE_SIZE, apps.as_deref(), models.as_deref())
                     }) {
-                        Ok(d) => Msg::DetailLoaded(Arc::new(d.rows), d.total_events, page),
+                        Ok(d) => Msg::DetailLoaded(Arc::new(d.rows), d.total_events, page, seq),
                         Err(e) => Msg::Failed(e.to_string()),
                     }
                 });
             }
-            Msg::DetailLoaded(rows, total, page) => {
+            Msg::DetailLoaded(rows, total, page, seq) => {
+                // Filters changed while this query ran — the rows are stale.
+                if seq != self.scan_seq {
+                    return;
+                }
                 if let Some(s) = &mut self.snap {
                     s.detail = DetailBundle { rows, total, page };
                 }
@@ -1163,7 +1183,10 @@ impl Component for Shell {
                         self.views_stale = true;
                         self.load_page_data(Page::Prices, context);
                         if r.repriced > 0 {
-                            self.start_scan(context);
+                            // Repricing rewrote costs in the ledger — the
+                            // in-flight scan (if any) is already stale; bump
+                            // the generation and queue a fresh pass.
+                            self.request_scan(context);
                         }
                     }
                     Err(e) => diag!("[prices] refresh failed: {e}"),
@@ -1658,14 +1681,28 @@ impl Shell {
         }
         self.config.save();
         self.views_stale = true;
-        self.scanning = false;
-        self.start_scan(context);
+        self.request_scan(context);
+    }
+
+    /// Every change to what a scan covers (range / tool / model filters,
+    /// manual refresh, price refresh) goes through here: bump the scan
+    /// generation first, then start — or queue — the scan. An in-flight
+    /// scan carries the old generation and its result is discarded on
+    /// arrival; `pending_rescan` queues the follow-up scan.
+    fn request_scan(&mut self, context: &ComponentContext<Self>) {
+        self.scan_seq += 1;
+        if self.scanning {
+            self.pending_rescan = true;
+        } else {
+            self.start_scan(context);
+        }
     }
 
     fn start_scan(&mut self, context: &ComponentContext<Self>) {
         if !self.scanning {
             diag!("[scan] start");
             self.scanning = true;
+            let seq = self.scan_seq;
             let force_views = std::mem::take(&mut self.views_stale);
             let range = self.range;
             let apps = self.app_filter.clone();
@@ -1673,7 +1710,7 @@ impl Shell {
             context.spawn_background(move |_| {
                 power::worker("gtt-scan");
                 match load_all(range, apps, models, false, force_views) {
-                    Ok(s) => Msg::Loaded(s),
+                    Ok(s) => Msg::Loaded(s, seq),
                     Err(e) => Msg::Failed(e),
                 }
             });
