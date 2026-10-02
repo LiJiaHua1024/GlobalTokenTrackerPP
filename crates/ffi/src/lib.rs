@@ -64,25 +64,53 @@ unsafe fn parse_string_list(ptr: *const c_char) -> Option<Vec<String>> {
     serde_json::from_str::<Vec<String>>(&raw).ok()
 }
 
+/// Panics must never unwind across the FFI boundary: Rust aborts the whole
+/// host process (the Flutter app) at `extern "C"` edges. Every export runs
+/// behind this guard and surfaces a JSON error instead.
+fn catch_unwind_ptr<T>(f: impl FnOnce() -> *mut T, fallback: *mut T) -> *mut T {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(ptr) => ptr,
+        Err(_) => fallback,
+    }
+}
+
+fn catch_unwind_json(f: impl FnOnce() -> *mut c_char) -> *mut c_char {
+    catch_unwind_ptr(f, to_error_c_string("internal panic"))
+}
+
 /// Returns default ledger database path as a C string.
 #[unsafe(no_mangle)]
-pub extern "C" fn gtt_default_db_path() -> *mut c_char {
+pub unsafe extern "C" fn gtt_default_db_path() -> *mut c_char {
+    catch_unwind_json(|| unsafe { gtt_default_db_path_impl() })
+}
+
+unsafe fn gtt_default_db_path_impl() -> *mut c_char {
     to_c_string(default_db_path().to_string_lossy().to_string())
 }
 
 /// Frees a C string allocated by this library.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gtt_free_string(ptr: *mut c_char) {
-    if !ptr.is_null() {
-        unsafe {
-            let _ = CString::from_raw(ptr);
+    // A panic here must not abort the host; leaking one string beats that.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if !ptr.is_null() {
+            unsafe {
+                let _ = CString::from_raw(ptr);
+            }
         }
-    }
+    }));
 }
 
 /// Opens the engine and database. Pass NULL for default db path.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gtt_engine_open(db_path: *const c_char) -> *mut GttContext {
+    catch_unwind_ptr(
+        || unsafe { gtt_engine_open_impl(db_path) },
+        std::ptr::null_mut(),
+    )
+}
+
+unsafe fn gtt_engine_open_impl(db_path: *const c_char) -> *mut GttContext {
     let path = if let Some(p) = unsafe { parse_opt_str(db_path) } {
         PathBuf::from(p)
     } else {
@@ -113,16 +141,22 @@ pub unsafe extern "C" fn gtt_engine_open(db_path: *const c_char) -> *mut GttCont
 /// Closes the engine context and frees its resources.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gtt_engine_close(ctx: *mut GttContext) {
-    if !ctx.is_null() {
-        unsafe {
-            drop(Box::from_raw(ctx));
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if !ctx.is_null() {
+            unsafe {
+                drop(Box::from_raw(ctx));
+            }
         }
-    }
+    }));
 }
 
 /// Runs a single incremental scan pass across all configured tools.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gtt_engine_scan(ctx: *mut GttContext) -> *mut c_char {
+    catch_unwind_json(|| unsafe { gtt_engine_scan_impl(ctx) })
+}
+
+unsafe fn gtt_engine_scan_impl(ctx: *mut GttContext) -> *mut c_char {
     if ctx.is_null() {
         return to_error_c_string("Engine context is null");
     }
@@ -156,6 +190,26 @@ pub unsafe extern "C" fn gtt_engine_scan(ctx: *mut GttContext) -> *mut c_char {
 /// filter_models_json: optional JSON array e.g. ["claude-3-7-sonnet"]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gtt_get_overview(
+    ctx: *mut GttContext,
+    range_key: *const c_char,
+    custom_start_ms: i64,
+    custom_end_ms: i64,
+    filter_apps_json: *const c_char,
+    filter_models_json: *const c_char,
+) -> *mut c_char {
+    catch_unwind_json(|| unsafe {
+        gtt_get_overview_impl(
+            ctx,
+            range_key,
+            custom_start_ms,
+            custom_end_ms,
+            filter_apps_json,
+            filter_models_json,
+        )
+    })
+}
+
+unsafe fn gtt_get_overview_impl(
     ctx: *mut GttContext,
     range_key: *const c_char,
     custom_start_ms: i64,
@@ -199,6 +253,18 @@ pub unsafe extern "C" fn gtt_get_details(
     filter_apps_json: *const c_char,
     filter_models_json: *const c_char,
 ) -> *mut c_char {
+    catch_unwind_json(|| unsafe {
+        gtt_get_details_impl(ctx, page, page_size, filter_apps_json, filter_models_json)
+    })
+}
+
+unsafe fn gtt_get_details_impl(
+    ctx: *mut GttContext,
+    page: i64,
+    page_size: i64,
+    filter_apps_json: *const c_char,
+    filter_models_json: *const c_char,
+) -> *mut c_char {
     if ctx.is_null() {
         return to_error_c_string("Engine context is null");
     }
@@ -220,6 +286,10 @@ pub unsafe extern "C" fn gtt_get_details(
 /// Fetches source log discovery and sync health.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gtt_get_sources(ctx: *mut GttContext) -> *mut c_char {
+    catch_unwind_json(|| unsafe { gtt_get_sources_impl(ctx) })
+}
+
+unsafe fn gtt_get_sources_impl(ctx: *mut GttContext) -> *mut c_char {
     if ctx.is_null() {
         return to_error_c_string("Engine context is null");
     }
@@ -238,6 +308,10 @@ pub unsafe extern "C" fn gtt_get_sources(ctx: *mut GttContext) -> *mut c_char {
 /// Fetches pricing rows.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gtt_get_prices(ctx: *mut GttContext, limit: usize) -> *mut c_char {
+    catch_unwind_json(|| unsafe { gtt_get_prices_impl(ctx, limit) })
+}
+
+unsafe fn gtt_get_prices_impl(ctx: *mut GttContext, limit: usize) -> *mut c_char {
     if ctx.is_null() {
         return to_error_c_string("Engine context is null");
     }
@@ -257,6 +331,10 @@ pub unsafe extern "C" fn gtt_get_prices(ctx: *mut GttContext, limit: usize) -> *
 /// Refreshes prices from online sources and reprices unpriced events.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gtt_update_prices(ctx: *mut GttContext) -> *mut c_char {
+    catch_unwind_json(|| unsafe { gtt_update_prices_impl(ctx) })
+}
+
+unsafe fn gtt_update_prices_impl(ctx: *mut GttContext) -> *mut c_char {
     if ctx.is_null() {
         return to_error_c_string("Engine context is null");
     }
@@ -291,6 +369,10 @@ pub unsafe extern "C" fn gtt_update_prices(ctx: *mut GttContext) -> *mut c_char 
 /// Polls vendor quota endpoints once and stores latest quotas.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gtt_poll_quotas(ctx: *mut GttContext) -> *mut c_char {
+    catch_unwind_json(|| unsafe { gtt_poll_quotas_impl(ctx) })
+}
+
+unsafe fn gtt_poll_quotas_impl(ctx: *mut GttContext) -> *mut c_char {
     if ctx.is_null() {
         return to_error_c_string("Engine context is null");
     }
@@ -347,5 +429,13 @@ mod tests {
             gtt_free_string(c_str);
             gtt_engine_close(ctx);
         }
+    }
+
+    #[test]
+    fn panic_at_the_boundary_becomes_an_error_json() {
+        let ptr = catch_unwind_json(|| panic!("boom"));
+        let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap();
+        assert!(s.contains("internal panic"));
+        unsafe { gtt_free_string(ptr) };
     }
 }
