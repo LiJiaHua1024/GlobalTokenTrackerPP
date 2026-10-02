@@ -12,6 +12,7 @@ use serde_json::Value;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::store::{Store, now_ms};
@@ -35,12 +36,21 @@ pub fn spawn(db: PathBuf) -> Option<std::thread::JoinHandle<()>> {
             return None;
         }
     };
+    // One shared connection for the receiver's lifetime: opening the store
+    // per request re-ran migration checks and WAL setup on every OTLP export.
+    let store = match Store::open(&db) {
+        Ok(s) => Arc::new(Mutex::new(s)),
+        Err(e) => {
+            tracing::warn!("otel: open {} failed ({e}) — receiver off", db.display());
+            return None;
+        }
+    };
     tracing::info!("otel: OTLP/HTTP+JSON receiver on http://{DEFAULT_ADDR}/v1/metrics");
     Some(std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
-            let db = db.clone();
+            let store = Arc::clone(&store);
             std::thread::spawn(move || {
-                let _ = handle(stream, &db);
+                let _ = handle(stream, &store);
             });
         }
     }))
@@ -50,14 +60,15 @@ pub fn spawn(db: PathBuf) -> Option<std::thread::JoinHandle<()>> {
 pub fn serve(db: &Path) -> Result<()> {
     let listener =
         TcpListener::bind(DEFAULT_ADDR).with_context(|| format!("otel: bind {DEFAULT_ADDR}"))?;
+    let store = Arc::new(Mutex::new(Store::open(db)?));
     tracing::info!("otel: serving on http://{DEFAULT_ADDR}/v1/metrics");
     for stream in listener.incoming().flatten() {
-        let _ = handle(stream, db);
+        let _ = handle(stream, &store);
     }
     Ok(())
 }
 
-fn handle(stream: TcpStream, db: &Path) -> Result<()> {
+fn handle(stream: TcpStream, store: &Mutex<Store>) -> Result<()> {
     stream.set_read_timeout(Some(READ_TIMEOUT))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut head = String::new();
@@ -91,7 +102,7 @@ fn handle(stream: TcpStream, db: &Path) -> Result<()> {
     reader.read_exact(&mut body)?;
 
     let (status, out) = if method == "POST" && path == "/v1/metrics" {
-        match ingest_metrics(&body, db) {
+        match ingest_metrics(&body, store) {
             Ok(n) => (200, format!(r#"{{"partialSuccess":{{}},"accepted":{n}}}"#)),
             Err(e) => {
                 tracing::warn!("otel: bad request: {e}");
@@ -114,9 +125,10 @@ fn handle(stream: TcpStream, db: &Path) -> Result<()> {
 
 /// Walk OTLP/JSON resourceMetrics→scopeMetrics→metrics→(sum|gauge).dataPoints.
 /// Returns data points upserted into `otel_metrics`.
-fn ingest_metrics(body: &[u8], db: &Path) -> Result<usize> {
+fn ingest_metrics(body: &[u8], store: &Mutex<Store>) -> Result<usize> {
     let v: Value = serde_json::from_slice(body).context("otlp json")?;
-    let store = Store::open(db)?;
+    // A poisoned lock must not take the receiver down: adopt the guard.
+    let store = store.lock().unwrap_or_else(|p| p.into_inner());
     let mut n = 0usize;
     for rm in v["resourceMetrics"].as_array().into_iter().flatten() {
         for sm in rm["scopeMetrics"].as_array().into_iter().flatten() {
@@ -251,10 +263,11 @@ mod tests {
     fn cumulative_points_upsert_in_place() {
         let dir = std::env::temp_dir().join(format!("cl-otel-test-{}", now_ms()));
         let db = dir.join("t.db");
+        let store = Mutex::new(Store::open(&db).unwrap());
         // Same point pushed twice with a higher value → one row, latest wins.
-        let _ = ingest_metrics(PAYLOAD.as_bytes(), &db).unwrap();
-        let _ = ingest_metrics(PAYLOAD.replace("1.5", "2.75").as_bytes(), &db).unwrap();
-        let s = Store::open(&db).unwrap();
+        let _ = ingest_metrics(PAYLOAD.as_bytes(), &store).unwrap();
+        let _ = ingest_metrics(PAYLOAD.replace("1.5", "2.75").as_bytes(), &store).unwrap();
+        let s = store.lock().unwrap();
         let (rows, val): (i64, f64) = s
             .conn()
             .query_row(
@@ -280,17 +293,19 @@ mod tests {
     fn valueless_points_are_skipped() {
         let dir = std::env::temp_dir().join(format!("cl-otel-novalue-{}", now_ms()));
         let db = dir.join("t.db");
+        let store = Mutex::new(Store::open(&db).unwrap());
         // Neither asDouble nor asInt on the point → not written, not counted.
         let n = ingest_metrics(
             br#"{"resourceMetrics":[{"scopeMetrics":[{"metrics":[
               {"name":"claude_code.cost.usage","sum":{"dataPoints":[
                 {"attributes":[],"timeUnixNano":"1736983800000000000"}]}}]}]}]}"#,
-            &db,
+            &store,
         )
         .unwrap();
         assert_eq!(n, 0);
-        let s = Store::open(&db).unwrap();
-        let rows: i64 = s
+        let rows: i64 = store
+            .lock()
+            .unwrap()
             .conn()
             .query_row("SELECT COUNT(*) FROM otel_metrics", [], |r| r.get(0))
             .unwrap();
