@@ -1,7 +1,7 @@
 //! globaltokentracker-cli — dev harness & power-user entry.
 //! `scan` | `report [today|week|month|all]` | `reconcile` | `sources`
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use globaltokentracker_core::{Engine, Store, store::default_db_path};
 use tabled::{Table, Tabled};
@@ -60,7 +60,7 @@ enum Cmd {
     /// Rebuild rollups, then drop raw events older than --keep-days.
     Prune {
         /// Detail retention in days.
-        #[arg(long, default_value_t = 90)]
+        #[arg(long, default_value_t = 90, value_parser = clap::value_parser!(i64).range(1..))]
         keep_days: i64,
         /// Reclaim file space afterwards.
         #[arg(long)]
@@ -168,9 +168,12 @@ fn main() -> Result<()> {
         Cmd::Prune { keep_days, vacuum } => {
             let n = engine.store.rebuild_rollups(&local_offset())?;
             println!("daily_rollups: {n} rows rebuilt before prune");
+            let hours = keep_days
+                .checked_mul(24)
+                .with_context(|| format!("--keep-days {keep_days} out of range"))?;
             let cutoff = jiff::Zoned::now()
-                .checked_sub(jiff::SignedDuration::from_hours(keep_days * 24))
-                .unwrap()
+                .checked_sub(jiff::SignedDuration::from_hours(hours))
+                .with_context(|| format!("--keep-days {keep_days} out of range"))?
                 .timestamp()
                 .as_millisecond();
             let d = engine.store.prune_events(cutoff)?;
