@@ -213,13 +213,15 @@ impl Engine {
         for item in sqlite {
             match adapter.scan_sqlite(item, &self.store) {
                 Ok(outcome) => {
-                    self.ingest(
+                    if let Err(e) = self.ingest(
                         adapter.id(),
                         adapter.capability(),
                         outcome.events,
                         outcome.quotas,
                         &mut report,
-                    );
+                    ) {
+                        report.errors.push(format!("{}: {e:#}", item.path.display()));
+                    }
                     report.events_skipped += outcome.skipped;
                     report.files_scanned += 1;
                 }
@@ -255,28 +257,39 @@ impl Engine {
         for (item, from, res) in parsed {
             match res {
                 Ok(outcome) => {
-                    self.ingest(
+                    match self.ingest(
                         adapter.id(),
                         adapter.capability(),
                         outcome.events,
                         outcome.quotas,
                         report,
-                    );
-                    report.events_skipped += outcome.skipped;
-                    report.files_scanned += 1;
-                    let end = from + outcome.consumed;
-                    let mtime = std::fs::metadata(&item.path)
-                        .ok()
-                        .map(|m| file_mtime_ms(&m))
-                        .unwrap_or(0);
-                    self.store.save_cursor(
-                        adapter.id(),
-                        &item.key,
-                        &item.path,
-                        end,
-                        mtime,
-                        outcome.new_state.as_deref(),
-                    )?;
+                    ) {
+                        Ok(()) => {
+                            report.events_skipped += outcome.skipped;
+                            report.files_scanned += 1;
+                            let end = from + outcome.consumed;
+                            let mtime = std::fs::metadata(&item.path)
+                                .ok()
+                                .map(|m| file_mtime_ms(&m))
+                                .unwrap_or(0);
+                            self.store.save_cursor(
+                                adapter.id(),
+                                &item.key,
+                                &item.path,
+                                end,
+                                mtime,
+                                outcome.new_state.as_deref(),
+                            )?;
+                        }
+                        // A storage failure must not advance the cursor past
+                        // this segment: replaying the same bytes is idempotent
+                        // (completeness UPSERT + identical rows never rewrite),
+                        // so leave them for the next pass instead of skipping
+                        // them forever.
+                        Err(e) => report
+                            .errors
+                            .push(format!("{}: {e:#}", item.path.display())),
+                    }
                 }
                 Err(e) => report
                     .errors
@@ -293,7 +306,7 @@ impl Engine {
         events: Vec<crate::model::UsageEvent>,
         quotas: Vec<crate::model::QuotaSnapshot>,
         report: &mut ScanReport,
-    ) {
+    ) -> Result<()> {
         // Day buckets use the same fixed-offset frame as the rollup SQL;
         // computed once per ingest batch, not per event.
         let off_ms = crate::viewmodel::utc_offset_ms(&local_utc_offset()).unwrap_or(0);
@@ -323,9 +336,13 @@ impl Engine {
                     }
                 }
                 Ok(false) => report.events_merged += 1,
-                Err(e) => report
-                    .errors
-                    .push(format!("{adapter_id} upsert {}: {e:#}", ev.dedup_key)),
+                // Storage-level failure: abort the batch so the caller keeps
+                // the cursor where it was and retries the whole segment next
+                // pass (replay is idempotent). Quota failures below are
+                // non-fatal — insert_quota dedups, so replaying them is safe.
+                Err(e) => {
+                    return Err(anyhow::anyhow!("{adapter_id} upsert {}: {e:#}", ev.dedup_key));
+                }
             }
         }
         for q in quotas {
@@ -335,6 +352,7 @@ impl Engine {
                 Err(e) => report.errors.push(format!("{adapter_id} quota: {e:#}")),
             }
         }
+        Ok(())
     }
 
     /// Directories a live watcher should subscribe to — union of adapter roots,
