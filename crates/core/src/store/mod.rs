@@ -16,6 +16,28 @@ pub use query::{
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_VERSION: i64 = 1;
 
+/// Write `data` to `path` via a temp file + rename in the same directory, so
+/// a crash mid-write leaves the previous file intact instead of a torn one.
+/// The PID in the temp name keeps concurrent writers from clobbering each
+/// other's scratch file.
+pub fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "gtt".into());
+    let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, data)?;
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
 /// Default database location: `~/.globaltokentracker/ledger.db`.
 ///
 /// `GTT_DATA_DIR` (a directory) relocates the ledger, `ui.json` and backups —
@@ -180,28 +202,6 @@ impl Store {
         }
         std::fs::rename(&tmp, &cur)?;
         Ok(())
-    }
-
-    /// Write `data` to `path` via a temp file + rename in the same directory,
-    /// so a crash mid-write leaves the previous file intact instead of a torn
-    /// one. The PID in the temp name keeps concurrent writers from clobbering
-    /// each other's scratch file.
-    pub fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
-        let dir = path.parent().unwrap_or_else(|| Path::new("."));
-        std::fs::create_dir_all(dir)?;
-        let name = path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "gtt".into());
-        let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
-        std::fs::write(&tmp, data)?;
-        match std::fs::rename(&tmp, path) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                let _ = std::fs::remove_file(&tmp);
-                Err(e)
-            }
-        }
     }
 
     fn migrate(&self) -> Result<()> {
