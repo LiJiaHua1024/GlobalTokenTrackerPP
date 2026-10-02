@@ -28,7 +28,6 @@ use winreg::enums::RegType;
 use winreg::types::{FromRegValue, ToRegValue};
 
 #[allow(dead_code)]
-mod gui;
 
 static PAYLOAD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/payload.zip"));
 
