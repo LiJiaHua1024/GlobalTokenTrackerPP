@@ -27,8 +27,6 @@ use winreg::RegKey;
 use winreg::enums::RegType;
 use winreg::types::{FromRegValue, ToRegValue};
 
-#[allow(dead_code)]
-
 static PAYLOAD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/payload.zip"));
 
 pub const APP: &str = "GlobalTokenTracker++";
@@ -82,10 +80,9 @@ fn message_box_error(text: &str) {
 /// process — partial uninstalls leave a confusing half-removed state behind.
 fn guard_uninstall_dest(dest: &Path, gui_mode: bool) -> ! {
     let msg = format!(
-        "目录不是本应用的安装目录（未找到 {}）。\n\n\
+        "目录不是本应用的安装目录（未找到 {EXE_NAME}）。\n\n\
          为避免误删无关文件，已中止卸载。\n\
-         若应用安装在别处，请以 --dir <安装目录> 显式指定后重试。",
-        EXE_NAME
+         若应用安装在别处，请以 --dir <安装目录> 显式指定后重试。"
     );
     if gui_mode {
         message_box_error(&format!("{}\n\n{}", dest.display(), msg));
@@ -640,6 +637,61 @@ fn usage() {
     println!("  globaltokentracker-setup --cli               强制命令行模式");
 }
 
+/// GUI-mode bootstrap: extract the payload to a per-run temp dir, copy the
+/// Flutter UI next to it as `installer_ui.exe` and hand over. Every failure
+/// path must surface a message box (a GUI-subsystem process has no console)
+/// and exit non-zero.
+fn run_gui_handoff(uninstall_flag: bool, dest: &Path) {
+    let temp_dir = std::env::temp_dir().join(format!("GTT_Setup_{}", std::process::id()));
+    let _ = fs::create_dir_all(&temp_dir);
+    let log = |_s: String| {};
+    if let Err(e) = extract_payload(&temp_dir, &log) {
+        // A GUI-subsystem process has no console — without a message box
+        // the user just sees a silent no-op.
+        message_box_error(&format!("安装程序解压失败：{e}"));
+        let _ = schedule_dir_delete(&temp_dir);
+        std::process::exit(1);
+    }
+
+    let self_exe = match env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            message_box_error(&format!("无法定位安装程序：{e}"));
+            let _ = schedule_dir_delete(&temp_dir);
+            std::process::exit(1);
+        }
+    };
+    let orig_flutter_exe = temp_dir.join(EXE_NAME);
+    let installer_exe = temp_dir.join("installer_ui.exe");
+    if let Err(e) = fs::copy(&orig_flutter_exe, &installer_exe) {
+        message_box_error(&format!("无法准备安装界面：{e}"));
+        let _ = schedule_dir_delete(&temp_dir);
+        std::process::exit(1);
+    }
+
+    let mut cmd = Command::new(&installer_exe);
+    if uninstall_flag {
+        cmd.arg("--uninstall");
+    } else {
+        cmd.arg("--setup");
+    }
+    cmd.arg("--installer-source").arg(&temp_dir);
+    cmd.arg("--installer-exe").arg(&self_exe);
+    cmd.arg("--dest").arg(dest);
+
+    // A spawn failure means the installer window never appeared — the one
+    // failure mode with no UI of its own. A non-zero exit already showed
+    // its own error screen inside the installer window.
+    if let Err(e) = cmd.status() {
+        message_box_error(&format!("无法启动安装界面：{e}"));
+        let _ = schedule_dir_delete(&temp_dir);
+        std::process::exit(1);
+    }
+
+    // Clean up temporary extracted folder after installer window closes
+    let _ = schedule_dir_delete(&temp_dir);
+}
+
 fn main() -> Result<()> {
     let mut uninstall_flag = false;
     let mut quiet = false;
@@ -701,54 +753,7 @@ fn main() -> Result<()> {
     }
 
     if gui_mode {
-        let temp_dir = std::env::temp_dir().join(format!("GTT_Setup_{}", std::process::id()));
-        let _ = fs::create_dir_all(&temp_dir);
-        let log = |_s: String| {};
-        if let Err(e) = extract_payload(&temp_dir, &log) {
-            // A GUI-subsystem process has no console — without a message box
-            // the user just sees a silent no-op.
-            message_box_error(&format!("安装程序解压失败：{e}"));
-            let _ = schedule_dir_delete(&temp_dir);
-            std::process::exit(1);
-        }
-
-        let self_exe = match env::current_exe() {
-            Ok(p) => p,
-            Err(e) => {
-                message_box_error(&format!("无法定位安装程序：{e}"));
-                let _ = schedule_dir_delete(&temp_dir);
-                std::process::exit(1);
-            }
-        };
-        let orig_flutter_exe = temp_dir.join(EXE_NAME);
-        let installer_exe = temp_dir.join("installer_ui.exe");
-        if let Err(e) = fs::copy(&orig_flutter_exe, &installer_exe) {
-            message_box_error(&format!("无法准备安装界面：{e}"));
-            let _ = schedule_dir_delete(&temp_dir);
-            std::process::exit(1);
-        }
-
-        let mut cmd = Command::new(&installer_exe);
-        if uninstall_flag {
-            cmd.arg("--uninstall");
-        } else {
-            cmd.arg("--setup");
-        }
-        cmd.arg("--installer-source").arg(&temp_dir);
-        cmd.arg("--installer-exe").arg(&self_exe);
-        cmd.arg("--dest").arg(&dest);
-
-        // A spawn failure means the installer window never appeared — the one
-        // failure mode with no UI of its own. A non-zero exit already showed
-        // its own error screen inside the installer window.
-        if let Err(e) = cmd.status() {
-            message_box_error(&format!("无法启动安装界面：{e}"));
-            let _ = schedule_dir_delete(&temp_dir);
-            std::process::exit(1);
-        }
-
-        // Clean up temporary extracted folder after installer window closes
-        let _ = schedule_dir_delete(&temp_dir);
+        run_gui_handoff(uninstall_flag, &dest);
         return Ok(());
     }
 
