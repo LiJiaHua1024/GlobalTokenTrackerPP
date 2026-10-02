@@ -185,12 +185,55 @@ fn main() -> Result<()> {
 }
 
 fn csv_cell(out: &mut String, s: &str) {
-    if s.contains([',', '"', '\n']) {
+    // Excel/LibreOffice execute a cell starting with =+-@ (or tab) as a
+    // formula — a session id or raw_ref like "=1+1" must not evaluate when
+    // the export is opened (OWASP CSV injection). CR joins the quoted set:
+    // a bare \r inside an unquoted field corrupts row boundaries on re-read.
+    let guarded = matches!(
+        s.as_bytes().first(),
+        Some(b'=') | Some(b'+') | Some(b'-') | Some(b'@') | Some(b'\t')
+    );
+    if guarded || s.contains([',', '"', '\n', '\r']) {
+        if guarded {
+            out.push('\'');
+        }
         out.push('"');
         out.push_str(&s.replace('"', "\"\""));
         out.push('"');
     } else {
         out.push_str(s);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn csv_cell_quotes_delimiters_and_neutralizes_formulas() {
+        let mut out = String::new();
+        csv_cell(&mut out, "plain");
+        assert_eq!(out, "plain");
+
+        out.clear();
+        csv_cell(&mut out, "a,b\"c\nd");
+        assert_eq!(out, "\"a,b\"\"c\nd\"");
+
+        out.clear();
+        csv_cell(&mut out, "a\rb");
+        assert_eq!(out, "\"a\rb\"");
+
+        out.clear();
+        csv_cell(&mut out, "=1+1");
+        assert_eq!(out, "'\"=1+1\"'");
+
+        out.clear();
+        csv_cell(&mut out, "@SUM(A1)");
+        assert_eq!(out, "'\"@SUM(A1)\"'");
+
+        out.clear();
+        csv_cell(&mut out, "-2 is a version tag");
+        assert_eq!(out, "'\"-2 is a version tag\"'");
     }
 }
 
