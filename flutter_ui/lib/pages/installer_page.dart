@@ -63,7 +63,7 @@ class InstallerPage extends StatefulWidget {
 
 enum InstallState { ready, working, done, error }
 
-class _InstallerPageState extends State<InstallerPage> {
+class _InstallerPageState extends State<InstallerPage> with WindowListener {
   late TextEditingController _pathController;
   bool _shortcutDesktop = true;
   bool _shortcutStartMenu = true;
@@ -160,12 +160,30 @@ $edit
     final defaultDest = _customDest.isNotEmpty ? _customDest : '$localAppData\\Programs\\GlobalTokenTrackerPP';
 
     _pathController = TextEditingController(text: defaultDest);
+    windowManager.addListener(this);
   }
 
   @override
   void dispose() {
+    windowManager.removeListener(this);
     _pathController.dispose();
     super.dispose();
+  }
+
+  @override
+  void onWindowClose() async {
+    // Only reached while preventClose is armed (a step is running): the
+    // close click must not kill a half-applied install.
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('正在安装/卸载，请等待完成后再关闭窗口')),
+    );
+  }
+
+  /// setState that no-ops once the widget is gone — the install/uninstall
+  /// steps await external processes and must not touch state afterwards.
+  void _safeSetState(VoidCallback fn) {
+    if (mounted) setState(fn);
   }
 
   Future<void> _browseFolder() async {
@@ -186,7 +204,7 @@ $edit
         ''',
       ]);
       if (res.exitCode == 0 && res.stdout.toString().trim().isNotEmpty) {
-        setState(() {
+        _safeSetState(() {
           _pathController.text = res.stdout.toString().trim();
         });
       }
@@ -204,15 +222,17 @@ $edit
       return;
     }
 
-    setState(() {
+    _safeSetState(() {
       _state = InstallState.working;
       _statusMessage = '正在准备安装环境...';
       _progress = 0.05;
     });
+    // Block the window close button while a step is running.
+    await windowManager.setPreventClose(true);
 
     try {
       // 1. Terminate old running process (excluding current installer process)
-      setState(() {
+      _safeSetState(() {
         _statusMessage = '结束正在运行的实例...';
         _progress = 0.10;
       });
@@ -259,7 +279,7 @@ $edit
           copiedFiles++;
 
           if (mounted) {
-            setState(() {
+            _safeSetState(() {
               _statusMessage = '正在释放: $relativePath';
               _progress = 0.15 + (0.55 * (copiedFiles / (totalFiles > 0 ? totalFiles : 1)));
             });
@@ -276,7 +296,7 @@ $edit
       }
 
       // 5. Register in Windows Uninstall
-      setState(() {
+      _safeSetState(() {
         _statusMessage = '写入 Windows 卸载注册信息...';
         _progress = 0.75;
       });
@@ -297,7 +317,7 @@ $edit
 
       // 6. Create Shortcuts
       if (_shortcutStartMenu || _shortcutDesktop) {
-        setState(() {
+        _safeSetState(() {
           _statusMessage = '创建快捷方式...';
           _progress = 0.85;
         });
@@ -333,7 +353,7 @@ $edit
 
       // 7. Add to User PATH
       if (_addToPath) {
-        setState(() {
+        _safeSetState(() {
           _statusMessage = '追加用户环境变量 PATH...';
           _progress = 0.95;
         });
@@ -348,17 +368,19 @@ $edit
         }
       }
 
-      setState(() {
+      _safeSetState(() {
         _state = InstallState.done;
         _statusMessage = '安装完成';
         _progress = 1.0;
       });
     } catch (e, st) {
       debugPrint("Install error: $e\n$st");
-      setState(() {
+      _safeSetState(() {
         _state = InstallState.error;
         _errorMessage = e.toString();
       });
+    } finally {
+      await windowManager.setPreventClose(false);
     }
   }
 
@@ -382,11 +404,13 @@ $edit
   }
 
   Future<void> _startUninstall() async {
-    setState(() {
+    _safeSetState(() {
       _state = InstallState.working;
       _statusMessage = '正在结束运行中的进程...';
       _progress = 0.2;
     });
+    // Block the window close button while a step is running.
+    await windowManager.setPreventClose(true);
 
     try {
       // 0. Guard: never run destructive steps against a directory that does
@@ -394,7 +418,7 @@ $edit
       // been launched from an arbitrary folder such as Downloads.
       final dest = _normalizedDest(_pathController.text.trim());
       if (!_looksLikeInstallDir(dest)) {
-        setState(() {
+        _safeSetState(() {
           _state = InstallState.error;
           _errorMessage =
               '该目录不是本应用的安装目录（缺少主程序），已中止卸载。\n目标目录：$dest';
@@ -413,7 +437,7 @@ $edit
       ]);
 
       // 2. Remove shortcuts
-      setState(() {
+      _safeSetState(() {
         _statusMessage = '移除快捷方式...';
         _progress = 0.4;
       });
@@ -431,7 +455,7 @@ $edit
       await Process.run('powershell', ['-NoProfile', '-NonInteractive', '-Command', removeShortcutsCmd]);
 
       // 3. Remove Registry Key & PATH
-      setState(() {
+      _safeSetState(() {
         _statusMessage = '清理系统卸载项与环境变量...';
         _progress = 0.6;
       });
@@ -451,7 +475,7 @@ $edit
       }
 
       // 4. Remove install folder
-      setState(() {
+      _safeSetState(() {
         _statusMessage = '删除程序文件...';
         _progress = 0.8;
       });
@@ -461,17 +485,19 @@ $edit
         Process.start('cmd', ['/C', 'ping 127.0.0.1 -n 2 >nul & rmdir /S /Q "$dest"'], mode: ProcessStartMode.detached);
       }
 
-      setState(() {
+      _safeSetState(() {
         _state = InstallState.done;
         _statusMessage = '卸载完成';
         _progress = 1.0;
       });
     } catch (e, st) {
       debugPrint("Uninstall error: $e\n$st");
-      setState(() {
+      _safeSetState(() {
         _state = InstallState.error;
         _errorMessage = e.toString();
       });
+    } finally {
+      await windowManager.setPreventClose(false);
     }
   }
 
