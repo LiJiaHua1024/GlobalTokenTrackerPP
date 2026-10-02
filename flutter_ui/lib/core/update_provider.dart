@@ -39,6 +39,9 @@ class UpdateProvider extends ChangeNotifier {
   int _totalBytes = 0;
   String? _downloadedFilePath;
   HttpClient? _downloadClient;
+  // Set by cancelDownload; the download loop and its error handler check it
+  // so a force-closed socket can't surface as a scary "download failed".
+  bool _downloadCancelled = false;
 
   Timer? _periodicCheckTimer;
 
@@ -243,8 +246,12 @@ class UpdateProvider extends ChangeNotifier {
     _downloadedBytes = 0;
     _totalBytes = asset.size;
     _errorMessage = null;
+    _downloadCancelled = false;
     notifyListeners();
 
+    // Hoisted so the finally below can remove a partial installer when the
+    // download is cancelled or fails midway.
+    File? saveFile;
     try {
       final tempDir = Directory.systemTemp;
       final rawName = asset.name.isNotEmpty
@@ -253,7 +260,7 @@ class UpdateProvider extends ChangeNotifier {
       // asset.name comes from release JSON — basename it so a tampered name
       // can never escape %TEMP%.
       final fileName = rawName.split(RegExp(r'[\\/]')).last;
-      final saveFile = File('${tempDir.path}\\$fileName');
+      saveFile = File('${tempDir.path}\\$fileName');
 
       _downloadClient?.close(force: true);
       _downloadClient = HttpClient();
@@ -284,6 +291,7 @@ class UpdateProvider extends ChangeNotifier {
 
       final sink = saveFile.openWrite();
       await for (final chunk in finalResponse) {
+        if (_downloadCancelled) break;
         sink.add(chunk);
         _downloadedBytes += chunk.length;
         if (_totalBytes > 0) {
@@ -294,6 +302,17 @@ class UpdateProvider extends ChangeNotifier {
 
       await sink.flush();
       await sink.close();
+
+      // Cancelled: the partial installer must never linger in %TEMP%, and
+      // there is nothing left to digest-verify.
+      if (_downloadCancelled) {
+        await saveFile.delete();
+        _downloadStatus = DownloadStatus.idle;
+        _downloadProgress = 0.0;
+        _downloadedBytes = 0;
+        notifyListeners();
+        return;
+      }
 
       // GitHub stamps release assets with `digest: "sha256:<hex>"`. Verify
       // before the file can ever be executed; on mismatch delete it and fail
@@ -313,14 +332,31 @@ class UpdateProvider extends ChangeNotifier {
       notifyListeners();
     } catch (e) {
       debugPrint('[UpdateProvider] Download error: $e');
-      _downloadStatus = DownloadStatus.failed;
-      _errorMessage = '下载失败: ${e.toString().replaceFirst(RegExp(r'^Exception:\s*'), '')}';
+      if (_downloadCancelled) {
+        // The force-closed socket surfaces here as an exception — the user
+        // asked for this; show idle, not a failure.
+        _downloadStatus = DownloadStatus.idle;
+        _errorMessage = null;
+      } else {
+        _downloadStatus = DownloadStatus.failed;
+        _errorMessage = '下载失败: ${e.toString().replaceFirst(RegExp(r'^Exception:\s*'), '')}';
+      }
       notifyListeners();
+    } finally {
+      // A cancelled or failed download must not leave a truncated installer
+      // in %TEMP%.
+      final f = saveFile;
+      if (f != null && _downloadStatus != DownloadStatus.completed) {
+        try {
+          if (await f.exists()) await f.delete();
+        } catch (_) {}
+      }
     }
   }
 
   /// Cancels any active download
   void cancelDownload() {
+    _downloadCancelled = true;
     _downloadClient?.close(force: true);
     _downloadClient = null;
     _downloadStatus = DownloadStatus.idle;
