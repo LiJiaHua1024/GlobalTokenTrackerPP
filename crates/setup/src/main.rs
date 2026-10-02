@@ -186,16 +186,20 @@ fn make_shortcuts(dest: &Path) -> Result<()> {
     fs::create_dir_all(&start)?;
     let ui = dest.join(EXE_NAME);
     let uninstall = dest.join(SETUP_EXE_NAME);
+    // PowerShell single-quoted strings end at the first ' — a path like
+    // C:\Users\O'Brien\... would terminate the literal early and run the
+    // rest of the path as code. Double every apostrophe.
+    let q = |p: &Path| p.display().to_string().replace('\'', "''");
     let script = format!(
         "$ws=New-Object -ComObject WScript.Shell;\
          $s=$ws.CreateShortcut('{}');$s.TargetPath='{}';$s.IconLocation='{}';$s.WorkingDirectory='{}';$s.Save();\
          $u=$ws.CreateShortcut('{}');$u.TargetPath='{}';$u.Arguments='--uninstall';$u.Save()",
-        start.join(format!("{APP}.lnk")).display(),
-        ui.display(),
-        ui.display(),
-        dest.display(),
-        start.join(format!("卸载 {APP}.lnk")).display(),
-        uninstall.display(),
+        q(&start.join(format!("{APP}.lnk"))),
+        q(&ui),
+        q(&ui),
+        q(dest),
+        q(&start.join(format!("卸载 {APP}.lnk"))),
+        q(&uninstall),
     );
     let out = ps(&script)?;
     if !out.status.success() {
