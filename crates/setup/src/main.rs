@@ -695,14 +695,28 @@ fn main() -> Result<()> {
         let _ = fs::create_dir_all(&temp_dir);
         let log = |_s: String| {};
         if let Err(e) = extract_payload(&temp_dir, &log) {
-            eprintln!("Failed to extract installer payload: {e}");
-            return Ok(());
+            // A GUI-subsystem process has no console — without a message box
+            // the user just sees a silent no-op.
+            message_box_error(&format!("安装程序解压失败：{e}"));
+            let _ = schedule_dir_delete(&temp_dir);
+            std::process::exit(1);
         }
 
-        let self_exe = env::current_exe()?;
+        let self_exe = match env::current_exe() {
+            Ok(p) => p,
+            Err(e) => {
+                message_box_error(&format!("无法定位安装程序：{e}"));
+                let _ = schedule_dir_delete(&temp_dir);
+                std::process::exit(1);
+            }
+        };
         let orig_flutter_exe = temp_dir.join(EXE_NAME);
         let installer_exe = temp_dir.join("installer_ui.exe");
-        let _ = fs::copy(&orig_flutter_exe, &installer_exe);
+        if let Err(e) = fs::copy(&orig_flutter_exe, &installer_exe) {
+            message_box_error(&format!("无法准备安装界面：{e}"));
+            let _ = schedule_dir_delete(&temp_dir);
+            std::process::exit(1);
+        }
 
         let mut cmd = Command::new(&installer_exe);
         if uninstall_flag {
@@ -714,7 +728,14 @@ fn main() -> Result<()> {
         cmd.arg("--installer-exe").arg(&self_exe);
         cmd.arg("--dest").arg(&dest);
 
-        let _ = cmd.status();
+        // A spawn failure means the installer window never appeared — the one
+        // failure mode with no UI of its own. A non-zero exit already showed
+        // its own error screen inside the installer window.
+        if let Err(e) = cmd.status() {
+            message_box_error(&format!("无法启动安装界面：{e}"));
+            let _ = schedule_dir_delete(&temp_dir);
+            std::process::exit(1);
+        }
 
         // Clean up temporary extracted folder after installer window closes
         let _ = schedule_dir_delete(&temp_dir);
