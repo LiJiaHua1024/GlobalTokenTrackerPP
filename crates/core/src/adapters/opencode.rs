@@ -219,8 +219,25 @@ struct MsgRow {
     updated: i64,
 }
 
+/// Percent-encode the characters SQLite's URI parser reserves (`%`, `?`,
+/// `#`) so a path like `C:\Users\100% done\.zcode` still opens the real
+/// file instead of decoding garbage or splitting at a fragment.
+fn uri_path(p: &std::path::Path) -> String {
+    let s = p.to_string_lossy().replace('\\', "/");
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '%' => out.push_str("%25"),
+            '?' => out.push_str("%3F"),
+            '#' => out.push_str("%23"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 pub(crate) fn open_ro(path: &std::path::Path) -> Result<Connection> {
-    let uri = format!("file:{}?mode=ro", path.to_string_lossy().replace('\\', "/"));
+    let uri = format!("file:{}?mode=ro", uri_path(path));
     let conn = Connection::open_with_flags(
         uri,
         OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -233,6 +250,23 @@ pub(crate) fn open_ro(path: &std::path::Path) -> Result<Connection> {
 mod tests {
     use super::*;
     use crate::adapters::scan_and_commit;
+
+    #[test]
+    fn open_ro_percent_encodes_reserved_path_chars() {
+        let dir = std::env::temp_dir().join(format!("gtt-openro-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // `%` and `#` are legal in Windows filenames but reserved by the
+        // SQLite URI parser; `?` cannot appear in one.
+        let db = dir.join("100% done#1.sqlite");
+        Connection::open(&db)
+            .unwrap()
+            .execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES (7);")
+            .unwrap();
+        let ro = open_ro(&db).unwrap();
+        let v: i64 = ro.query_row("SELECT x FROM t", [], |r| r.get(0)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(v, 7);
+    }
 
     fn fixture(path: &std::path::Path) -> Connection {
         let c = Connection::open(path).unwrap();
