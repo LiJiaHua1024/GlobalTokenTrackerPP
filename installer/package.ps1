@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   Builds release binaries and produces the single-file installer for GlobalTokenTracker++.

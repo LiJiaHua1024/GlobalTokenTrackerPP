@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   Signs PE files when GTT_SIGN_* env config is present; skips with a notice

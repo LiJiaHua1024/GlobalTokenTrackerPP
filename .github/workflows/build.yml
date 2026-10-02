@@ -67,7 +67,10 @@ jobs:
         id: package
         shell: pwsh
         run: |
-          powershell -ExecutionPolicy Bypass -File installer\package.ps1
+          # Stay in pwsh. Shelling down to Windows PowerShell 5.1 made the
+          # installer scripts decode against the machine ANSI codepage instead
+          # of UTF-8, which corrupted their em dashes into a parse error.
+          pwsh -ExecutionPolicy Bypass -File installer/package.ps1
 
           $installer = Get-ChildItem dist\GlobalTokenTrackerPP-Setup-*-win-x64.exe | Select-Object -First 1
           $portable  = Get-ChildItem dist\GlobalTokenTrackerPP-*-windows-x64.zip | Select-Object -First 1
