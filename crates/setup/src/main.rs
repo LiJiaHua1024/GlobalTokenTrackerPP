@@ -54,6 +54,48 @@ fn local_appdata() -> Result<PathBuf> {
         .context("LOCALAPPDATA not set")
 }
 
+/// A directory only counts as our install dir when one of our own
+/// executables lives in it. Uninstall must never `rmdir /S /Q` a lookalike
+/// folder — a setup.exe double-clicked in Downloads resolves `--uninstall`
+/// without `--dir` to `current_exe().parent()`, i.e. the Downloads folder.
+fn looks_like_install_dir(dest: &Path) -> bool {
+    dest.join(EXE_NAME).is_file() || dest.join(SETUP_EXE_NAME).is_file()
+}
+
+/// Modal error for GUI mode, where stderr is invisible.
+fn message_box_error(text: &str) {
+    use windows::core::HSTRING;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, MB_ICONERROR, MB_OK, MB_SETFOREGROUND,
+    };
+    unsafe {
+        let _ = MessageBoxW(
+            None,
+            &HSTRING::from(text),
+            &HSTRING::from(APP),
+            MB_OK | MB_ICONERROR | MB_SETFOREGROUND,
+        );
+    }
+}
+
+/// Refuse to uninstall into a directory that does not contain our binaries.
+/// Prints (console) or shows (GUI) an actionable message and exits the
+/// process — partial uninstalls leave a confusing half-removed state behind.
+fn guard_uninstall_dest(dest: &Path, gui_mode: bool) -> ! {
+    let msg = format!(
+        "目录不是本应用的安装目录（未找到 {}）。\n\n\
+         为避免误删无关文件，已中止卸载。\n\
+         若应用安装在别处，请以 --dir <安装目录> 显式指定后重试。",
+        EXE_NAME
+    );
+    if gui_mode {
+        message_box_error(&format!("{}\n\n{}", dest.display(), msg));
+    } else {
+        eprintln!("{}: {msg}", dest.display());
+    }
+    std::process::exit(2);
+}
+
 fn dest_dir(custom: Option<&str>) -> Result<PathBuf> {
     Ok(match custom {
         Some(d) => PathBuf::from(d),
@@ -643,6 +685,10 @@ fn main() -> Result<()> {
             None => dest_dir(None)?,
         },
     };
+
+    if uninstall_flag && !looks_like_install_dir(&dest) {
+        guard_uninstall_dest(&dest, gui_mode);
+    }
 
     if gui_mode {
         let temp_dir = std::env::temp_dir().join(format!("GTT_Setup_{}", std::process::id()));

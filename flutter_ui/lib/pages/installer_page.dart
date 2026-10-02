@@ -362,6 +362,25 @@ $edit
     }
   }
 
+  /// Strip trailing backslashes; a bare drive root (`D:\`) is left intact so
+  /// [_looksLikeInstallDir] can refuse it instead of trimming it to `D:`.
+  static String _normalizedDest(String raw) {
+    var d = raw.trim();
+    while (d.length > 3 && d.endsWith('\\')) {
+      d = d.substring(0, d.length - 1);
+    }
+    return d;
+  }
+
+  /// Only a folder that actually contains our binaries may be uninstalled —
+  /// belt-and-braces alongside the identical guard in the Rust setup exe.
+  static bool _looksLikeInstallDir(String dest) {
+    if (RegExp(r'^[A-Za-z]:\\?$').hasMatch(dest)) return false; // drive root
+    final exe = File('$dest\\globaltokentracker_ui.exe');
+    final setup = File('$dest\\globaltokentrackerpp-setup.exe');
+    return exe.existsSync() || setup.existsSync();
+  }
+
   Future<void> _startUninstall() async {
     setState(() {
       _state = InstallState.working;
@@ -370,6 +389,19 @@ $edit
     });
 
     try {
+      // 0. Guard: never run destructive steps against a directory that does
+      // not contain our own binaries (or a drive root) — the wizard may have
+      // been launched from an arbitrary folder such as Downloads.
+      final dest = _normalizedDest(_pathController.text.trim());
+      if (!_looksLikeInstallDir(dest)) {
+        setState(() {
+          _state = InstallState.error;
+          _errorMessage =
+              '该目录不是本应用的安装目录（缺少主程序），已中止卸载。\n目标目录：$dest';
+        });
+        return;
+      }
+
       // 1. Kill running instances (excluding current process)
       final myPid = pid;
       await Process.run('taskkill', [
@@ -391,7 +423,6 @@ $edit
         await startMenuDir.delete(recursive: true);
       }
 
-      final dest = _pathController.text.trim();
       final removeShortcutsCmd = '''
       \$desktopPath = [System.Environment]::GetFolderPath('Desktop')
       Remove-Item "\$desktopPath\\GlobalTokenTracker++.lnk" -Force -ErrorAction SilentlyContinue
@@ -778,6 +809,10 @@ $edit
 
     final localAppData = Platform.environment['LOCALAPPDATA'] ?? r'C:\Users\Default\AppData\Local';
     final defaultDest = '$localAppData\\Programs\\GlobalTokenTrackerPP';
+    // Show the directory that will actually be deleted, not a hardcoded
+    // default — a custom-dir install must be confirmed against its real path.
+    final chosen = _normalizedDest(_pathController.text.trim());
+    final shownDest = chosen.isNotEmpty ? chosen : defaultDest;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -821,7 +856,7 @@ $edit
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  '• 目标目录：$defaultDest',
+                  '• 目标目录：$shownDest',
                   style: TextStyle(fontSize: 12, color: theme.colorScheme.onSurfaceVariant),
                 ),
                 Text(
