@@ -1,8 +1,10 @@
 //! ZCode adapter (spec §6.4): `~/.zcode/cli/db/db.sqlite` → `model_usage`
 //! (cleanest five-dimension source + duration/TTFT/status).
 //! Dedup key: `logical_request_id + attempt_index` (ids carry retry suffixes).
-//! Cross-source rule: rows whose provider is anthropic/openai/google are also
-//! logged by those tools' own files — skip & count to prevent double counting.
+//! Cross-source rule: rows whose provider is anthropic/openai are also logged
+//! by those tools' own files — skip & count to prevent double counting.
+//! google is NOT skipped: no other adapter ingests google rows from this db,
+//! so skipping them discarded that usage permanently.
 //!
 //! High-water mark: `rowid`, NOT `started_at`. `model_usage` rows are inserted
 //! when a request COMPLETES, stamped with its original `started_at` — observed
@@ -19,7 +21,7 @@ use anyhow::Result;
 use std::path::PathBuf;
 
 /// Providers whose usage is already ingested by their own adapters (§6.4).
-const CROSS_PROVIDERS: &[&str] = &["anthropic", "openai", "google"];
+const CROSS_PROVIDERS: &[&str] = &["anthropic", "openai"];
 
 pub struct ZCode;
 
