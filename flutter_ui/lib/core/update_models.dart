@@ -6,12 +6,16 @@ class ReleaseAsset {
   final int size;
   final String downloadUrl;
   final String contentType;
+  /// GitHub stamps release assets with `digest: "sha256:<hex>"` (absent on
+  /// older releases) — the update flow verifies it before the file can run.
+  final String? digest;
 
   const ReleaseAsset({
     required this.name,
     required this.size,
     required this.downloadUrl,
     required this.contentType,
+    this.digest,
   });
 
   factory ReleaseAsset.fromJson(Map<String, dynamic> json) {
@@ -20,6 +24,7 @@ class ReleaseAsset {
       size: (json['size'] as num?)?.toInt() ?? 0,
       downloadUrl: json['browser_download_url'] as String? ?? '',
       contentType: json['content_type'] as String? ?? '',
+      digest: json['digest'] as String?,
     );
   }
 
@@ -28,6 +33,7 @@ class ReleaseAsset {
         'size': size,
         'browser_download_url': downloadUrl,
         'content_type': contentType,
+        'digest': digest,
       };
 
   bool get isSetupInstaller {

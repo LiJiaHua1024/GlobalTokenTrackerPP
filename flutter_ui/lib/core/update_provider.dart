@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'app_info.dart';
 import 'ffi_bridge.dart';
@@ -246,9 +247,12 @@ class UpdateProvider extends ChangeNotifier {
 
     try {
       final tempDir = Directory.systemTemp;
-      final fileName = asset.name.isNotEmpty
+      final rawName = asset.name.isNotEmpty
           ? asset.name
           : 'GlobalTokenTrackerPP-Setup-${_updateInfo!.version}-win-x64.exe';
+      // asset.name comes from release JSON — basename it so a tampered name
+      // can never escape %TEMP%.
+      final fileName = rawName.split(RegExp(r'[\\/]')).last;
       final saveFile = File('${tempDir.path}\\$fileName');
 
       _downloadClient?.close(force: true);
@@ -291,6 +295,19 @@ class UpdateProvider extends ChangeNotifier {
       await sink.flush();
       await sink.close();
 
+      // GitHub stamps release assets with `digest: "sha256:<hex>"`. Verify
+      // before the file can ever be executed; on mismatch delete it and fail
+      // loudly instead of handing over a bogus installer.
+      final expected = _expectedSha256(asset.digest);
+      if (expected != null) {
+        final actual =
+            sha256.convert(await saveFile.readAsBytes()).toString();
+        if (actual != expected) {
+          await saveFile.delete();
+          throw Exception('安装包 SHA256 校验失败，已删除下载文件');
+        }
+      }
+
       _downloadedFilePath = saveFile.path;
       _downloadStatus = DownloadStatus.completed;
       notifyListeners();
@@ -312,6 +329,15 @@ class UpdateProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// `digest` is `"sha256:<hex>"` — lowercase hex, or null when absent
+  /// (older releases carry no digest; the Authenticode check then gates).
+  String? _expectedSha256(String? digest) {
+    if (digest == null || digest.isEmpty) return null;
+    return digest.startsWith('sha256:')
+        ? digest.substring(7).toLowerCase()
+        : null;
+  }
+
   /// Launches the downloaded installer and gracefully exits the current app
   Future<void> launchInstallerAndExit() async {
     if (_downloadedFilePath == null || !File(_downloadedFilePath!).existsSync()) {
@@ -321,6 +347,24 @@ class UpdateProvider extends ChangeNotifier {
     }
 
     try {
+      // Defense in depth behind the digest gate: refuse to launch an
+      // installer whose Authenticode signature is present but invalid.
+      // Unsigned builds (current releases) still pass.
+      final sig = await Process.run('powershell', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        '(Get-AuthenticodeSignature -FilePath "$_downloadedFilePath").Status',
+      ]);
+      final status = sig.stdout.toString().trim();
+      const bad = {'HashMismatch', 'EmbedError', 'Corrupt'};
+      if (bad.contains(status)) {
+        _errorMessage = '安装包签名无效（$status），已停止安装';
+        _downloadStatus = DownloadStatus.failed;
+        notifyListeners();
+        return;
+      }
+
       // Execute the downloaded installer detached
       await Process.start(
         _downloadedFilePath!,
