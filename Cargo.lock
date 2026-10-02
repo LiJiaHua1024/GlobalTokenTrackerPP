@@ -819,7 +819,6 @@ name = "globaltokentracker-setup"
 version = "1.5.0"
 dependencies = [
  "anyhow",
- "ureq",
  "windows",
  "winreg",
  "winresource",
