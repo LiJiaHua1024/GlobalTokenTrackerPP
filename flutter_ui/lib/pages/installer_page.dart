@@ -505,7 +505,10 @@ $edit
     final dest = _pathController.text.trim();
     final exe = '$dest\\globaltokentracker_ui.exe';
     if (await File(exe).exists()) {
-      await Process.start(exe, [], mode: ProcessStartMode.detached);
+      // The installer's cwd is a temp extract dir that gets scheduled for
+      // deletion right after this — the new app must not inherit it.
+      await Process.start(exe, [],
+          workingDirectory: dest, mode: ProcessStartMode.detached);
     }
     await windowManager.close();
   }
