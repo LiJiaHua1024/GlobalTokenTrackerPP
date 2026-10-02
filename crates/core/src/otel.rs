@@ -155,11 +155,15 @@ fn upsert_point(store: &Store, metric: &str, dp: &Value) -> Result<bool> {
         }
     }
     sig_parts.sort();
-    let value = dp["asDouble"]
+    // A point carrying neither asDouble nor asInt would land as 0.0 and drag
+    // cumulative totals down — skip it instead of writing a fake zero.
+    let Some(value) = dp["asDouble"]
         .as_f64()
         .or_else(|| dp["asInt"].as_str().and_then(|s| s.parse().ok()))
         .or_else(|| dp["asInt"].as_i64().map(|i| i as f64))
-        .unwrap_or(0.0);
+    else {
+        return Ok(false);
+    };
     let ts_ms = dp["timeUnixNano"]
         .as_str()
         .and_then(|s| s.parse::<i64>().ok())
@@ -269,6 +273,28 @@ mod tests {
             )
             .unwrap();
         assert_eq!(active, 120.0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn valueless_points_are_skipped() {
+        let dir = std::env::temp_dir().join(format!("cl-otel-novalue-{}", now_ms()));
+        let db = dir.join("t.db");
+        // Neither asDouble nor asInt on the point → not written, not counted.
+        let n = ingest_metrics(
+            br#"{"resourceMetrics":[{"scopeMetrics":[{"metrics":[
+              {"name":"claude_code.cost.usage","sum":{"dataPoints":[
+                {"attributes":[],"timeUnixNano":"1736983800000000000"}]}}]}]}]}"#,
+            &db,
+        )
+        .unwrap();
+        assert_eq!(n, 0);
+        let s = Store::open(&db).unwrap();
+        let rows: i64 = s
+            .conn()
+            .query_row("SELECT COUNT(*) FROM otel_metrics", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
