@@ -511,13 +511,12 @@ class _TokenActivityCalendarState extends State<TokenActivityCalendar> {
                       },
                     ),
                     touchCallback: (event, response) {
-                      setState(() {
-                        if (response?.spot != null) {
-                          _hoveredWeekIndex = response!.spot!.touchedBarGroupIndex;
-                        } else {
-                          _hoveredWeekIndex = null;
-                        }
-                      });
+                      // fl_chart fires on every pointer move — rebuild only
+                      // when the hovered week actually changed (the trend and
+                      // donut charts already guard this way).
+                      final next = response?.spot?.touchedBarGroupIndex;
+                      if (next == _hoveredWeekIndex) return;
+                      setState(() => _hoveredWeekIndex = next);
                     },
                   ),
                   titlesData: FlTitlesData(
