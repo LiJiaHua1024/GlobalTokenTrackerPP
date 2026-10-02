@@ -134,7 +134,7 @@ fn wham_usage(agent: &ureq::Agent, token: &str, account: Option<&str>) -> Result
     if let Some(id) = account.filter(|s| !s.is_empty()) {
         req = req.header("ChatGPT-Account-Id", id);
     }
-    let mut resp = req.call().map_err(|e| anyhow::anyhow!("wham usage: {e}"))?;
+    let mut resp = req.call().context("wham usage")?;
     Ok(resp.body_mut().read_to_string()?)
 }
 
@@ -153,8 +153,13 @@ fn poll_codex() -> Result<Vec<QuotaSnapshot>> {
     let body = match wham_usage(&agent, &token, account.as_deref()) {
         Ok(b) => b,
         Err(e) => {
-            // One refresh+retry on auth failure, then give up.
-            if format!("{e}").contains("401") || format!("{e}").contains("403") {
+            // One refresh+retry on auth failure, then give up. Typed match:
+            // a transport error whose text merely contains "401" (a proxy
+            // URL, a port) must not trigger a pointless token refresh.
+            if matches!(
+                e.downcast_ref::<ureq::Error>(),
+                Some(ureq::Error::StatusCode(401 | 403))
+            ) {
                 codex_refresh(&mut auth, &path)?;
                 let t2 = auth["tokens"]["access_token"].as_str().unwrap_or(&token);
                 wham_usage(&agent, t2, account.as_deref())?
