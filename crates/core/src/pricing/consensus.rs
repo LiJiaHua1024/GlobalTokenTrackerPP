@@ -98,6 +98,12 @@ fn usable(p: &Price) -> bool {
         && p.output.is_finite()
         && p.input >= 0.0
         && p.output >= 0.0
+        // Cache columns too: a legacy or seed row carrying inf/negative must
+        // not become the representative and bill inf.
+        && p.cache_read.is_finite()
+        && p.cache_write.is_finite()
+        && p.cache_read >= 0.0
+        && p.cache_write >= 0.0
         && (p.input > 0.0 || p.output > 0.0)
 }
 
@@ -257,7 +263,7 @@ pub fn decide_with(quotes: &[Quote], rules: &Rules) -> (Verdict, Vec<Stance>) {
     let first = |f: fn(&Price) -> Option<f64>| {
         winner
             .iter()
-            .find_map(|&i| f(&quotes[i].price).filter(|v| *v > 0.0))
+            .find_map(|&i| f(&quotes[i].price).filter(|v| v.is_finite() && *v > 0.0))
     };
     if price.cache_read <= 0.0 {
         price.cache_read = first(|p| Some(p.cache_read)).unwrap_or(0.0);

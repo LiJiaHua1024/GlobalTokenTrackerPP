@@ -347,14 +347,16 @@ pub(super) fn import_models_dev(conn: &Connection, body: &str, now: i64) -> Resu
             else {
                 continue; // no cost object
             };
-            st.execute(rusqlite::params![
-                normalize_key(&id),
-                c.input.0.unwrap_or(0.0),
-                c.output.0.unwrap_or(0.0),
-                c.cache_read.0.unwrap_or(0.0),
-                c.cache_write.0.unwrap_or(0.0),
-                now
-            ])?;
+        st.execute(rusqlite::params![
+            normalize_key(&id),
+            // sane(): inf/NaN/negative feed values become "absent" (0.0 in
+            // this importer's convention) instead of landing in the ledger.
+            sane(c.input.0).unwrap_or(0.0),
+            sane(c.output.0).unwrap_or(0.0),
+            sane(c.cache_read.0).unwrap_or(0.0),
+            sane(c.cache_write.0).unwrap_or(0.0),
+            now
+        ])?;
             n += 1;
         }
     }
@@ -403,10 +405,10 @@ pub(super) fn import_litellm(conn: &Connection, body: &str, now: i64) -> Result<
         }
         st.execute(rusqlite::params![
             normalize_key(&id),
-            per_1m(e.input_cost_per_token).unwrap_or(0.0),
-            per_1m(e.output_cost_per_token).unwrap_or(0.0),
-            per_1m(e.cache_read_input_token_cost).unwrap_or(0.0),
-            per_1m(e.cache_creation_input_token_cost).unwrap_or(0.0),
+            sane(per_1m(e.input_cost_per_token)).unwrap_or(0.0),
+            sane(per_1m(e.output_cost_per_token)).unwrap_or(0.0),
+            sane(per_1m(e.cache_read_input_token_cost)).unwrap_or(0.0),
+            sane(per_1m(e.cache_creation_input_token_cost)).unwrap_or(0.0),
             per_1m(e.input_cost_per_token_above_200k_tokens),
             per_1m(e.cache_creation_input_token_cost_above_1hr),
             per_1m(e.input_cost_per_token_batches),
@@ -474,9 +476,9 @@ pub(super) fn import_llmpricing(conn: &Connection, body: &str, now: i64) -> Resu
         }
         st.execute(rusqlite::params![
             normalize_key(&id),
-            q.input.0.unwrap_or(0.0),
-            q.output.0.unwrap_or(0.0),
-            q.cache_read.0.unwrap_or(0.0),
+            sane(q.input.0).unwrap_or(0.0),
+            sane(q.output.0).unwrap_or(0.0),
+            sane(q.cache_read.0).unwrap_or(0.0),
             now
         ])?;
         n += 1;
