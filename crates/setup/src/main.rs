@@ -550,11 +550,26 @@ pub fn cleanup_prior_install(old: &Path, new: &Path, log: &dyn Fn(String)) {
 /// window actually closes; console mode right before exit.
 /// `raw_arg` keeps `/C ...` unquoted so cmd parses `&`/`>` as metachars
 /// (`.arg()` would backslash-escape the inner quotes and break `/C`).
+/// The `rmdir` target `schedule_dir_delete` passes to cmd: trailing
+/// separators stripped and drive roots refused. A trailing `\` would escape
+/// the closing quote (`"C:\dir\"`) and let cmd parse the rest of the line as
+/// more commands; `rmdir C:` eats the current directory on that drive.
+fn rmdir_target(dest: &Path) -> Result<String> {
+    let target = dest.display().to_string();
+    let target = target.trim_end_matches(['\\', '/']);
+    if target.is_empty() || target.ends_with(':') {
+        anyhow::bail!("refusing to rmdir a drive root: {target:?}");
+    }
+    Ok(target.to_string())
+}
+
 pub fn schedule_dir_delete(dest: &Path) -> Result<()> {
+    let target = rmdir_target(dest)?;
+    // `ping -n 3` ≈ 2s — enough for this process to fully exit even when the
+    // exe image is released a beat after main returns (AV scanners add lag).
     Command::new("cmd")
         .raw_arg(format!(
-            "/C ping 127.0.0.1 -n 2 >nul & rmdir /S /Q \"{}\"",
-            dest.display()
+            "/C ping 127.0.0.1 -n 3 >nul & rmdir /S /Q \"{target}\""
         ))
         .creation_flags(CREATE_NO_WINDOW)
         .stdin(Stdio::null())
@@ -763,6 +778,20 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use winreg::enums::HKEY_CURRENT_USER;
+
+    #[test]
+    fn rmdir_target_trims_separator_and_refuses_drive_roots() {
+        assert_eq!(
+            rmdir_target(Path::new(r"C:\Apps\GTT\")).unwrap(),
+            r"C:\Apps\GTT"
+        );
+        assert_eq!(
+            rmdir_target(Path::new(r"C:\Apps\GTT")).unwrap(),
+            r"C:\Apps\GTT"
+        );
+        assert!(rmdir_target(Path::new("C:\\")).is_err());
+        assert!(rmdir_target(Path::new("C:")).is_err());
+    }
 
     const KEEP: &str = r"C:\Windows\system32";
     const OTHER: &str = r"D:\tools";
