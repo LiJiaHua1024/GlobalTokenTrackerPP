@@ -46,7 +46,12 @@ pub fn wait_for_change(roots: &[PathBuf], token: &CancellationToken) -> bool {
                     .filter(|p| !ignorable(p))
                     .map(|p| p.display().to_string()),
             ),
-            Ok(Err(_)) | Err(RecvTimeoutError::Disconnected) => return false,
+            // notify errors on event-buffer overflows and deleted roots —
+            // common on hot log dirs. Treat as a change: the rescan re-arms a
+            // fresh watcher, so one error must not kill live refresh for good.
+            Ok(Err(_)) => return !token.is_cancelled(),
+            // Watcher gone; same recovery path as an error event.
+            Err(RecvTimeoutError::Disconnected) => return !token.is_cancelled(),
             Err(RecvTimeoutError::Timeout) if token.is_cancelled() => return false,
             Err(RecvTimeoutError::Timeout) => {}
         }

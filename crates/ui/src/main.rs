@@ -479,10 +479,13 @@ fn arm_watcher(context: &ComponentContext<Shell>) {
         if watch::wait_for_change(&roots, &token) {
             Msg::WatchFired
         } else {
-            // Watch failed/cancelled — fall back to a slow poll so changes are
-            // still picked up eventually.
+            // Arming failed (watcher creation error / no root watchable yet)
+            // or the task was cancelled. Retry via WatchFired after a pause —
+            // in 仅文件变更 mode that re-arms the watcher and rescans, so
+            // live refresh recovers instead of dying with this arm. Timer
+            // mode ignores WatchFired; its Tick already covers refresh.
             std::thread::sleep(std::time::Duration::from_secs(120));
-            Msg::Tick
+            Msg::WatchFired
         }
     });
 }
