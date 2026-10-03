@@ -414,6 +414,9 @@ mod tests {
         let engine = Engine::new(store).unwrap();
         let ctx = Box::into_raw(Box::new(GttContext {
             inner: Mutex::new(engine),
+            // Only gtt_update_prices reads db_path, and this test never
+            // reaches it — the engine here is backed by an in-memory store.
+            db_path: PathBuf::new(),
         }));
 
         let c_str = unsafe {
