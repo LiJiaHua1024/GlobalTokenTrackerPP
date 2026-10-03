@@ -74,9 +74,17 @@ impl SourceAdapter for Cursor {
         let conn = super::opencode::open_ro(&item.path)?;
         // value is BLOB (utf-8 JSON) — fetch and parse in Rust; json_extract
         // on a blob column errors out ("malformed JSON").
+        //
+        // `value IS NOT NULL` is load-bearing: the column carries no NOT NULL
+        // constraint and Cursor really does leave ~20% of its `bubbleId:*`
+        // rows NULL. rusqlite's `Vec<u8>` decoder rejects a NULL column with
+        // `InvalidColumnType`, which would abort the row loop before
+        // `pending_cursor` is built — pinning the watermark at that rowid
+        // forever. Skipped here instead: the watermark is rowid-based, so the
+        // next scan steps past these rows via `rowid > ?1` anyway.
         let mut st = conn.prepare(
             "SELECT rowid, key, CAST(value AS BLOB) FROM cursorDiskKV
-             WHERE rowid > ?1 AND key LIKE 'bubbleId:%'
+             WHERE rowid > ?1 AND key LIKE 'bubbleId:%' AND value IS NOT NULL
              ORDER BY rowid",
         )?;
         let rows = st.query_map(rusqlite::params![since], |r| {
@@ -166,6 +174,14 @@ mod tests {
         let dbp = dir.join("state.vscdb");
         {
             let conn = make_db(&dbp);
+            // Regression: Cursor leaves NULL-valued `bubbleId:*` rows behind.
+            // Inserted first so it owns rowid 1 — without the SQL guard the
+            // scan dies on this very row and ingests nothing.
+            conn.execute(
+                "INSERT INTO cursorDiskKV VALUES ('bubbleId:comp1:b0', NULL)",
+                [],
+            )
+            .unwrap();
             conn.execute(
                 "INSERT INTO cursorDiskKV VALUES ('bubbleId:comp1:b1', ?1)",
                 [bubble("r-1", Some("grok-4.6"))],
