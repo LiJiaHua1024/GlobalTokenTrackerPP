@@ -91,16 +91,40 @@ class _SourcesPageState extends State<SourcesPage> {
               separatorBuilder: (_, __) => const SizedBox(height: 12),
               itemBuilder: (context, i) {
                 final s = _sources[i];
+                // `enabled` is a config toggle (sources.enabled), not a health
+                // signal — touch_source never rewrites it after insert. Health
+                // has to come from lastError, so a failing scan must not keep
+                // the green "正常监视中" chip and the green check.
+                final hasErr = s.lastError != null;
+                late final Color avatarBg;
+                late final Color avatarFg;
+                late final IconData avatarIcon;
+                if (hasErr) {
+                  avatarBg = theme.colorScheme.errorContainer;
+                  avatarFg = theme.colorScheme.onErrorContainer;
+                  avatarIcon = Icons.error_outline;
+                } else if (s.enabled) {
+                  avatarBg = Colors.green.shade100;
+                  avatarFg = Colors.green.shade700;
+                  avatarIcon = Icons.check_circle;
+                } else {
+                  avatarBg = Colors.grey.shade200;
+                  avatarFg = Colors.grey;
+                  avatarIcon = Icons.pause_circle_outline;
+                }
+                final chipLabel = hasErr
+                    ? '扫描出错'
+                    : (s.enabled ? '正常监视中' : '已停用');
+                final Color? chipBg = hasErr
+                    ? theme.colorScheme.error.withValues(alpha: 0.12)
+                    : (s.enabled ? Colors.green.withValues(alpha: 0.12) : null);
                 return Card(
                   elevation: 1,
                   child: ListTile(
                     contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
                     leading: CircleAvatar(
-                      backgroundColor: s.enabled ? Colors.green.shade100 : Colors.grey.shade200,
-                      child: Icon(
-                        s.enabled ? Icons.check_circle : Icons.pause_circle_outline,
-                        color: s.enabled ? Colors.green.shade700 : Colors.grey,
-                      ),
+                      backgroundColor: avatarBg,
+                      child: Icon(avatarIcon, color: avatarFg),
                     ),
                     title: Text(s.source, style: const TextStyle(fontWeight: FontWeight.bold)),
                     subtitle: Column(
@@ -109,13 +133,13 @@ class _SourcesPageState extends State<SourcesPage> {
                         const SizedBox(height: 4),
                         Text('发现文件: ${s.filesSeen} · 已处理游标: ${s.cursors} · 入库行数: ${s.rowsIngested}'),
                         Text('最近扫描: ${_formatTs(s.lastSyncedAt)}', style: TextStyle(color: theme.colorScheme.outline, fontSize: 12)),
-                        if (s.lastError != null)
+                        if (hasErr)
                           Text('异常: ${s.lastError}', style: TextStyle(color: theme.colorScheme.error, fontSize: 12)),
                       ],
                     ),
                     trailing: Chip(
-                      label: Text(s.enabled ? '正常监视中' : '已停用'),
-                      backgroundColor: s.enabled ? Colors.green.withOpacity(0.12) : null,
+                      label: Text(chipLabel),
+                      backgroundColor: chipBg,
                     ),
                   ),
                 );
