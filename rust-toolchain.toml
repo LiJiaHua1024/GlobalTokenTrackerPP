@@ -1,0 +1,16 @@
+# Pin the toolchain for every Rust invocation in this repo, CI included.
+#
+# All three workflows call dtolnay/rust-toolchain without a `toolchain:` input,
+# so they pick this file up. Left unpinned, every job installed whatever stable
+# happened to be current — each new Rust minor ships new and newly-triggering
+# clippy lints, and with `-D warnings` over the workspace `pedantic` set that
+# turned main red on commits that touched no Rust at all. It also meant CI ran a
+# different compiler than the local machine, so red builds could not be
+# reproduced before pushing.
+#
+# Bump this deliberately: install the same version locally, run the full check
+# suite, then commit both together.
+[toolchain]
+channel = "1.95.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

@@ -126,7 +126,7 @@ jobs:
             --github-output "$GITHUB_OUTPUT"
 
       - name: Set up Rust toolchain
-        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # version pinned in rust-toolchain.toml
         with:
           components: clippy
 
@@ -168,6 +168,10 @@ jobs:
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           channel: stable
+          # Pinned to the SDK the maintainer builds against. A floating stable
+          # let new Dart analyzer releases change `flutter analyze` results and
+          # fail builds that changed no Dart code.
+          flutter-version: 3.47.5
           cache: true
 
       - name: Validate installer packaging
@@ -224,7 +228,7 @@ jobs:
           python-version: '3.x'
 
       - name: Set up Rust toolchain
-        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # version pinned in rust-toolchain.toml
 
       - name: Restore cargo cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -233,6 +237,10 @@ jobs:
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           channel: stable
+          # Pinned to the SDK the maintainer builds against. A floating stable
+          # let new Dart analyzer releases change `flutter analyze` results and
+          # fail builds that changed no Dart code.
+          flutter-version: 3.47.5
           cache: true
 
       - name: Build installer package

@@ -1,0 +1,28 @@
+#!/bin/sh
+# Run the gates CI runs, so a red build is caught here instead of in the
+# Actions log. CI pins its toolchain to rust-toolchain.toml, which this
+# repository also applies locally — a failure below is therefore the same
+# failure GitHub would report.
+#
+# Bypass with `git push --no-verify` or SKIP_PREPUSH_HOOK=1.
+if [ "$SKIP_PREPUSH_HOOK" = "1" ]; then
+    exit 0
+fi
+
+root=$(git rev-parse --show-toplevel)
+
+echo "pre-push: cargo clippy --workspace --all-targets -- -D warnings"
+( cd "$root" && cargo clippy --workspace --all-targets -- -D warnings ) || {
+    echo "pre-push: clippy failed; push with --no-verify to override." >&2
+    exit 1
+}
+
+if [ -d "$root/flutter_ui" ]; then
+    echo "pre-push: flutter analyze lib/"
+    ( cd "$root/flutter_ui" && flutter analyze lib/ ) || {
+        echo "pre-push: flutter analyze failed; push with --no-verify to override." >&2
+        exit 1
+    }
+fi
+
+exit 0
