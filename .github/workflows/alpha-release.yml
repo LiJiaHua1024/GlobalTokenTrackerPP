@@ -119,9 +119,22 @@ jobs:
             --release-tag "$RELEASE_TAG" \
             --github-output "$GITHUB_OUTPUT"
 
+      # dtolnay/rust-toolchain ignores rust-toolchain.toml when no toolchain
+      # input is given and installs latest stable, so read the pin out of the
+      # file and pass it explicitly. That keeps this the single source of truth.
+      - name: Resolve pinned Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)".*$/\1/p' rust-toolchain.toml | tr -d '\r')
+          [ -n "$version" ] || { echo "no channel pinned in rust-toolchain.toml" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # version pinned in rust-toolchain.toml
         with:
+          toolchain: ${{ steps.toolchain.outputs.version }}
           components: clippy
 
       - name: Set up Flutter
@@ -223,8 +236,22 @@ jobs:
         with:
           python-version: '3.x'
 
+      # dtolnay/rust-toolchain ignores rust-toolchain.toml when no toolchain
+      # input is given and installs latest stable, so read the pin out of the
+      # file and pass it explicitly. That keeps this the single source of truth.
+      - name: Resolve pinned Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)".*$/\1/p' rust-toolchain.toml | tr -d '\r')
+          [ -n "$version" ] || { echo "no channel pinned in rust-toolchain.toml" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # version pinned in rust-toolchain.toml
+        with:
+          toolchain: ${{ steps.toolchain.outputs.version }}
 
       - name: Set up Flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
