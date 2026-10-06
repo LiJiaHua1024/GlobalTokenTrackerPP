@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../core/app_info.dart';
 import '../core/update_models.dart';
 import '../core/update_provider.dart';
+import 'changelog_view.dart';
 
 class UpdateDialog extends StatelessWidget {
   final UpdateInfo updateInfo;
@@ -174,14 +175,10 @@ class UpdateDialog extends StatelessWidget {
                   child: Scrollbar(
                     thumbVisibility: true,
                     child: SingleChildScrollView(
-                      child: SelectableText(
-                        updateInfo.releaseNotes.isNotEmpty
+                      child: ChangelogView(
+                        content: updateInfo.releaseNotes.isNotEmpty
                             ? updateInfo.releaseNotes
                             : updateInfo.title,
-                        style: theme.textTheme.bodyMedium?.copyWith(
-                          fontFamily: 'Segoe UI',
-                          height: 1.5,
-                        ),
                       ),
                     ),
                   ),
