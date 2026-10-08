@@ -194,7 +194,7 @@ class SettingsPage extends StatelessWidget {
                         child: Container(
                           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                           decoration: BoxDecoration(
-                            color: isSelected ? color.withOpacity(0.15) : Colors.transparent,
+                            color: isSelected ? color.withValues(alpha: 0.15) : Colors.transparent,
                             border: Border.all(
                               color: isSelected ? color : theme.colorScheme.outlineVariant,
                               width: isSelected ? 2 : 1,
@@ -432,7 +432,7 @@ class SettingsPage extends StatelessWidget {
       return Container(
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
-          color: colorScheme.surfaceContainerHighest.withOpacity(0.5),
+          color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
           borderRadius: BorderRadius.circular(12),
         ),
         child: Row(
@@ -457,9 +457,9 @@ class SettingsPage extends StatelessWidget {
       return Container(
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: colorScheme.primaryContainer.withOpacity(0.5),
+          color: colorScheme.primaryContainer.withValues(alpha: 0.5),
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: colorScheme.primary.withOpacity(0.4)),
+          border: Border.all(color: colorScheme.primary.withValues(alpha: 0.4)),
         ),
         child: Row(
           children: [
@@ -495,7 +495,7 @@ class SettingsPage extends StatelessWidget {
       return Container(
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
-          color: colorScheme.errorContainer.withOpacity(0.5),
+          color: colorScheme.errorContainer.withValues(alpha: 0.5),
           borderRadius: BorderRadius.circular(12),
         ),
         child: Row(
@@ -516,7 +516,7 @@ class SettingsPage extends StatelessWidget {
                   ),
                   Text(
                     updateProvider.errorMessage ?? '无法连接到更新服务器',
-                    style: TextStyle(fontSize: 12, color: colorScheme.onErrorContainer.withOpacity(0.8)),
+                    style: TextStyle(fontSize: 12, color: colorScheme.onErrorContainer.withValues(alpha: 0.8)),
                   ),
                 ],
               ),
@@ -535,9 +535,9 @@ class SettingsPage extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: colorScheme.surfaceContainerHighest.withOpacity(0.4),
+        color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.4),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: colorScheme.outlineVariant.withOpacity(0.5)),
+        border: Border.all(color: colorScheme.outlineVariant.withValues(alpha: 0.5)),
       ),
       child: Row(
         children: [

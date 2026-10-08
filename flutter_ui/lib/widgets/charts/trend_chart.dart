@@ -132,7 +132,7 @@ class _TrendChartState extends State<TrendChart> {
                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                   decoration: BoxDecoration(
                     color: _touchedIndex >= 0 && _touchedIndex < widget.daily.length
-                        ? theme.colorScheme.primaryContainer.withOpacity(0.5)
+                        ? theme.colorScheme.primaryContainer.withValues(alpha: 0.5)
                         : Colors.transparent,
                     borderRadius: BorderRadius.circular(12),
                   ),
@@ -303,7 +303,7 @@ class _TrendChartState extends State<TrendChart> {
                           return rem < 0.1 || (yConfig.interval - rem) < 0.1;
                         },
                         getDrawingHorizontalLine: (value) => FlLine(
-                          color: theme.colorScheme.outlineVariant.withOpacity(0.35),
+                          color: theme.colorScheme.outlineVariant.withValues(alpha: 0.35),
                           strokeWidth: 1,
                           dashArray: [4, 4],
                         ),
@@ -332,7 +332,7 @@ class _TrendChartState extends State<TrendChart> {
                                         Color.lerp(primaryColor, Colors.white, isDark ? 0.35 : 0.2)!,
                                       ]
                                     : [
-                                        primaryColor.withOpacity(0.72),
+                                        primaryColor.withValues(alpha: 0.72),
                                         primaryColor,
                                       ],
                               ),
@@ -342,10 +342,10 @@ class _TrendChartState extends State<TrendChart> {
                                 show: true,
                                 toY: yConfig.maxY,
                                 color: isTouched
-                                    ? primaryColor.withOpacity(0.12)
+                                    ? primaryColor.withValues(alpha: 0.12)
                                     : (isDark
-                                        ? Colors.white.withOpacity(0.04)
-                                        : primaryColor.withOpacity(0.045)),
+                                        ? Colors.white.withValues(alpha: 0.04)
+                                        : primaryColor.withValues(alpha: 0.045)),
                               ),
                             ),
                           ],

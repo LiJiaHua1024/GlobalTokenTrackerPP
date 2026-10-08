@@ -187,7 +187,7 @@ class _MultiModelTrendChartState extends State<MultiModelTrendChart> {
           curveSmoothness: 0.35,
           preventCurveOverShooting: true,
           color: isAnyHighlighted && !isHighlighted
-              ? color.withOpacity(0.18)
+              ? color.withValues(alpha: 0.18)
               : color,
           barWidth: isHighlighted ? 3.0 : 2.0,
           isStrokeCapRound: true,
@@ -248,7 +248,7 @@ class _MultiModelTrendChartState extends State<MultiModelTrendChart> {
                         color: isDark ? const Color(0xFF23272C) : const Color(0xFFF1F3F5),
                         borderRadius: BorderRadius.circular(20),
                         border: Border.all(
-                          color: theme.colorScheme.outlineVariant.withOpacity(0.3),
+                          color: theme.colorScheme.outlineVariant.withValues(alpha: 0.3),
                         ),
                       ),
                       padding: const EdgeInsets.all(2),
@@ -318,7 +318,7 @@ class _MultiModelTrendChartState extends State<MultiModelTrendChart> {
                                 boxShadow: isHovered
                                     ? [
                                         BoxShadow(
-                                          color: color.withOpacity(0.6),
+                                          color: color.withValues(alpha: 0.6),
                                           blurRadius: 6,
                                           spreadRadius: 1,
                                         ),
@@ -598,7 +598,7 @@ class _MultiModelTrendChartState extends State<MultiModelTrendChart> {
             ),
             boxShadow: [
               BoxShadow(
-                color: Colors.black.withOpacity(isDark ? 0.45 : 0.12),
+                color: Colors.black.withValues(alpha: isDark ? 0.45 : 0.12),
                 blurRadius: 16,
                 offset: const Offset(0, 4),
               ),
@@ -733,7 +733,7 @@ class _MultiModelTrendChartState extends State<MultiModelTrendChart> {
           boxShadow: isSelected
               ? [
                   BoxShadow(
-                    color: Colors.black.withOpacity(isDark ? 0.25 : 0.08),
+                    color: Colors.black.withValues(alpha: isDark ? 0.25 : 0.08),
                     blurRadius: 4,
                     offset: const Offset(0, 1),
                   ),

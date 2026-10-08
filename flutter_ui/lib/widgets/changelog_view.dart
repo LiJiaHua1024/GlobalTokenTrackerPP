@@ -89,13 +89,13 @@ class ChangelogView extends StatelessWidget {
         fontFamily: 'Consolas',
         fontSize: 12.5,
         color: colorScheme.onSurfaceVariant,
-        backgroundColor: colorScheme.surfaceContainerHighest.withOpacity(0.6),
+        backgroundColor: colorScheme.surfaceContainerHighest.withValues(alpha: 0.6),
       ),
       codeblockDecoration: BoxDecoration(
-        color: colorScheme.surfaceContainerHighest.withOpacity(0.45),
+        color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.45),
         borderRadius: BorderRadius.circular(8),
         border: Border.all(
-          color: colorScheme.outlineVariant.withOpacity(0.5),
+          color: colorScheme.outlineVariant.withValues(alpha: 0.5),
         ),
       ),
       codeblockPadding: const EdgeInsets.all(12),
@@ -105,7 +105,7 @@ class ChangelogView extends StatelessWidget {
         height: 1.5,
       ),
       blockquoteDecoration: BoxDecoration(
-        color: colorScheme.primaryContainer.withOpacity(0.12),
+        color: colorScheme.primaryContainer.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(6),
         border: Border(
           left: BorderSide(color: colorScheme.primary, width: 3.5),
@@ -118,7 +118,7 @@ class ChangelogView extends StatelessWidget {
         fontWeight: FontWeight.w500,
       ),
       tableBorder: TableBorder.all(
-        color: colorScheme.outlineVariant.withOpacity(0.5),
+        color: colorScheme.outlineVariant.withValues(alpha: 0.5),
         width: 1,
       ),
       tableHead: theme.textTheme.bodyMedium?.copyWith(
@@ -132,7 +132,7 @@ class ChangelogView extends StatelessWidget {
       horizontalRuleDecoration: BoxDecoration(
         border: Border(
           top: BorderSide(
-            color: colorScheme.outlineVariant.withOpacity(0.6),
+            color: colorScheme.outlineVariant.withValues(alpha: 0.6),
             width: 1,
           ),
         ),
