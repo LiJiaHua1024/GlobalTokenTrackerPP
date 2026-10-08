@@ -76,9 +76,17 @@ jobs:
           cargo check --workspace --all-targets
           cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Rust tests
+        shell: bash
+        run: cargo test --workspace
+
       - name: Flutter analyze
         working-directory: flutter_ui
         run: flutter analyze lib/
+
+      - name: Flutter tests
+        working-directory: flutter_ui
+        run: flutter test
 
       - name: Build and Package (Installer + Portable Zip)
         id: package
