@@ -26,8 +26,11 @@ $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue) -and (Test-Path $cargoBin)) {
     $env:PATH = "$cargoBin;$env:PATH"
 }
-if (-not (Get-Command flutter -ErrorAction SilentlyContinue) -and (Test-Path 'F:\flutter\bin')) {
-    $env:PATH = "F:\flutter\bin;$env:PATH"
+# Flutter SDK location. Prefer an explicit FLUTTER_HOME
+# (pointing at the SDK's bin directory) over a hardcoded
+# developer path; otherwise flutter must already be on PATH.
+if (-not (Get-Command flutter -ErrorAction SilentlyContinue) -and $env:FLUTTER_HOME -and (Test-Path $env:FLUTTER_HOME)) {
+    $env:PATH = "$env:FLUTTER_HOME;$env:PATH"
 }
 $target      = Join-Path $root 'target\release'
 $flutterUi   = Join-Path $root 'flutter_ui'
