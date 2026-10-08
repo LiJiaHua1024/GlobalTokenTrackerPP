@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
@@ -291,31 +292,34 @@ class _TokenActivityCalendarState extends State<TokenActivityCalendar> {
           builder: (context, constraints) {
             final availableWidth = constraints.maxWidth;
             const minCellSize = 9.0;
-            const maxCellSize = 14.0;
-            const spacing = 2.8;
+            const minContentWidth = (minCellSize * totalWeeks) + ((totalWeeks - 1) * 2.5); // ~590
+            final contentWidth = math.max(availableWidth, minContentWidth);
 
-            final optimalCellSize = ((availableWidth - (totalWeeks - 1) * spacing) / totalWeeks)
-                .clamp(minCellSize, maxCellSize);
+            // Responsive spacing and uniform cell size
+            final nominalSpacing = (contentWidth / totalWeeks * 0.16).clamp(2.4, 3.2);
+            final cellSize = (contentWidth - (totalWeeks - 1) * nominalSpacing) / totalWeeks;
+            final actualSpacing = (contentWidth - totalWeeks * cellSize) / (totalWeeks - 1);
 
-            return SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
+            final gridContent = SizedBox(
+              width: contentWidth,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // Matrix: 7 rows x 53 columns
+                  // Matrix: 7 rows x 53 columns with strictly identical cell size across all columns
                   Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: List.generate(totalWeeks, (w) {
-                      return Padding(
-                        padding: EdgeInsets.only(right: w < totalWeeks - 1 ? spacing : 0),
+                      return SizedBox(
+                        width: cellSize,
                         child: Column(
                           children: List.generate(daysPerWeek, (d) {
                             final dt = _gridDates[w][d];
                             final isFuture = dt.isAfter(_today);
                             if (isFuture) {
                               return SizedBox(
-                                width: optimalCellSize,
-                                height: optimalCellSize + (d < daysPerWeek - 1 ? spacing : 0),
+                                width: cellSize,
+                                height: cellSize + (d < daysPerWeek - 1 ? actualSpacing : 0),
                               );
                             }
 
@@ -336,7 +340,7 @@ class _TokenActivityCalendarState extends State<TokenActivityCalendar> {
                                 '${cost > 0 ? ' · \$${cost.toStringAsFixed(3)}' : ''}';
 
                             return Padding(
-                              padding: EdgeInsets.only(bottom: d < daysPerWeek - 1 ? spacing : 0),
+                              padding: EdgeInsets.only(bottom: d < daysPerWeek - 1 ? actualSpacing : 0),
                               child: Tooltip(
                                 message: tooltipText,
                                 waitDuration: const Duration(milliseconds: 150),
@@ -353,11 +357,11 @@ class _TokenActivityCalendarState extends State<TokenActivityCalendar> {
                                 ),
                                 child: AnimatedContainer(
                                   duration: const Duration(milliseconds: 200),
-                                  width: optimalCellSize,
-                                  height: optimalCellSize,
+                                  width: cellSize,
+                                  height: cellSize,
                                   decoration: BoxDecoration(
                                     color: cellColor,
-                                    borderRadius: BorderRadius.circular(2.5),
+                                    borderRadius: BorderRadius.circular((cellSize * 0.18).clamp(2.0, 3.5)),
                                   ),
                                 ),
                               ),
@@ -369,17 +373,23 @@ class _TokenActivityCalendarState extends State<TokenActivityCalendar> {
                   ),
                   const SizedBox(height: 10),
 
-                  // Month Labels beneath week columns
+                  // Month Labels beneath week columns with overflow protection
                   SizedBox(
-                    width: totalWeeks * optimalCellSize + (totalWeeks - 1) * spacing,
+                    width: contentWidth,
                     height: 20,
                     child: Stack(
+                      clipBehavior: Clip.none,
                       children: _monthLabels.entries.map((entry) {
                         final w = entry.key;
                         final label = entry.value;
-                        final leftPos = w * (optimalCellSize + spacing);
+                        final leftPos = w * (cellSize + actualSpacing);
+                        // Ensure rightmost labels never get clipped by container edge
+                        final estimatedLabelWidth = label.length * 13.0 + 4.0;
+                        final maxLeft = contentWidth - estimatedLabelWidth;
+                        final clampedLeft = (leftPos > maxLeft ? maxLeft : leftPos).clamp(0.0, contentWidth);
+
                         return Positioned(
-                          left: leftPos,
+                          left: clampedLeft,
                           child: Text(
                             label,
                             style: TextStyle(
@@ -395,6 +405,15 @@ class _TokenActivityCalendarState extends State<TokenActivityCalendar> {
                 ],
               ),
             );
+
+            if (contentWidth > availableWidth) {
+              return SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: gridContent,
+              );
+            }
+
+            return gridContent;
           },
         ),
 
