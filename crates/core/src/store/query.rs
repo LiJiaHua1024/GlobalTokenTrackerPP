@@ -768,6 +768,17 @@ impl super::Store {
 
     /// Hour-of-day histogram (UTC→local shift done by caller via offset string).
     pub fn hourly_histogram(&self, utc_offset: &str) -> Result<Vec<(u8, u64)>> {
+        // The offset is interpolated into SQL, so it must be a
+        // well-formed [+-]HH:MM and nothing else — the same
+        // byte-pattern guard the other offset-taking queries use.
+        let b = utc_offset.as_bytes();
+        anyhow::ensure!(
+            b.len() == 6
+                && matches!(b[0], b'+' | b'-')
+                && b[3] == b':'
+                && [1, 2, 4, 5].iter().all(|&i| b[i].is_ascii_digit()),
+            "invalid utc_offset: {utc_offset}"
+        );
         let mut st = self.conn().prepare(&format!(
             "SELECT CAST(strftime('%H', ts_start/1000, 'unixepoch', '{utc_offset}') AS INTEGER) h,
                     COUNT(*) FROM usage_events GROUP BY h ORDER BY h"
