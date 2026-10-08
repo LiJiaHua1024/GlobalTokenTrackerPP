@@ -166,11 +166,43 @@ fn extract_payload(dest: &Path, log: &dyn Fn(String)) -> Result<u64> {
         }
         let mut buf = Vec::with_capacity(usize::try_from(entry.size()).unwrap_or(0));
         entry.read_to_end(&mut buf)?;
-        fs::write(&out, &buf)?;
+        // Write to a sibling temp file, then swap it in. Opening a live
+        // exe for write (truncate + fill) is exactly what behaviour-based
+        // AV (e.g. 360) flags as self-replacement: the write gets
+        // blocked inside a filter driver and the target stays truncated
+        // at 0 bytes. The rename-swap pattern also fails safe — a
+        // failed install leaves the previous version intact instead of a
+        // zeroed file.
+        let tmp = match out.file_name() {
+            Some(n) => out.with_file_name(format!(".{}.gtt-new", n.to_string_lossy())),
+            None => bail!("payload entry has no file name: {}", name.display()),
+        };
+        fs::write(&tmp, &buf)?;
+        if fs::metadata(&tmp).map_or(0, |m| m.len()) != buf.len() as u64 {
+            let _ = fs::remove_file(&tmp);
+            bail!("写入载荷不完整：{}", out.display());
+        }
+        rename_retry(&tmp, &out)?;
         total += buf.len() as u64;
         log(format!("    + {}", name.display()));
     }
     Ok(total)
+}
+
+/// `MoveFileEx` over a just-killed exe can fail transiently while the
+/// image section is still tearing down — retry briefly rather than abort.
+fn rename_retry(from: &Path, to: &Path) -> Result<()> {
+    let mut last = None;
+    for _ in 0..40 {
+        match fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+        }
+    }
+    Err(last.unwrap()).with_context(|| format!("替换 {} 失败", to.display()))
 }
 
 fn make_shortcuts(dest: &Path) -> Result<()> {
@@ -482,7 +514,9 @@ pub fn install_steps(
     let self_exe = env::current_exe()?;
     let setup_copy = dest.join(SETUP_EXE_NAME);
     if self_exe.canonicalize()? != setup_copy.canonicalize().unwrap_or(setup_copy.clone()) {
-        fs::copy(&self_exe, &setup_copy)?;
+        let tmp = dest.join(format!(".{SETUP_EXE_NAME}.gtt-new"));
+        fs::copy(&self_exe, &tmp)?;
+        rename_retry(&tmp, &setup_copy)?;
     }
     step(70, "写入卸载注册信息…");
     register_uninstall(dest, size)?;

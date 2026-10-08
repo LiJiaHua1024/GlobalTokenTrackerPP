@@ -30,7 +30,7 @@ impl Totals5 {
 
 /// Previous token_count line's signature, persisted as `adapter_state` so
 /// duplicate detection also works across append scans.
-#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct PrevLine {
     inc: Totals5,
     cum: Totals5,
@@ -42,6 +42,12 @@ struct PrevLine {
     /// Latest model-output line (response item / usage record) of that call.
     #[serde(default)]
     model_out_ms: Option<i64>,
+    /// Session model / cwd from the latest `turn_context` — an append scan's
+    /// segment usually has none, and its events must not lose them.
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
 }
 
 impl PrevLine {
@@ -127,8 +133,8 @@ impl SourceAdapter for Codex {
         let mut call_start: Option<i64> = prev.call_start_ms;
         let mut model_out: Option<i64> = prev.model_out_ms;
         let mut staged_start: Option<i64> = None;
-        let mut cur_model: Option<String> = None;
-        let mut cur_cwd: Option<String> = None;
+        let mut cur_model: Option<String> = prev.model.clone();
+        let mut cur_cwd: Option<String> = prev.cwd.clone();
         let mut last_quota: Option<(f64, i64)> = None; // (used_percent, resets_at) change-detect
 
         let mut pos = 0u64;
@@ -261,6 +267,8 @@ impl SourceAdapter for Codex {
         }
         prev.call_start_ms = call_start;
         prev.model_out_ms = model_out;
+        prev.model = cur_model;
+        prev.cwd = cur_cwd;
         out.new_state = serde_json::to_string(&prev).ok();
         Ok(out)
     }
@@ -464,6 +472,71 @@ mod tests {
             None,
         );
         assert_eq!(durs(&o), [Some(3_000), Some(6_000)]);
+    }
+
+    fn turn_context(sec: u32, model: &str, cwd: &str) -> String {
+        format!(
+            r#"{{"timestamp":"{}","type":"turn_context","payload":{{"model":"{model}","cwd":"{cwd}"}}}}"#,
+            ts(sec)
+        )
+    }
+
+    #[test]
+    fn append_scan_keeps_the_session_model_and_cwd() {
+        let first = parse(
+            &[
+                started(0),
+                turn_context(0, "gpt-x", "D:/proj"),
+                asst(2, "message"),
+                token_count(2, 7, 7),
+            ],
+            None,
+        );
+        assert_eq!(first.events[0].model.as_deref(), Some("gpt-x"));
+        // The appended segment has no turn_context of its own.
+        let data = format!(
+            "{}\n",
+            [asst(5, "message"), token_count(5, 8, 15)].join("\n")
+        );
+        let second = Codex
+            .parse_jsonl(
+                &item(),
+                first.consumed,
+                data.as_bytes(),
+                first.new_state.as_deref(),
+            )
+            .unwrap();
+        let e = &second.events[0];
+        assert_eq!(e.model.as_deref(), Some("gpt-x"));
+        assert_eq!(e.request_model.as_deref(), Some("gpt-x"));
+        assert_eq!(e.project.as_deref(), Some("D:/proj"));
+        // A later turn_context still switches the model mid-session.
+        let data = format!(
+            "{}\n",
+            [turn_context(9, "gpt-y", "D:/other"), token_count(10, 9, 24)].join("\n")
+        );
+        let third = Codex
+            .parse_jsonl(
+                &item(),
+                first.consumed + data.len() as u64,
+                data.as_bytes(),
+                second.new_state.as_deref(),
+            )
+            .unwrap();
+        assert_eq!(third.events[0].model.as_deref(), Some("gpt-y"));
+        assert_eq!(third.events[0].project.as_deref(), Some("D:/other"));
+    }
+
+    #[test]
+    fn state_without_model_and_cwd_fields_still_parses() {
+        let old = r#"{"inc":{"input":10,"cached":0,"cache_write":0,"output":7,"reasoning":0},
+                      "cum":{"input":10,"cached":0,"cache_write":0,"output":7,"reasoning":0},
+                      "call_start_ms":5,"model_out_ms":6}"#;
+        let st: PrevLine = serde_json::from_str(old).unwrap();
+        assert_eq!((st.model, st.cwd), (None, None));
+        let o = parse(&[token_count(8, 8, 15)], Some(old));
+        assert_eq!(o.events.len(), 1);
+        assert_eq!(o.events[0].model, None);
     }
 
     #[test]

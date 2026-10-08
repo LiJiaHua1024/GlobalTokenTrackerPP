@@ -916,3 +916,20 @@
   - 飞行期间（~0.7s）命中测试按静止布局位置计算；被新导航打断时到达页直接归位（`snap_home`）。
   - 只在本机（Win11 26200 + 1 块 NVIDIA 独显）验证；旧版 Windows / 其它 GPU / 高 DPI 未测。合成器路径不可用时降级为直接切页而非旧的 margin 动画（已删除该路径）。
   - 未做：位移之外的绘制（文字/卡片圆角等）本就由 XAML 合成走 GPU，无可迁移项。
+
+## S71 Codex 增量扫描丢失模型与项目 ✅
+
+- **现象**：Codex 追加扫描（`from > 0`）的分段通常不含 `turn_context` 行，`cur_model` / `cur_cwd` 每次调用都初始化为 `None`，于是事件的 `model` / `request_model` / `project` 全为空——统计显示"?"、未计价。
+- **修复**（`adapters/codex.rs`）：`PrevLine`（持久化的 `adapter_state`）新增 `model` / `cwd`（`#[serde(default)]`，旧状态照常反序列化；因此 `PrevLine` 不再 `Copy`，仅 `Clone`）；扫描开始时由 `prev` 恢复 `cur_model` / `cur_cwd`，结束时写回，后续 `turn_context` 仍可中途切换模型。
+- **一次性迁移**（`store/mod.rs`）：`mig_rescan_codex_model_v1`（与 `RESCAN_DURATIONS` 同构）——删除 `source='codex'` 的 `sync_cursors`，下次扫描从偏移 0 重读；重发行 dedup_key 不变且带模型（→ 可计价，completeness 不降），UPSERT 覆盖旧行。
+- **测试**：追加扫描沿用上一段的模型/cwd（含 request_model、project，且后续 `turn_context` 仍能切换）、缺少 `model`/`cwd` 字段的旧状态可解析、迁移只删 codex 游标（其余适配器不动）且第二次为 no-op。
+- **来源**：上游 jichuo1/GlobalTokenTracker `89ffc28`（S86）。
+- **验证**：`cargo test -p globaltokentracker-core codex` 11 过（新增 3）；`cargo test -p globaltokentracker-core` 158 过；clippy `-D warnings` 0；改动文件无新增 fmt 漂移（存量漂移未动）。
+
+## S72 安装器写载荷改为临时文件+重命名交换（0 字节 exe 根治） ✅
+
+- **问题**：静默安装/升级间歇性把 `ui.exe` 截成 0 字节——程序损坏且 `--quiet` 下无可见错误。
+- **根因**：`extract_payload` 直接 `fs::write` 目标路径 = `CREATE_ALWAYS` 截断 + `write_all`。截断立即生效，而覆盖被杀进程刚释放的 exe 时写/替换会瞬时失败（镜像节回收是异步的，`MoveFileEx REPLACE` 在 taskkill 后数秒内可返回 ACCESS_DENIED）；行为型 AV（如 360）把"打开在用 exe 写入"标记为自替换进一步放大失败面。失败沿 `?` 中断但 GUI 子系统无控制台，用户完全无感。
+- **改动**（`crates/setup/src/main.rs`）：载荷与 setup 副本均写 `.<name>.gtt-new` 临时文件 → 校验落盘长度（不完整即删临时文件并报错）→ `rename_retry`（40×250ms 重试跨镜像回收窗口）原子换入。失败时旧版本完好、仅留临时文件，不再出现 0 字节。
+- **来源**：上游 jichuo1/GlobalTokenTracker `7a0c067`（S90）。
+- **验证**：`cargo test -p globaltokentracker-setup` 12 过；clippy `-D warnings` 0；改动区域无新增 fmt 漂移（该文件存量漂移未动）。
