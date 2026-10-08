@@ -21,8 +21,20 @@ class OverviewPage extends StatefulWidget {
 }
 
 class _OverviewPageState extends State<OverviewPage> {
-  // In-memory cache for instant 0ms switching across time ranges
+  // In-memory cache for instant 0ms switching across time
+  // ranges. The key space is range × filter combinations,
+  // which grows with every filter subset the user tries, so
+  // bound it and evict the least-recently-used entry.
   static final Map<String, OverviewData> _overviewCache = {};
+  static const _overviewCacheMax = 64;
+
+  static void _cacheOverview(String key, OverviewData data) {
+    _overviewCache.remove(key); // re-insert to refresh recency
+    if (_overviewCache.length >= _overviewCacheMax) {
+      _overviewCache.remove(_overviewCache.keys.first);
+    }
+    _overviewCache[key] = data;
+  }
 
   String _selectedRange = 'week';
   final List<String> _selectedApps = [];
@@ -88,7 +100,7 @@ class _OverviewPageState extends State<OverviewPage> {
         filterModels: _selectedModels.isNotEmpty ? _selectedModels : null,
       );
 
-      _overviewCache[key] = data;
+      _cacheOverview(key, data);
 
       if (mounted && _selectedRange == range) {
         setState(() {
