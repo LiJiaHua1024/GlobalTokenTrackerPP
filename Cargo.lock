@@ -769,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "globaltokentracker-cli"
-version = "1.6.2"
+version = "1.6.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -784,7 +784,7 @@ dependencies = [
 
 [[package]]
 name = "globaltokentracker-core"
-version = "1.6.2"
+version = "1.6.3"
 dependencies = [
  "anyhow",
  "crossbeam-channel",
@@ -806,7 +806,7 @@ dependencies = [
 
 [[package]]
 name = "globaltokentracker-ffi"
-version = "1.6.2"
+version = "1.6.3"
 dependencies = [
  "anyhow",
  "globaltokentracker-core",
@@ -816,7 +816,7 @@ dependencies = [
 
 [[package]]
 name = "globaltokentracker-setup"
-version = "1.6.2"
+version = "1.6.3"
 dependencies = [
  "anyhow",
  "windows",
@@ -827,7 +827,7 @@ dependencies = [
 
 [[package]]
 name = "globaltokentracker-ui"
-version = "1.6.2"
+version = "1.6.3"
 dependencies = [
  "crossbeam-channel",
  "globaltokentracker-core",
