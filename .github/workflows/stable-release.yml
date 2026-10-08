@@ -155,15 +155,15 @@ jobs:
 
       - name: Unit tests
         id: unit_tests
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --workspace
+          cargo test --workspace 2>&1 | tee "$RUNNER_TEMP/cargo-test.log"
 
       - name: Clippy (deny warnings)
         id: clippy
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
@@ -171,7 +171,7 @@ jobs:
 
       - name: Release build
         id: release
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
@@ -197,12 +197,12 @@ jobs:
           if ($exe.Length -lt 1MB) { throw "installer suspiciously small: $($exe.Length)" }
           "installer_size=$($exe.Length)" >> "$env:GITHUB_STEP_SUMMARY"
 
-      - name: Upload test reports
+      - name: Upload test log
         if: ${{ failure() }}
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: verify-reports
-          path: target/debug/deps/*.d
+          path: ${{ runner.temp }}/cargo-test.log
           if-no-files-found: ignore
           retention-days: 7
 
