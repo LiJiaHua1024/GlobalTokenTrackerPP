@@ -122,14 +122,20 @@ class FfiBridge {
   }
 
   void _loadDylib() {
+    // The release package ships globaltokentracker_ffi.dll next to
+    // globaltokentracker_ui.exe, so the executable's own directory is the
+    // primary lookup location. `flutter run` keeps it in the working
+    // directory or in a cargo target/ dir instead, hence the extra
+    // candidates. All paths are relative to the runtime layout so the
+    // app works on any machine — never hardcode a developer's absolute
+    // path here.
+    const dllName = 'globaltokentracker_ffi.dll';
+    final exeDir = File(Platform.resolvedExecutable).parent;
     final possiblePaths = [
-      'globaltokentracker_ffi.dll',
-      r'F:\Agentic Project\GlobalTokenTracker\target\release\globaltokentracker_ffi.dll',
-      r'F:\Agentic Project\GlobalTokenTracker\target\debug\globaltokentracker_ffi.dll',
-      r'target\release\globaltokentracker_ffi.dll',
-      r'target\debug\globaltokentracker_ffi.dll',
-      r'..\target\release\globaltokentracker_ffi.dll',
-      r'..\target\debug\globaltokentracker_ffi.dll',
+      exeDir.childFile(dllName).path,
+      dllName,
+      'target\\release\\$dllName',
+      'target\\debug\\$dllName',
     ];
 
     for (final p in possiblePaths) {
@@ -140,12 +146,17 @@ class FfiBridge {
       }
     }
 
-    _resolvedDylibPath = 'globaltokentracker_ffi.dll';
+    // Last resort: let the OS search its default locations (app dir, cwd,
+    // PATH). If that fails, surface a diagnosable error rather than an
+    // opaque dynamic-library failure.
+    _resolvedDylibPath = dllName;
     try {
       _dylib = ffi.DynamicLibrary.open(_resolvedDylibPath);
-    } catch (_) {
-      _resolvedDylibPath = r'F:\Agentic Project\GlobalTokenTracker\target\release\globaltokentracker_ffi.dll';
-      _dylib = ffi.DynamicLibrary.open(_resolvedDylibPath);
+    } catch (e) {
+      throw Exception(
+        '$dllName not found. Expected it next to the executable or in the '
+        'working directory. ($e)',
+      );
     }
   }
 
