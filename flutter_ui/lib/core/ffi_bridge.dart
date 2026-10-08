@@ -130,9 +130,9 @@ class FfiBridge {
     // app works on any machine — never hardcode a developer's absolute
     // path here.
     const dllName = 'globaltokentracker_ffi.dll';
-    final exeDir = File(Platform.resolvedExecutable).parent;
+    final exeDir = File(Platform.resolvedExecutable).parent.path;
     final possiblePaths = [
-      exeDir.childFile(dllName).path,
+      '$exeDir\\$dllName',
       dllName,
       'target\\release\\$dllName',
       'target\\debug\\$dllName',
