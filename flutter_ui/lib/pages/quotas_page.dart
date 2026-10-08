@@ -52,12 +52,24 @@ class _QuotasPageState extends State<QuotasPage> {
     try {
       final res = await FfiBridge.instance.pollQuotas();
       final updated = res['updated'] ?? 0;
-      if (mounted) {
+      if (!mounted) return;
+      // Each vendor poller fails independently; surface which
+      // sources did not refresh instead of reporting a clean sync.
+      final errors = (res['errors'] as List<dynamic>?) ?? [];
+      if (errors.isNotEmpty) {
+        final names = errors.map((e) => e['app'] as String? ?? '未知').join('、');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('已同步 $updated 项，但以下数据源失败：$names'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      } else {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('配额更新完毕，已同步 $updated 项')),
         );
-        _loadQuotas();
       }
+      _loadQuotas();
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

@@ -387,11 +387,26 @@ unsafe fn gtt_poll_quotas_impl(ctx: *mut GttContext) -> *mut c_char {
         Err(poisoned) => poisoned.into_inner(),
     };
 
+    // Each poller fails independently; collect the per-source
+    // failures so the UI can report which vendors did not
+    // refresh instead of silently reporting a clean sync.
     let mut count = 0;
+    let mut errors: Vec<QuotaError> = Vec::new();
     for outcome in globaltokentracker_core::quota::poll_all() {
+        if let Some(err) = &outcome.error {
+            errors.push(QuotaError {
+                app: outcome.app.to_string(),
+                error: err.clone(),
+            });
+        }
         for q in &outcome.quotas {
-            if let Ok(true) = engine.store.insert_quota(q) {
-                count += 1;
+            match engine.store.insert_quota(q) {
+                Ok(true) => count += 1,
+                Ok(false) => {}
+                Err(e) => errors.push(QuotaError {
+                    app: outcome.app.to_string(),
+                    error: e.to_string(),
+                }),
             }
         }
     }
@@ -400,8 +415,18 @@ unsafe fn gtt_poll_quotas_impl(ctx: *mut GttContext) -> *mut c_char {
     struct QuotaResult {
         ok: bool,
         updated: usize,
+        errors: Vec<QuotaError>,
     }
-    to_json_c_string(&QuotaResult { ok: true, updated: count })
+    #[derive(Serialize)]
+    struct QuotaError {
+        app: String,
+        error: String,
+    }
+    to_json_c_string(&QuotaResult {
+        ok: true,
+        updated: count,
+        errors,
+    })
 }
 
 #[cfg(test)]
