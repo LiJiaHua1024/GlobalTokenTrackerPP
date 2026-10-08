@@ -44,6 +44,7 @@ class UpdateProvider extends ChangeNotifier {
   bool _downloadCancelled = false;
 
   Timer? _periodicCheckTimer;
+  Timer? _startupCheckTimer;
 
   // Getters
   UpdateStatus get status => _status;
@@ -66,6 +67,7 @@ class UpdateProvider extends ChangeNotifier {
 
   @override
   void dispose() {
+    _startupCheckTimer?.cancel();
     _periodicCheckTimer?.cancel();
     _downloadClient?.close(force: true);
     super.dispose();
@@ -118,8 +120,12 @@ class UpdateProvider extends ChangeNotifier {
 
   /// Initialize periodic update checking and startup check
   void initAutoCheck() {
-    // 1. Gentle startup auto-check after 3 seconds (non-blocking, smooth UX)
-    Timer(const Duration(seconds: 3), () {
+    // 1. Gentle startup auto-check after 3 seconds (non-blocking, smooth UX).
+    // Keep the handle so dispose can cancel it — otherwise the callback
+    // fires into an already-disposed ChangeNotifier if the provider is
+    // torn down within the window.
+    _startupCheckTimer?.cancel();
+    _startupCheckTimer = Timer(const Duration(seconds: 3), () {
       checkForUpdates(isAutoCheck: true);
     });
 
