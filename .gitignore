@@ -1,7 +1,7 @@
 # Rust
-# Cargo.lock is deliberately absent: this repo ships binaries, so the lockfile
-# stays tracked and a fresh dependency resolution can never silently change
-# what CI builds.
+# Cargo.lock is deliberately tracked: this repo ships
+# binaries, so a fresh dependency resolution can never
+# silently change what CI builds.
 /target
 
 # Flutter & Dart
