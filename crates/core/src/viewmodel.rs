@@ -397,8 +397,15 @@ impl Store {
         apps: Option<&[String]>,
         models: Option<&[String]>,
     ) -> Result<DetailVm> {
+        // Pagination inputs cross the FFI boundary untrusted. Clamp
+        // them so a negative page_size cannot become LIMIT -1 (which
+        // SQLite reads as "no limit", returning the whole table) and
+        // so page * page_size cannot overflow the OFFSET arithmetic.
+        let page = page.max(0);
+        let page_size = page_size.clamp(1, 1000);
+        let offset = page.saturating_mul(page_size);
         Ok(DetailVm {
-            rows: self.events_page(page_size, page * page_size, apps, models)?,
+            rows: self.events_page(page_size, offset, apps, models)?,
             total_events: self.event_count(apps, models)?,
         })
     }
@@ -543,6 +550,44 @@ mod tests {
         assert_eq!(fmt::tokens_compact(64_425), "6.4万");
         assert_eq!(fmt::tokens_compact(300_000), "30万");
         assert_eq!(fmt::tokens_compact(1_730_848_235), "17.3亿");
+    }
+
+    #[test]
+    fn detail_clamps_untrusted_pagination() {
+        use crate::model::{CostSource, Provenance, UsageEvent, apps};
+        use crate::store::Store;
+
+        fn ev(key: &str) -> UsageEvent {
+            UsageEvent {
+                dedup_key: key.into(),
+                app: apps::CLAUDE.into(),
+                output_tokens: 10,
+                input_tokens: 100,
+                cost_usd: Some(0.01),
+                cost_source: Some(CostSource::Computed),
+                provenance: Provenance::LocalJsonl,
+                ..Default::default()
+            }
+        }
+
+        let s = Store::open_memory().unwrap();
+        for i in 0..5 {
+            s.upsert_event(&ev(&format!("k{i}"))).unwrap();
+        }
+
+        // A negative page_size would otherwise become LIMIT -1
+        // and return the whole table; clamp keeps it to one page.
+        let d = s.detail(0, -1, None, None).unwrap();
+        assert_eq!(d.rows.len(), 1);
+        assert_eq!(d.total_events, 5);
+
+        // A negative page is treated as page 0.
+        let d = s.detail(-3, 2, None, None).unwrap();
+        assert_eq!(d.rows.len(), 2);
+
+        // An enormous page saturates the offset instead of overflowing.
+        let d = s.detail(i64::MAX, 1000, None, None).unwrap();
+        assert_eq!(d.rows.len(), 0);
     }
 
     #[test]
