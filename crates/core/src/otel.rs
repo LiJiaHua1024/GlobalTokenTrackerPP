@@ -72,18 +72,22 @@ fn handle(stream: TcpStream, store: &Mutex<Store>) -> Result<()> {
     stream.set_read_timeout(Some(READ_TIMEOUT))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut head = String::new();
-    loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line)?;
-        if n == 0 {
-            anyhow::bail!("eof");
-        }
-        head.push_str(&line);
-        if head.len() > MAX_HEADER {
-            anyhow::bail!("header too large");
-        }
-        if line == "\r\n" {
-            break;
+    // Bound the header to MAX_HEADER bytes. `read_line` allocates the
+    // whole line before any size check can run, so a peer could make us
+    // buffer unboundedly by sending one long line with no CRLF. `take`
+    // caps the total bytes the header phase may consume.
+    {
+        let mut limited = reader.by_ref().take(MAX_HEADER as u64);
+        loop {
+            let mut line = String::new();
+            let n = limited.read_line(&mut line)?;
+            if n == 0 {
+                anyhow::bail!("header too large or connection closed");
+            }
+            head.push_str(&line);
+            if line == "\r\n" {
+                break;
+            }
         }
     }
     let mut lines = head.lines();
