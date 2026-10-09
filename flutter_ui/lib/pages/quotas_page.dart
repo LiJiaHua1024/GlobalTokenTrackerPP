@@ -133,13 +133,24 @@ class _QuotasPageState extends State<QuotasPage> {
             )
           else
             Expanded(
-              child: GridView.count(
-                crossAxisCount: MediaQuery.of(context).size.width > 900 ? 3 : (MediaQuery.of(context).size.width > 600 ? 2 : 1),
-                crossAxisSpacing: 16,
-                mainAxisSpacing: 16,
-                childAspectRatio: 1.5,
-                children: _groups.map((g) => QuotaCardWidget(group: g)).toList(),
-              ),
+              child: LayoutBuilder(builder: (context, constraints) {
+                final quotaCols = constraints.maxWidth > 900
+                    ? 3
+                    : (constraints.maxWidth > 600 ? 2 : 1);
+                final itemWidth = (constraints.maxWidth - (quotaCols - 1) * 16) / quotaCols;
+                return SingleChildScrollView(
+                  child: Wrap(
+                    spacing: 16,
+                    runSpacing: 16,
+                    children: _groups.map((g) {
+                      return SizedBox(
+                        width: itemWidth,
+                        child: QuotaCardWidget(group: g),
+                      );
+                    }).toList(),
+                  ),
+                );
+              }),
             ),
         ],
       ),

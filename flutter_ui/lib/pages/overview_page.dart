@@ -12,6 +12,7 @@ import '../widgets/charts/trend_chart.dart';
 import '../widgets/quota_card.dart';
 import '../widgets/share_card.dart';
 import '../widgets/stat_card.dart';
+import '../widgets/token_rate_card.dart';
 
 class OverviewPage extends StatefulWidget {
   const OverviewPage({super.key});
@@ -364,7 +365,7 @@ class _OverviewPageState extends State<OverviewPage> {
                 ],
               );
             }),
-            const SizedBox(height: 28),
+            const SizedBox(height: 24),
 
             // Token 活动日历热力图 (GitHub-style Contribution Heatmap)
             TokenActivityCalendar(
@@ -463,6 +464,16 @@ class _OverviewPageState extends State<OverviewPage> {
               const SizedBox(height: 28),
             ],
 
+            // Token 增长速率与并发监控面板
+            if (data.tokenRates != null) ...[
+              TokenRateDashboard(
+                initialRates: data.tokenRates!,
+                filterApps: _selectedApps.isNotEmpty ? _selectedApps : null,
+                filterModels: _selectedModels.isNotEmpty ? _selectedModels : null,
+              ),
+              const SizedBox(height: 28),
+            ],
+
             // 配额卡片区
             if (data.quotaGroups.isNotEmpty) ...[
               Text(
@@ -475,15 +486,15 @@ class _OverviewPageState extends State<OverviewPage> {
                 final quotaCols = constraints.maxWidth > 900
                     ? 3
                     : (constraints.maxWidth > 550 ? 2 : 1);
-                return GridView.count(
-                  crossAxisCount: quotaCols,
-                  crossAxisSpacing: 16,
-                  mainAxisSpacing: 16,
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  childAspectRatio: 1.6,
+                final itemWidth = (constraints.maxWidth - (quotaCols - 1) * 16) / quotaCols;
+                return Wrap(
+                  spacing: 16,
+                  runSpacing: 16,
                   children: data.quotaGroups
-                      .map((g) => QuotaCardWidget(group: g))
+                      .map((g) => SizedBox(
+                            width: itemWidth,
+                            child: QuotaCardWidget(group: g),
+                          ))
                       .toList(),
                 );
               }),

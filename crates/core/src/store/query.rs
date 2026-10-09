@@ -3,9 +3,9 @@
 
 use anyhow::Result;
 use rusqlite::params;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Totals {
     pub events: u64,
     pub input_tokens: u64,
@@ -223,6 +223,121 @@ pub struct ActivityDay {
     pub events: u64,
     pub tokens: u64,
     pub cost_usd: f64,
+}
+
+/// A windowed token rate metric summary (e.g. 1m, 5m, 15m, 1h, 24h).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RateMetric {
+    pub window: String,
+    pub window_secs: u64,
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub events: u64,
+    pub total_tokens: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub cost_usd: f64,
+    pub tokens_per_min: f64,
+    pub tokens_per_sec: f64,
+    pub input_tokens_per_min: f64,
+    pub output_tokens_per_min: f64,
+    pub cost_per_hour: f64,
+    pub requests_per_min: f64,
+}
+
+impl RateMetric {
+    pub fn from_totals(
+        window: impl Into<String>,
+        start_ms: i64,
+        end_ms: i64,
+        t: &Totals,
+    ) -> Self {
+        let duration_ms = (end_ms - start_ms).max(1);
+        let secs = duration_ms as f64 / 1000.0;
+        let mins = secs / 60.0;
+        let hours = secs / 3600.0;
+        let total = t.input_tokens + t.output_tokens + t.cache_read_tokens;
+        Self {
+            window: window.into(),
+            window_secs: (duration_ms / 1000) as u64,
+            start_ms,
+            end_ms,
+            events: t.events,
+            total_tokens: total,
+            input_tokens: t.input_tokens,
+            output_tokens: t.output_tokens,
+            reasoning_tokens: t.reasoning_tokens,
+            cache_read_tokens: t.cache_read_tokens,
+            cache_write_tokens: t.cache_write_tokens,
+            cost_usd: t.cost_usd,
+            tokens_per_min: total as f64 / mins,
+            tokens_per_sec: total as f64 / secs,
+            input_tokens_per_min: t.input_tokens as f64 / mins,
+            output_tokens_per_min: t.output_tokens as f64 / mins,
+            cost_per_hour: t.cost_usd / hours,
+            requests_per_min: t.events as f64 / mins,
+        }
+    }
+}
+
+/// Top model/app velocity contribution during the active window.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ModelRateItem {
+    pub model: String,
+    pub app: String,
+    pub events: u64,
+    pub total_tokens: u64,
+    pub tokens_per_min: f64,
+    pub tokens_per_sec: f64,
+    pub cost_usd: f64,
+    pub percentage: f64,
+}
+
+/// One bucket in the rate timeline chart (e.g. 1 minute slice over past hour).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct RateTimeSeriesBucket {
+    pub timestamp_ms: i64,
+    pub label: String,
+    pub total_tokens: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub tokens_per_sec: f64,
+    pub tokens_per_min: f64,
+    pub events: u64,
+    pub cost_usd: f64,
+}
+
+/// Comprehensive Token Growth & Concurrency Velocity snapshot.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct TokenRateOverview {
+    pub anchor_ms: i64,
+    pub latest_event_ms: Option<i64>,
+    pub is_active: bool,
+    pub m1: RateMetric,
+    pub m5: RateMetric,
+    pub m15: RateMetric,
+    pub h1: RateMetric,
+    pub h24: RateMetric,
+    pub peak_1m_in_1h: RateMetric,
+    pub peak_1m_in_24h: RateMetric,
+    pub timeline_1h: Vec<RateTimeSeriesBucket>,
+    pub top_models_1h: Vec<ModelRateItem>,
+    pub top_apps_1h: Vec<ModelRateItem>,
+}
+
+fn format_local_hh_mm(ms: i64) -> String {
+    jiff::Timestamp::from_millisecond(ms)
+        .ok()
+        .map(|t| {
+            t.to_zoned(jiff::tz::TimeZone::system())
+                .strftime("%H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| "--:--".into())
 }
 
 impl super::Store {
@@ -969,6 +1084,261 @@ impl super::Store {
         self.conn()
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM")?;
         Ok(())
+    }
+
+    /// Comprehensive token velocity & burn rate computation anchored at `anchor_ms`
+    /// (defaults to `now_ms()`).
+    pub fn token_rate_overview(
+        &self,
+        anchor_ms: Option<i64>,
+        apps: Option<&[String]>,
+        models: Option<&[String]>,
+    ) -> Result<TokenRateOverview> {
+        let anchor = anchor_ms.unwrap_or_else(super::now_ms);
+
+        // 1. Find latest event timestamp (scoped by filters)
+        let (w_all, p_all) = scope_where(None, None, apps, models);
+        let latest_event_ms: Option<i64> = self
+            .conn()
+            .query_row(
+                &format!("SELECT MAX(ts_start) FROM usage_events {w_all}"),
+                rusqlite::params_from_iter(p_all.iter()),
+                |r| r.get(0),
+            )
+            .unwrap_or(None);
+
+        // Active if latest event happened within the past 5 minutes (300_000 ms)
+        let is_active = latest_event_ms
+            .map(|t| (anchor - t).abs() <= 300_000)
+            .unwrap_or(false);
+
+        // 2. Compute 5 canonical windows: 1m, 5m, 15m, 1h, 24h
+        let t_1m = anchor - 60_000;
+        let t_5m = anchor - 300_000;
+        let t_15m = anchor - 900_000;
+        let t_1h = anchor - 3_600_000;
+        let t_24h = anchor - 86_400_000;
+
+        let totals_1m = self.totals(Some(t_1m), Some(anchor), apps, models)?;
+        let totals_5m = self.totals(Some(t_5m), Some(anchor), apps, models)?;
+        let totals_15m = self.totals(Some(t_15m), Some(anchor), apps, models)?;
+        let totals_1h = self.totals(Some(t_1h), Some(anchor), apps, models)?;
+        let totals_24h = self.totals(Some(t_24h), Some(anchor), apps, models)?;
+
+        let m1 = RateMetric::from_totals("1m", t_1m, anchor, &totals_1m);
+        let m5 = RateMetric::from_totals("5m", t_5m, anchor, &totals_5m);
+        let m15 = RateMetric::from_totals("15m", t_15m, anchor, &totals_15m);
+        let h1 = RateMetric::from_totals("1h", t_1h, anchor, &totals_1h);
+        let h24 = RateMetric::from_totals("24h", t_24h, anchor, &totals_24h);
+
+        // 3. Rate timeline for the past 1 hour: 60 slices of 1 minute each
+        let (w_1h, p_1h) = scope_where(Some(t_1h), Some(anchor), apps, models);
+        let mut st_buckets = self.conn().prepare(&format!(
+            "SELECT CAST((ts_start - ?1) / 60000 AS INTEGER) AS b_idx,
+                    COUNT(*),
+                    COALESCE(SUM(input_tokens), 0),
+                    COALESCE(SUM(output_tokens), 0),
+                    COALESCE(SUM(reasoning_tokens), 0),
+                    COALESCE(SUM(cache_read_tokens), 0),
+                    COALESCE(SUM(cache_write_5m_tokens + cache_write_1h_tokens), 0),
+                    COALESCE(SUM(cost_usd), 0)
+             FROM usage_events
+             {w_1h}
+             GROUP BY b_idx"
+        ))?;
+
+        let bucket_rows = st_buckets.query_map(rusqlite::params_from_iter(p_1h.iter()), |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                Totals {
+                    events: r.get::<_, i64>(1)? as u64,
+                    input_tokens: r.get::<_, i64>(2)? as u64,
+                    output_tokens: r.get::<_, i64>(3)? as u64,
+                    reasoning_tokens: r.get::<_, i64>(4)? as u64,
+                    cache_read_tokens: r.get::<_, i64>(5)? as u64,
+                    cache_write_tokens: r.get::<_, i64>(6)? as u64,
+                    credits: 0.0,
+                    cost_usd: r.get(7)?,
+                    active_ms: 0,
+                },
+            ))
+        })?;
+
+        let mut bucket_map: std::collections::HashMap<i64, Totals> =
+            std::collections::HashMap::new();
+        for row in bucket_rows {
+            let (idx, tot) = row?;
+            if (0..60).contains(&idx) {
+                bucket_map.insert(idx, tot);
+            }
+        }
+
+        let mut timeline_1h = Vec::with_capacity(60);
+        let mut peak_1m_in_1h = RateMetric {
+            window: "1m_peak_1h".into(),
+            window_secs: 60,
+            ..Default::default()
+        };
+
+        for i in 0..60 {
+            let slice_start = t_1h + i * 60_000;
+            let slice_end = slice_start + 60_000;
+            let tot = bucket_map.remove(&i).unwrap_or_default();
+            let metric = RateMetric::from_totals("1m_slice", slice_start, slice_end, &tot);
+
+            if metric.total_tokens > peak_1m_in_1h.total_tokens {
+                peak_1m_in_1h = RateMetric {
+                    window: "1m_peak_1h".into(),
+                    ..metric.clone()
+                };
+            }
+
+            timeline_1h.push(RateTimeSeriesBucket {
+                timestamp_ms: slice_start,
+                label: format_local_hh_mm(slice_start),
+                total_tokens: metric.total_tokens,
+                input_tokens: metric.input_tokens,
+                output_tokens: metric.output_tokens,
+                cache_read_tokens: metric.cache_read_tokens,
+                tokens_per_sec: metric.tokens_per_sec,
+                tokens_per_min: metric.tokens_per_min,
+                events: metric.events,
+                cost_usd: metric.cost_usd,
+            });
+        }
+
+        // 4. Peak 1m in past 24 hours
+        let (w_24h, p_24h) = scope_where(Some(t_24h), Some(anchor), apps, models);
+        let mut st_peak_24h = self.conn().prepare(&format!(
+            "SELECT (ts_start / 60000) * 60000 AS min_start,
+                    COUNT(*),
+                    COALESCE(SUM(input_tokens), 0),
+                    COALESCE(SUM(output_tokens), 0),
+                    COALESCE(SUM(reasoning_tokens), 0),
+                    COALESCE(SUM(cache_read_tokens), 0),
+                    COALESCE(SUM(cache_write_5m_tokens + cache_write_1h_tokens), 0),
+                    COALESCE(SUM(cost_usd), 0)
+             FROM usage_events
+             {w_24h}
+             GROUP BY min_start
+             ORDER BY (SUM(input_tokens) + SUM(output_tokens) + SUM(cache_read_tokens)) DESC
+             LIMIT 1"
+        ))?;
+
+        let peak_1m_in_24h = st_peak_24h
+            .query_row(rusqlite::params_from_iter(p_24h.iter()), |r| {
+                let start = r.get::<_, i64>(0)?;
+                let end = start + 60_000;
+                let tot = Totals {
+                    events: r.get::<_, i64>(1)? as u64,
+                    input_tokens: r.get::<_, i64>(2)? as u64,
+                    output_tokens: r.get::<_, i64>(3)? as u64,
+                    reasoning_tokens: r.get::<_, i64>(4)? as u64,
+                    cache_read_tokens: r.get::<_, i64>(5)? as u64,
+                    cache_write_tokens: r.get::<_, i64>(6)? as u64,
+                    credits: 0.0,
+                    cost_usd: r.get(7)?,
+                    active_ms: 0,
+                };
+                Ok(RateMetric::from_totals("1m_peak_24h", start, end, &tot))
+            })
+            .unwrap_or_else(|_| RateMetric {
+                window: "1m_peak_24h".into(),
+                window_secs: 60,
+                ..Default::default()
+            });
+
+        // 5. Top Models in past 1 hour (sorted by tokens)
+        let total_tokens_1h = h1.total_tokens as f64;
+        let mut st_models = self.conn().prepare(&format!(
+            "SELECT {MODEL_EXPR}, app, COUNT(*),
+                    COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens), 0) AS total_tok,
+                    COALESCE(SUM(cost_usd), 0)
+             FROM usage_events
+             {w_1h}
+             GROUP BY 1, 2
+             ORDER BY total_tok DESC
+             LIMIT 10"
+        ))?;
+        let top_models_1h = st_models
+            .query_map(rusqlite::params_from_iter(p_1h.iter()), |r| {
+                let model: String = r.get(0)?;
+                let app: String = r.get(1)?;
+                let events = r.get::<_, i64>(2)? as u64;
+                let total_tokens = r.get::<_, i64>(3)? as u64;
+                let cost_usd: f64 = r.get(4)?;
+                let tokens_per_min = total_tokens as f64 / 60.0;
+                let tokens_per_sec = total_tokens as f64 / 3600.0;
+                let percentage = if total_tokens_1h > 0.0 {
+                    (total_tokens as f64 / total_tokens_1h) * 100.0
+                } else {
+                    0.0
+                };
+                Ok(ModelRateItem {
+                    model,
+                    app,
+                    events,
+                    total_tokens,
+                    tokens_per_min,
+                    tokens_per_sec,
+                    cost_usd,
+                    percentage,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        // 6. Top Apps in past 1 hour
+        let mut st_apps = self.conn().prepare(&format!(
+            "SELECT app, COUNT(*),
+                    COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens), 0) AS total_tok,
+                    COALESCE(SUM(cost_usd), 0)
+             FROM usage_events
+             {w_1h}
+             GROUP BY app
+             ORDER BY total_tok DESC
+             LIMIT 10"
+        ))?;
+        let top_apps_1h = st_apps
+            .query_map(rusqlite::params_from_iter(p_1h.iter()), |r| {
+                let app: String = r.get(0)?;
+                let events = r.get::<_, i64>(1)? as u64;
+                let total_tokens = r.get::<_, i64>(2)? as u64;
+                let cost_usd: f64 = r.get(3)?;
+                let tokens_per_min = total_tokens as f64 / 60.0;
+                let tokens_per_sec = total_tokens as f64 / 3600.0;
+                let percentage = if total_tokens_1h > 0.0 {
+                    (total_tokens as f64 / total_tokens_1h) * 100.0
+                } else {
+                    0.0
+                };
+                Ok(ModelRateItem {
+                    model: app.clone(),
+                    app,
+                    events,
+                    total_tokens,
+                    tokens_per_min,
+                    tokens_per_sec,
+                    cost_usd,
+                    percentage,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(TokenRateOverview {
+            anchor_ms: anchor,
+            latest_event_ms,
+            is_active,
+            m1,
+            m5,
+            m15,
+            h1,
+            h24,
+            peak_1m_in_1h,
+            peak_1m_in_24h,
+            timeline_1h,
+            top_models_1h,
+            top_apps_1h,
+        })
     }
 }
 

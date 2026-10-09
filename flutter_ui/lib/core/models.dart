@@ -233,6 +233,7 @@ class OverviewData {
   final List<QuotaRow> quotas;
   final List<QuotaGroup> quotaGroups;
   final String tzOffset;
+  final TokenRateOverview? tokenRates;
 
   OverviewData({
     required this.today,
@@ -249,6 +250,7 @@ class OverviewData {
     required this.quotas,
     required this.quotaGroups,
     required this.tzOffset,
+    this.tokenRates,
   });
 
   factory OverviewData.fromJson(Map<String, dynamic> json) {
@@ -281,6 +283,206 @@ class OverviewData {
           .map((g) => QuotaGroup.fromJson(g as Map<String, dynamic>))
           .toList(),
       tzOffset: json['tz_offset'] ?? '+00:00',
+      tokenRates: json['token_rates'] != null
+          ? TokenRateOverview.fromJson(json['token_rates'] as Map<String, dynamic>)
+          : null,
+    );
+  }
+}
+
+class RateMetric {
+  final String window;
+  final int windowSecs;
+  final int startMs;
+  final int endMs;
+  final int events;
+  final int totalTokens;
+  final int inputTokens;
+  final int outputTokens;
+  final int reasoningTokens;
+  final int cacheReadTokens;
+  final int cacheWriteTokens;
+  final double costUsd;
+  final double tokensPerMin;
+  final double tokensPerSec;
+  final double inputTokensPerMin;
+  final double outputTokensPerMin;
+  final double costPerHour;
+  final double requestsPerMin;
+
+  RateMetric({
+    required this.window,
+    required this.windowSecs,
+    required this.startMs,
+    required this.endMs,
+    required this.events,
+    required this.totalTokens,
+    required this.inputTokens,
+    required this.outputTokens,
+    required this.reasoningTokens,
+    required this.cacheReadTokens,
+    required this.cacheWriteTokens,
+    required this.costUsd,
+    required this.tokensPerMin,
+    required this.tokensPerSec,
+    required this.inputTokensPerMin,
+    required this.outputTokensPerMin,
+    required this.costPerHour,
+    required this.requestsPerMin,
+  });
+
+  factory RateMetric.fromJson(Map<String, dynamic> json) {
+    return RateMetric(
+      window: json['window'] ?? '',
+      windowSecs: (json['window_secs'] as num?)?.toInt() ?? 0,
+      startMs: (json['start_ms'] as num?)?.toInt() ?? 0,
+      endMs: (json['end_ms'] as num?)?.toInt() ?? 0,
+      events: (json['events'] as num?)?.toInt() ?? 0,
+      totalTokens: (json['total_tokens'] as num?)?.toInt() ?? 0,
+      inputTokens: (json['input_tokens'] as num?)?.toInt() ?? 0,
+      outputTokens: (json['output_tokens'] as num?)?.toInt() ?? 0,
+      reasoningTokens: (json['reasoning_tokens'] as num?)?.toInt() ?? 0,
+      cacheReadTokens: (json['cache_read_tokens'] as num?)?.toInt() ?? 0,
+      cacheWriteTokens: (json['cache_write_tokens'] as num?)?.toInt() ?? 0,
+      costUsd: (json['cost_usd'] as num?)?.toDouble() ?? 0.0,
+      tokensPerMin: (json['tokens_per_min'] as num?)?.toDouble() ?? 0.0,
+      tokensPerSec: (json['tokens_per_sec'] as num?)?.toDouble() ?? 0.0,
+      inputTokensPerMin: (json['input_tokens_per_min'] as num?)?.toDouble() ?? 0.0,
+      outputTokensPerMin: (json['output_tokens_per_min'] as num?)?.toDouble() ?? 0.0,
+      costPerHour: (json['cost_per_hour'] as num?)?.toDouble() ?? 0.0,
+      requestsPerMin: (json['requests_per_min'] as num?)?.toDouble() ?? 0.0,
+    );
+  }
+}
+
+class ModelRateItem {
+  final String model;
+  final String app;
+  final int events;
+  final int totalTokens;
+  final double tokensPerMin;
+  final double tokensPerSec;
+  final double costUsd;
+  final double percentage;
+
+  ModelRateItem({
+    required this.model,
+    required this.app,
+    required this.events,
+    required this.totalTokens,
+    required this.tokensPerMin,
+    required this.tokensPerSec,
+    required this.costUsd,
+    required this.percentage,
+  });
+
+  factory ModelRateItem.fromJson(Map<String, dynamic> json) {
+    return ModelRateItem(
+      model: json['model'] ?? '',
+      app: json['app'] ?? '',
+      events: (json['events'] as num?)?.toInt() ?? 0,
+      totalTokens: (json['total_tokens'] as num?)?.toInt() ?? 0,
+      tokensPerMin: (json['tokens_per_min'] as num?)?.toDouble() ?? 0.0,
+      tokensPerSec: (json['tokens_per_sec'] as num?)?.toDouble() ?? 0.0,
+      costUsd: (json['cost_usd'] as num?)?.toDouble() ?? 0.0,
+      percentage: (json['percentage'] as num?)?.toDouble() ?? 0.0,
+    );
+  }
+}
+
+class RateTimeSeriesBucket {
+  final int timestampMs;
+  final String label;
+  final int totalTokens;
+  final int inputTokens;
+  final int outputTokens;
+  final int cacheReadTokens;
+  final double tokensPerSec;
+  final double tokensPerMin;
+  final int events;
+  final double costUsd;
+
+  RateTimeSeriesBucket({
+    required this.timestampMs,
+    required this.label,
+    required this.totalTokens,
+    required this.inputTokens,
+    required this.outputTokens,
+    required this.cacheReadTokens,
+    required this.tokensPerSec,
+    required this.tokensPerMin,
+    required this.events,
+    required this.costUsd,
+  });
+
+  factory RateTimeSeriesBucket.fromJson(Map<String, dynamic> json) {
+    return RateTimeSeriesBucket(
+      timestampMs: (json['timestamp_ms'] as num?)?.toInt() ?? 0,
+      label: json['label'] ?? '',
+      totalTokens: (json['total_tokens'] as num?)?.toInt() ?? 0,
+      inputTokens: (json['input_tokens'] as num?)?.toInt() ?? 0,
+      outputTokens: (json['output_tokens'] as num?)?.toInt() ?? 0,
+      cacheReadTokens: (json['cache_read_tokens'] as num?)?.toInt() ?? 0,
+      tokensPerSec: (json['tokens_per_sec'] as num?)?.toDouble() ?? 0.0,
+      tokensPerMin: (json['tokens_per_min'] as num?)?.toDouble() ?? 0.0,
+      events: (json['events'] as num?)?.toInt() ?? 0,
+      costUsd: (json['cost_usd'] as num?)?.toDouble() ?? 0.0,
+    );
+  }
+}
+
+class TokenRateOverview {
+  final int anchorMs;
+  final int? latestEventMs;
+  final bool isActive;
+  final RateMetric m1;
+  final RateMetric m5;
+  final RateMetric m15;
+  final RateMetric h1;
+  final RateMetric h24;
+  final RateMetric peak1mIn1h;
+  final RateMetric peak1mIn24h;
+  final List<RateTimeSeriesBucket> timeline1h;
+  final List<ModelRateItem> topModels1h;
+  final List<ModelRateItem> topApps1h;
+
+  TokenRateOverview({
+    required this.anchorMs,
+    this.latestEventMs,
+    required this.isActive,
+    required this.m1,
+    required this.m5,
+    required this.m15,
+    required this.h1,
+    required this.h24,
+    required this.peak1mIn1h,
+    required this.peak1mIn24h,
+    required this.timeline1h,
+    required this.topModels1h,
+    required this.topApps1h,
+  });
+
+  factory TokenRateOverview.fromJson(Map<String, dynamic> json) {
+    return TokenRateOverview(
+      anchorMs: (json['anchor_ms'] as num?)?.toInt() ?? 0,
+      latestEventMs: (json['latest_event_ms'] as num?)?.toInt(),
+      isActive: json['is_active'] ?? false,
+      m1: RateMetric.fromJson(json['m1'] as Map<String, dynamic>? ?? {}),
+      m5: RateMetric.fromJson(json['m5'] as Map<String, dynamic>? ?? {}),
+      m15: RateMetric.fromJson(json['m15'] as Map<String, dynamic>? ?? {}),
+      h1: RateMetric.fromJson(json['h1'] as Map<String, dynamic>? ?? {}),
+      h24: RateMetric.fromJson(json['h24'] as Map<String, dynamic>? ?? {}),
+      peak1mIn1h: RateMetric.fromJson(json['peak_1m_in_1h'] as Map<String, dynamic>? ?? {}),
+      peak1mIn24h: RateMetric.fromJson(json['peak_1m_in_24h'] as Map<String, dynamic>? ?? {}),
+      timeline1h: (json['timeline_1h'] as List? ?? [])
+          .map((b) => RateTimeSeriesBucket.fromJson(b as Map<String, dynamic>))
+          .toList(),
+      topModels1h: (json['top_models_1h'] as List? ?? [])
+          .map((m) => ModelRateItem.fromJson(m as Map<String, dynamic>))
+          .toList(),
+      topApps1h: (json['top_apps_1h'] as List? ?? [])
+          .map((a) => ModelRateItem.fromJson(a as Map<String, dynamic>))
+          .toList(),
     );
   }
 }

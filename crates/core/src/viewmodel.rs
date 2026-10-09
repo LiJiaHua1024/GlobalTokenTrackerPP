@@ -1,7 +1,9 @@
 //! ViewModels — plain, serializable structs the UI shells render verbatim.
 //! All SQL/formatting lives here so shells stay dumb (Mac port = same VMs).
 
-use crate::store::{ActivityDay, AppSummary, EventRow, QuotaRow, ShareRow, Store, Totals};
+use crate::store::{
+    ActivityDay, AppSummary, EventRow, QuotaRow, ShareRow, Store, TokenRateOverview, Totals,
+};
 use anyhow::Result;
 use serde::Serialize;
 
@@ -200,6 +202,8 @@ pub struct OverviewVm {
     pub heat: Vec<HeatDay>,
     /// Local UTC offset "+HH:MM" for display.
     pub tz_offset: String,
+    /// Real-time token rate and concurrency velocity metrics.
+    pub token_rates: TokenRateOverview,
 }
 
 /// One collapsible section on the quota page: every window belonging to a
@@ -387,6 +391,7 @@ impl Store {
             unpriced: self.unpriced_models()?,
             heat: self.heat_days(apps, models, since)?,
             tz_offset: tz,
+            token_rates: self.token_rate_overview(None, apps, models)?,
         })
     }
 
@@ -470,6 +475,28 @@ pub mod fmt {
 
     pub fn tokens_total(t: &crate::store::Totals) -> u64 {
         t.input_tokens + t.output_tokens + t.cache_read_tokens + t.cache_write_tokens
+    }
+
+    pub fn tokens_rate(per_min: f64) -> String {
+        if per_min >= 1_000_000.0 {
+            format!("{}M/min", trim_f(per_min / 1_000_000.0, 1))
+        } else if per_min >= 1_000.0 {
+            format!("{}k/min", trim_f(per_min / 1_000.0, 1))
+        } else {
+            format!("{}/min", trim_f(per_min, 0))
+        }
+    }
+
+    pub fn tokens_per_sec(tps: f64) -> String {
+        if tps >= 1_000.0 {
+            format!("{}k tok/s", trim_f(tps / 1_000.0, 1))
+        } else {
+            format!("{:.1} tok/s", tps)
+        }
+    }
+
+    pub fn cost_rate_hourly(cost_per_hour: f64) -> String {
+        format!("{}/h", usd(cost_per_hour))
     }
 
     /// epoch ms → "MM-DD HH:MM" local.

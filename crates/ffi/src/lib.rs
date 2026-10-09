@@ -246,6 +246,47 @@ unsafe fn gtt_get_overview_impl(
     }
 }
 
+/// Fetches token velocity and concurrency rate overview.
+/// anchor_ms: 0 or negative for current time (`now_ms`), or explicit epoch ms.
+/// filter_apps_json: optional JSON array e.g. ["claude", "cursor"]
+/// filter_models_json: optional JSON array e.g. ["claude-3-7-sonnet"]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gtt_get_token_rates(
+    ctx: *mut GttContext,
+    anchor_ms: i64,
+    filter_apps_json: *const c_char,
+    filter_models_json: *const c_char,
+) -> *mut c_char {
+    catch_unwind_json(|| unsafe {
+        gtt_get_token_rates_impl(ctx, anchor_ms, filter_apps_json, filter_models_json)
+    })
+}
+
+unsafe fn gtt_get_token_rates_impl(
+    ctx: *mut GttContext,
+    anchor_ms: i64,
+    filter_apps_json: *const c_char,
+    filter_models_json: *const c_char,
+) -> *mut c_char {
+    if ctx.is_null() {
+        return to_error_c_string("Engine context is null");
+    }
+    let gtt = unsafe { &*ctx };
+    let engine = match gtt.inner.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    let anchor = if anchor_ms > 0 { Some(anchor_ms) } else { None };
+    let apps = unsafe { parse_string_list(filter_apps_json) };
+    let models = unsafe { parse_string_list(filter_models_json) };
+
+    match engine.store.token_rate_overview(anchor, apps.as_deref(), models.as_deref()) {
+        Ok(rates) => to_json_c_string(&rates),
+        Err(e) => to_error_c_string(e),
+    }
+}
+
 /// Fetches event detail rows with pagination and filters.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gtt_get_details(
@@ -458,8 +499,20 @@ mod tests {
         let json_str = unsafe { CStr::from_ptr(c_str) }.to_str().unwrap();
         assert!(json_str.contains("range"));
         assert!(json_str.contains("span"));
+        assert!(json_str.contains("token_rates"));
         unsafe {
             gtt_free_string(c_str);
+        }
+
+        let rates_str = unsafe {
+            gtt_get_token_rates(ctx, 0, std::ptr::null(), std::ptr::null())
+        };
+        assert!(!rates_str.is_null());
+        let rates_json = unsafe { CStr::from_ptr(rates_str) }.to_str().unwrap();
+        assert!(rates_json.contains("timeline_1h"));
+        assert!(rates_json.contains("m1"));
+        unsafe {
+            gtt_free_string(rates_str);
             gtt_engine_close(ctx);
         }
     }

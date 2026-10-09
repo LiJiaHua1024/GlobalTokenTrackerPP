@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use globaltokentracker_core::{Engine, Store, store::default_db_path};
+use globaltokentracker_core::{viewmodel, Engine, Store, store::default_db_path};
 use tabled::{Table, Tabled};
 
 #[derive(Parser)]
@@ -24,6 +24,15 @@ enum Cmd {
     Report {
         #[arg(default_value = "today")]
         span: String,
+    },
+    /// Live token velocity and burn rates (1m, 5m, 15m, 1h, 24h & peak bursts).
+    Rates {
+        /// Optional tool filter (e.g. claude, codex).
+        #[arg(long)]
+        app: Option<String>,
+        /// Optional model filter (e.g. claude-3-7-sonnet).
+        #[arg(long)]
+        model: Option<String>,
     },
     /// Cross-check ledger numbers against cc-switch's DB.
     Reconcile {
@@ -181,6 +190,108 @@ fn main() -> Result<()> {
             if vacuum {
                 engine.store.vacuum()?;
                 println!("vacuumed");
+            }
+        }
+        Cmd::Rates { app, model } => {
+            let apps_vec = app.map(|a| vec![a]);
+            let models_vec = model.map(|m| vec![m]);
+            let rates = engine.store.token_rate_overview(
+                None,
+                apps_vec.as_deref(),
+                models_vec.as_deref(),
+            )?;
+            println!("=== Token Velocity & Concurrency Monitor ===");
+            println!(
+                "Status: {} | Latest Activity: {}",
+                if rates.is_active { "ACTIVE (burst running)" } else { "IDLE" },
+                rates
+                    .latest_event_ms
+                    .map(|t| viewmodel::fmt::ts_long(Some(t)))
+                    .unwrap_or_else(|| "none".into())
+            );
+            println!();
+
+            #[derive(Tabled)]
+            struct WindowRow {
+                #[tabled(rename = "Window")]
+                window: String,
+                #[tabled(rename = "Tokens Total")]
+                tokens: String,
+                #[tabled(rename = "Rate (/min)")]
+                rate_min: String,
+                #[tabled(rename = "Rate (TPS)")]
+                rate_sec: String,
+                #[tabled(rename = "Requests/min")]
+                rpm: String,
+                #[tabled(rename = "Burn Rate")]
+                burn_rate: String,
+                #[tabled(rename = "Cost USD")]
+                cost: String,
+            }
+
+            let fmt_row = |m: &globaltokentracker_core::RateMetric, label: &str| WindowRow {
+                window: label.into(),
+                tokens: viewmodel::fmt::tokens_exact(m.total_tokens),
+                rate_min: viewmodel::fmt::tokens_rate(m.tokens_per_min),
+                rate_sec: viewmodel::fmt::tokens_per_sec(m.tokens_per_sec),
+                rpm: format!("{:.1} req/m", m.requests_per_min),
+                burn_rate: viewmodel::fmt::cost_rate_hourly(m.cost_per_hour),
+                cost: viewmodel::fmt::usd(m.cost_usd),
+            };
+
+            let rows = vec![
+                fmt_row(&rates.m1, "Past 1 min"),
+                fmt_row(&rates.m5, "Past 5 min"),
+                fmt_row(&rates.m15, "Past 15 min"),
+                fmt_row(&rates.h1, "Past 1 hour"),
+                fmt_row(&rates.h24, "Past 24 hours"),
+            ];
+            println!("{}", Table::new(rows));
+            println!();
+            println!(
+                "1h Peak 1m Burst : {} ({}, {})",
+                viewmodel::fmt::tokens_exact(rates.peak_1m_in_1h.total_tokens),
+                viewmodel::fmt::tokens_rate(rates.peak_1m_in_1h.tokens_per_min),
+                viewmodel::fmt::tokens_per_sec(rates.peak_1m_in_1h.tokens_per_sec)
+            );
+            println!(
+                "24h Peak 1m Burst: {} ({}, {})",
+                viewmodel::fmt::tokens_exact(rates.peak_1m_in_24h.total_tokens),
+                viewmodel::fmt::tokens_rate(rates.peak_1m_in_24h.tokens_per_min),
+                viewmodel::fmt::tokens_per_sec(rates.peak_1m_in_24h.tokens_per_sec)
+            );
+
+            if !rates.top_models_1h.is_empty() {
+                println!();
+                println!("Top Models in Past 1 Hour:");
+                #[derive(Tabled)]
+                struct ModelRow {
+                    #[tabled(rename = "Model")]
+                    model: String,
+                    #[tabled(rename = "App")]
+                    app: String,
+                    #[tabled(rename = "Tokens")]
+                    tokens: String,
+                    #[tabled(rename = "Rate/min")]
+                    rate: String,
+                    #[tabled(rename = "Share %")]
+                    share: String,
+                    #[tabled(rename = "Cost")]
+                    cost: String,
+                }
+                let model_rows: Vec<ModelRow> = rates
+                    .top_models_1h
+                    .iter()
+                    .map(|m| ModelRow {
+                        model: m.model.clone(),
+                        app: m.app.clone(),
+                        tokens: viewmodel::fmt::tokens_exact(m.total_tokens),
+                        rate: viewmodel::fmt::tokens_rate(m.tokens_per_min),
+                        share: format!("{:.1}%", m.percentage),
+                        cost: viewmodel::fmt::usd(m.cost_usd),
+                    })
+                    .collect();
+                println!("{}", Table::new(model_rows));
             }
         }
     }

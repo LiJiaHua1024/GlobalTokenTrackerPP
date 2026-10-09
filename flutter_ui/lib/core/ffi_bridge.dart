@@ -39,6 +39,19 @@ typedef _gtt_get_overview_dart = ffi.Pointer<Utf8> Function(
   ffi.Pointer<Utf8> filterModelsJson,
 );
 
+typedef _gtt_get_token_rates_c = ffi.Pointer<Utf8> Function(
+  ffi.Pointer<ffi.Void> ctx,
+  ffi.Int64 anchorMs,
+  ffi.Pointer<Utf8> filterAppsJson,
+  ffi.Pointer<Utf8> filterModelsJson,
+);
+typedef _gtt_get_token_rates_dart = ffi.Pointer<Utf8> Function(
+  ffi.Pointer<ffi.Void> ctx,
+  int anchorMs,
+  ffi.Pointer<Utf8> filterAppsJson,
+  ffi.Pointer<Utf8> filterModelsJson,
+);
+
 typedef _gtt_get_details_c = ffi.Pointer<Utf8> Function(
   ffi.Pointer<ffi.Void> ctx,
   ffi.Int64 page,
@@ -133,17 +146,41 @@ class FfiBridge {
     final exeDir = File(Platform.resolvedExecutable).parent.path;
     final possiblePaths = [
       '$exeDir\\$dllName',
-      dllName,
       'target\\release\\$dllName',
       'target\\debug\\$dllName',
+      '..\\target\\release\\$dllName',
+      '..\\target\\debug\\$dllName',
+      dllName,
     ];
+
+    ffi.DynamicLibrary? fallbackLib;
+    String? fallbackPath;
 
     for (final p in possiblePaths) {
       if (File(p).existsSync()) {
-        _resolvedDylibPath = File(p).absolute.path;
-        _dylib = ffi.DynamicLibrary.open(_resolvedDylibPath);
-        return;
+        final path = File(p).absolute.path;
+        try {
+          final lib = ffi.DynamicLibrary.open(path);
+          // Verify required symbols exist so a stale DLL does not shadow a newer build
+          lib.lookup<ffi.NativeFunction<_gtt_get_token_rates_c>>('gtt_get_token_rates');
+          _resolvedDylibPath = path;
+          _dylib = lib;
+          return;
+        } catch (_) {
+          if (fallbackLib == null) {
+            try {
+              fallbackLib = ffi.DynamicLibrary.open(path);
+              fallbackPath = path;
+            } catch (_) {}
+          }
+        }
       }
+    }
+
+    if (fallbackLib != null && fallbackPath != null) {
+      _resolvedDylibPath = fallbackPath;
+      _dylib = fallbackLib;
+      return;
     }
 
     // Last resort: let the OS search its default locations (app dir, cwd,
@@ -282,6 +319,50 @@ class FfiBridge {
 
       final json = jsonDecode(raw) as Map<String, dynamic>;
       return OverviewData.fromJson(json);
+    });
+  }
+
+  /// Offload Token Rates retrieval and JSON deserialization to a background worker isolate.
+  Future<TokenRateOverview> getTokenRates({
+    int anchorMs = 0,
+    List<String>? filterApps,
+    List<String>? filterModels,
+  }) async {
+    if (_context == null) throw Exception("Engine not initialized");
+    final ctxAddress = _context!.address;
+    final dylibPath = _resolvedDylibPath;
+
+    return await Isolate.run(() {
+      final dylib = ffi.DynamicLibrary.open(dylibPath);
+      final getRatesFunc = dylib
+          .lookup<ffi.NativeFunction<_gtt_get_token_rates_c>>('gtt_get_token_rates')
+          .asFunction<_gtt_get_token_rates_dart>();
+      final freeStringFunc = dylib
+          .lookup<ffi.NativeFunction<_gtt_free_string_c>>('gtt_free_string')
+          .asFunction<_gtt_free_string_dart>();
+
+      final ctx = ffi.Pointer<ffi.Void>.fromAddress(ctxAddress);
+      final appsPtr = filterApps != null && filterApps.isNotEmpty
+          ? jsonEncode(filterApps).toNativeUtf8()
+          : ffi.nullptr;
+      final modelsPtr = filterModels != null && filterModels.isNotEmpty
+          ? jsonEncode(filterModels).toNativeUtf8()
+          : ffi.nullptr;
+
+      final ptr = getRatesFunc(ctx, anchorMs, appsPtr, modelsPtr);
+
+      if (appsPtr != ffi.nullptr) calloc.free(appsPtr);
+      if (modelsPtr != ffi.nullptr) calloc.free(modelsPtr);
+
+      if (ptr == ffi.nullptr) throw Exception("Failed to get token rate data");
+      final raw = ptr.toDartString();
+      freeStringFunc(ptr);
+
+      final json = jsonDecode(raw) as Map<String, dynamic>;
+      if (json['ok'] == false) {
+        throw Exception(json['error'] ?? "Unknown FFI error");
+      }
+      return TokenRateOverview.fromJson(json);
     });
   }
 

@@ -36,30 +36,39 @@ class QuotaCardWidget extends StatelessWidget {
                   ],
                 ),
                 if (group.worstPct != null)
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: _getPctColor(group.worstPct!, theme).withValues(alpha: 0.15),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Text(
-                      '已用 ${(group.worstPct! * 100).toStringAsFixed(1)}%',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.bold,
-                        color: _getPctColor(group.worstPct!, theme),
+                  Builder(builder: (context) {
+                    final worstVal = group.worstPct!;
+                    final displayPct = worstVal > 1.0 ? worstVal : (worstVal * 100.0);
+                    final colorPct = worstVal > 1.0 ? (worstVal / 100.0) : worstVal;
+                    return Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: _getPctColor(colorPct, theme).withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(12),
                       ),
-                    ),
-                  ),
+                      child: Text(
+                        '已用 ${displayPct.toStringAsFixed(1)}%',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          color: _getPctColor(colorPct, theme),
+                        ),
+                      ),
+                    );
+                  }),
               ],
             ),
-            const SizedBox(height: 14),
+            const SizedBox(height: 12),
             ...group.rows.map((row) {
-              final pct = row.usedPercent ?? (row.used != null && row.limitValue != null && row.limitValue! > 0 ? (row.used! / row.limitValue!) : 0.0);
-              final pctClamped = pct.clamp(0.0, 1.0);
+              final rawPct = row.usedPercent ??
+                  (row.used != null && row.limitValue != null && row.limitValue! > 0
+                      ? (row.used! / row.limitValue!)
+                      : 0.0);
+              final normalizedPct = rawPct > 1.0 ? (rawPct / 100.0) : rawPct;
+              final pctClamped = normalizedPct.clamp(0.0, 1.0);
 
               return Padding(
-                padding: const EdgeInsets.symmetric(vertical: 6.0),
+                padding: const EdgeInsets.symmetric(vertical: 4.0),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -67,7 +76,7 @@ class QuotaCardWidget extends StatelessWidget {
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         Text(
-                          row.windowKind,
+                          _formatWindowKind(row.windowKind),
                           style: theme.textTheme.bodyMedium?.copyWith(
                             fontWeight: FontWeight.w500,
                           ),
@@ -82,14 +91,14 @@ class QuotaCardWidget extends StatelessWidget {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 6),
+                    const SizedBox(height: 4),
                     ClipRRect(
                       borderRadius: BorderRadius.circular(4),
                       child: LinearProgressIndicator(
                         value: pctClamped,
-                        minHeight: 8,
-                        backgroundColor: theme.colorScheme.surfaceVariant,
-                        valueColor: AlwaysStoppedAnimation<Color>(_getPctColor(pct, theme)),
+                        minHeight: 6,
+                        backgroundColor: theme.colorScheme.surfaceContainerHighest,
+                        valueColor: AlwaysStoppedAnimation<Color>(_getPctColor(normalizedPct, theme)),
                       ),
                     ),
                   ],
@@ -100,6 +109,31 @@ class QuotaCardWidget extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  String _formatWindowKind(String kind) {
+    switch (kind) {
+      case '5h_block':
+        return '5 小时窗口';
+      case 'weekly':
+        return '每周限额';
+      case 'monthly':
+        return '每月限额';
+      case 'daily':
+        return '每日限额';
+      case 'credits':
+        return '剩余点数';
+      case 'billing_period':
+        return '计费周期';
+      case 'auto_pool':
+        return 'Auto 用量池';
+      case 'api_pool':
+        return 'API 用量池';
+      case 'session_ctx':
+        return '会话上下文';
+      default:
+        return kind;
+    }
   }
 
   Color _getPctColor(double pct, ThemeData theme) {

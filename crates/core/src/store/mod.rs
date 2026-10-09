@@ -9,8 +9,9 @@ use std::path::Path;
 
 pub use cursor::{CursorAction, FileCursor, tail_fingerprint};
 pub use query::{
-    ActivityDay, AppSummary, DailyRow, EventRow, MODEL_EXPR, PriceQuote, PriceRow, QuotaRow,
-    ShareRow, SourceHealth, Totals, filter_prices,
+    ActivityDay, AppSummary, DailyRow, EventRow, ModelRateItem, MODEL_EXPR, PriceQuote, PriceRow,
+    QuotaRow, RateMetric, RateTimeSeriesBucket, ShareRow, SourceHealth, TokenRateOverview, Totals,
+    filter_prices,
 };
 
 const SCHEMA: &str = include_str!("schema.sql");
@@ -1196,5 +1197,86 @@ mod tests {
                 .captured_at,
             old
         );
+    }
+
+    #[test]
+    fn token_rate_overview_empty_store() {
+        let s = Store::open_memory().unwrap();
+        let overview = s.token_rate_overview(Some(1_700_000_000_000), None, None).unwrap();
+        assert_eq!(overview.anchor_ms, 1_700_000_000_000);
+        assert!(!overview.is_active);
+        assert_eq!(overview.latest_event_ms, None);
+        assert_eq!(overview.m1.total_tokens, 0);
+        assert_eq!(overview.m1.tokens_per_min, 0.0);
+        assert_eq!(overview.m1.tokens_per_sec, 0.0);
+        assert_eq!(overview.h1.total_tokens, 0);
+        assert_eq!(overview.timeline_1h.len(), 60);
+        assert_eq!(overview.top_models_1h.len(), 0);
+        assert_eq!(overview.top_apps_1h.len(), 0);
+        assert_eq!(overview.peak_1m_in_1h.total_tokens, 0);
+    }
+
+    #[test]
+    fn token_rate_overview_concurrent_burst() {
+        let s = Store::open_memory().unwrap();
+        let anchor = 1_700_000_000_000i64;
+
+        // Insert events simulating concurrency:
+        // Event 1: 30 seconds ago, Claude Sonnet, 6,000 tokens
+        let mut ev1 = ev("c1", 1_000, Some(0.05));
+        ev1.model = Some("claude-3-7-sonnet".into());
+        ev1.input_tokens = 5_000;
+        ev1.ts_start = Some(anchor - 30_000);
+        s.upsert_event(&ev1).unwrap();
+
+        // Event 2: 10 seconds ago, Claude Sonnet, 12,000 tokens
+        let mut ev2 = ev("c2", 2_000, Some(0.10));
+        ev2.model = Some("claude-3-7-sonnet".into());
+        ev2.input_tokens = 10_000;
+        ev2.ts_start = Some(anchor - 10_000);
+        s.upsert_event(&ev2).unwrap();
+
+        // Event 3: 2 minutes ago, Codex gpt-4o, 4,000 tokens
+        let mut ev3 = ev("c3", 1_000, Some(0.03));
+        ev3.app = apps::CODEX.into();
+        ev3.model = Some("gpt-4o".into());
+        ev3.input_tokens = 3_000;
+        ev3.ts_start = Some(anchor - 120_000);
+        s.upsert_event(&ev3).unwrap();
+
+        let overview = s.token_rate_overview(Some(anchor), None, None).unwrap();
+        assert!(overview.is_active);
+        assert_eq!(overview.latest_event_ms, Some(anchor - 10_000));
+
+        // In past 1 minute: ev1 (6,000) + ev2 (12,000) = 18,000 tokens, 2 events
+        assert_eq!(overview.m1.events, 2);
+        assert_eq!(overview.m1.total_tokens, 18_000);
+        assert_eq!(overview.m1.tokens_per_min, 18_000.0);
+        assert_eq!(overview.m1.tokens_per_sec, 300.0);
+        assert_eq!(overview.m1.requests_per_min, 2.0);
+        assert!((overview.m1.cost_usd - 0.15).abs() < 1e-4);
+        assert!((overview.m1.cost_per_hour - 9.0).abs() < 1e-4);
+
+        // In past 5 minutes: ev1 + ev2 + ev3 = 22,000 tokens, 3 events
+        assert_eq!(overview.m5.events, 3);
+        assert_eq!(overview.m5.total_tokens, 22_000);
+        assert_eq!(overview.m5.tokens_per_min, 22_000.0 / 5.0);
+
+        // Past 1 hour total
+        assert_eq!(overview.h1.total_tokens, 22_000);
+
+        // Timeline has 60 slices
+        assert_eq!(overview.timeline_1h.len(), 60);
+
+        // Peak 1m in 1h was 18,000 tokens
+        assert_eq!(overview.peak_1m_in_1h.total_tokens, 18_000);
+        assert_eq!(overview.peak_1m_in_1h.tokens_per_sec, 300.0);
+
+        // Top models in 1h: claude-3-7-sonnet should be #1 with 18,000 tokens
+        assert!(!overview.top_models_1h.is_empty());
+        assert_eq!(overview.top_models_1h[0].model, "claude-3-7-sonnet");
+        assert_eq!(overview.top_models_1h[0].total_tokens, 18_000);
+        let pct = overview.top_models_1h[0].percentage;
+        assert!((pct - (18_000.0 / 22_000.0 * 100.0)).abs() < 0.1);
     }
 }

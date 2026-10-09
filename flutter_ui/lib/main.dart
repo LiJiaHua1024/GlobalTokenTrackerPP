@@ -8,6 +8,7 @@ import 'core/theme.dart';
 import 'core/update_provider.dart';
 import 'pages/details_page.dart';
 import 'pages/overview_page.dart';
+import 'pages/velocity_page.dart';
 import 'pages/installer_page.dart';
 import 'pages/pricing_page.dart';
 import 'pages/quotas_page.dart';
@@ -124,6 +125,7 @@ class _MainShellState extends State<MainShell> {
 
   final List<Widget> _pages = const [
     OverviewPage(),
+    VelocityPage(),
     DetailsPage(),
     QuotasPage(),
     SourcesPage(),
@@ -169,6 +171,11 @@ class _MainShellState extends State<MainShell> {
                       icon: Icon(Icons.dashboard_outlined),
                       selectedIcon: Icon(Icons.dashboard),
                       label: Text('总览'),
+                    ),
+                    const NavigationRailDestination(
+                      icon: Icon(Icons.speed_outlined),
+                      selectedIcon: Icon(Icons.speed),
+                      label: Text('速率'),
                     ),
                     const NavigationRailDestination(
                       icon: Icon(Icons.table_rows_outlined),
