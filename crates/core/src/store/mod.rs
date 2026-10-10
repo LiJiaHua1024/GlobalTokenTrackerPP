@@ -9,9 +9,9 @@ use std::path::Path;
 
 pub use cursor::{CursorAction, FileCursor, tail_fingerprint};
 pub use query::{
-    ActivityDay, AppSummary, DailyRow, EventRow, ModelRateItem, MODEL_EXPR, PriceQuote, PriceRow,
-    QuotaRow, RateMetric, RateTimeSeriesBucket, ShareRow, SourceHealth, TokenRateOverview, Totals,
-    filter_prices,
+    ActivityDay, AppSummary, ArchiveReport, DailyRow, EventRow, ModelRateItem, MODEL_EXPR,
+    PriceQuote, PriceRow, QuotaRow, RateMetric, RateTimeSeriesBucket, ShareRow, SourceHealth,
+    TokenRateOverview, Totals, filter_prices,
 };
 
 const SCHEMA: &str = include_str!("schema.sql");
@@ -94,6 +94,19 @@ impl Store {
         Self::try_open(path)
     }
 
+    fn apply_pragmas(&self) -> Result<()> {
+        self.conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA foreign_keys = ON;
+             PRAGMA mmap_size = 67108864;
+             PRAGMA temp_store = MEMORY;
+             PRAGMA cache_size = -64000;
+             PRAGMA busy_timeout = 5000;",
+        )?;
+        Ok(())
+    }
+
     fn try_open(path: &Path) -> Result<Self> {
         let conn =
             Connection::open(path).with_context(|| format!("open ledger {}", path.display()))?;
@@ -106,6 +119,7 @@ impl Store {
             conn,
             path: Some(path.to_path_buf()),
         };
+        store.apply_pragmas()?;
         store.migrate()?;
         Ok(store)
     }
@@ -113,8 +127,27 @@ impl Store {
     pub fn open_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         let store = Self { conn, path: None };
+        store.apply_pragmas()?;
         store.migrate()?;
         Ok(store)
+    }
+
+    /// Default archive path: `<data_dir>/backups/archive-<YYYYMMDD>.db`.
+    pub fn default_archive_path(&self, cutoff_ms: i64) -> std::path::PathBuf {
+        let dir = self
+            .path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|d| d.join("backups"))
+            .unwrap_or_else(|| std::path::PathBuf::from("backups"));
+        let date_str = jiff::Timestamp::from_millisecond(cutoff_ms)
+            .map(|ts| {
+                ts.to_zoned(jiff::tz::TimeZone::system())
+                    .strftime("%Y%m%d")
+                    .to_string()
+            })
+            .unwrap_or_else(|_| "history".to_string());
+        dir.join(format!("archive-{date_str}.db"))
     }
 
     /// Copy `backups/ledger.db` (or the previous generation) over a
@@ -968,6 +1001,68 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM daily_rollups", [], |r| r.get(0))
             .unwrap();
         assert_eq!(kept, 2);
+    }
+
+    #[test]
+    fn sqlite_pragmas_applied() {
+        let temp_dir = std::env::temp_dir().join(format!("gtt_test_pragmas_{}", now_ms()));
+        let db_file = temp_dir.join("test_pragmas.db");
+        let s = Store::open(&db_file).unwrap();
+        let mmap: i64 = s
+            .conn()
+            .query_row("PRAGMA mmap_size", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mmap, 67_108_864);
+        let temp: i64 = s
+            .conn()
+            .query_row("PRAGMA temp_store", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(temp, 2);
+        let busy: i64 = s
+            .conn()
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(busy, 5000);
+        drop(s);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn archive_events_transfers_data_preserves_rollups_and_removes_from_main() {
+        let s = Store::open_memory().unwrap();
+        s.upsert_event(&ev_ts("old", BOUNDARY_MS)).unwrap();
+        s.upsert_event(&ev_ts("new", BOUNDARY_MS + 86_400_000 * 200))
+            .unwrap();
+        s.rebuild_rollups("+00:00").unwrap();
+
+        let temp_dir = std::env::temp_dir().join(format!("gtt_test_arch_{}", now_ms()));
+        let arch_file = temp_dir.join("test_archive.db");
+        let rep = s
+            .archive_events(BOUNDARY_MS + 86_400_000 * 90, &arch_file)
+            .unwrap();
+        assert_eq!(rep.archived_events, 1);
+        assert_eq!(rep.archive_path, arch_file);
+
+        // Main ledger: 1 event remaining, but both daily_rollups preserved
+        assert_eq!(s.event_count(None, None).unwrap(), 1);
+        let kept_rollups: i64 = s
+            .conn()
+            .query_row("SELECT COUNT(*) FROM daily_rollups", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept_rollups, 2);
+
+        // Archive database: contains the 1 archived event
+        let arch_conn = rusqlite::Connection::open(&arch_file).unwrap();
+        let arch_events: i64 = arch_conn
+            .query_row("SELECT COUNT(*) FROM usage_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(arch_events, 1);
+        let arch_key: String = arch_conn
+            .query_row("SELECT dedup_key FROM usage_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(arch_key, "old");
+        drop(arch_conn);
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]

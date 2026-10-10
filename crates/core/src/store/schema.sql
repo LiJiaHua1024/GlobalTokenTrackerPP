@@ -2,6 +2,10 @@
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
+PRAGMA mmap_size = 67108864;
+PRAGMA temp_store = MEMORY;
+PRAGMA cache_size = -64000;
+PRAGMA busy_timeout = 5000;
 
 -- 明细表：所有工具所有通道的唯一落点
 CREATE TABLE IF NOT EXISTS usage_events (

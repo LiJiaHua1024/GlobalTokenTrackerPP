@@ -1086,6 +1086,78 @@ impl super::Store {
         Ok(())
     }
 
+    /// Archive raw events older than `before_ms` into a cold SQLite database at `archive_path`.
+    /// Preserves all event detail rows in the archive database, then deletes them from
+    /// the active ledger. Aggregates in `daily_rollups` are unaffected.
+    pub fn archive_events(
+        &self,
+        before_ms: i64,
+        archive_path: &std::path::Path,
+    ) -> Result<ArchiveReport> {
+        if let Some(parent) = archive_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let path_str = archive_path
+            .to_string_lossy()
+            .replace('\\', "/")
+            .replace('\'', "''");
+        let conn = self.conn();
+
+        // Attach target archive DB
+        conn.execute_batch(&format!("ATTACH DATABASE '{path_str}' AS archive;"))?;
+
+        let res: Result<u64> = (|| {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS archive.usage_events (
+                    id INTEGER PRIMARY KEY,
+                    dedup_key TEXT UNIQUE NOT NULL,
+                    app TEXT NOT NULL,
+                    session_id TEXT, project TEXT, account_id TEXT, provider_id TEXT,
+                    model TEXT, request_model TEXT, pricing_model TEXT,
+                    ts_start INTEGER, ts_end INTEGER,
+                    input_tokens INTEGER DEFAULT 0,
+                    output_tokens INTEGER DEFAULT 0,
+                    reasoning_tokens INTEGER DEFAULT 0,
+                    cache_read_tokens INTEGER DEFAULT 0,
+                    cache_write_5m_tokens INTEGER DEFAULT 0,
+                    cache_write_1h_tokens INTEGER DEFAULT 0,
+                    credits REAL,
+                    input_semantics TEXT DEFAULT 'excludes_cache',
+                    cost_usd REAL, cost_source TEXT,
+                    provenance TEXT NOT NULL,
+                    duration_ms INTEGER, ttft_ms INTEGER, active_ms INTEGER,
+                    status TEXT, error TEXT,
+                    raw_ref TEXT,
+                    completeness INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS archive.idx_arch_events_time ON usage_events(ts_start);
+                CREATE INDEX IF NOT EXISTS archive.idx_arch_events_app ON usage_events(app, ts_start);",
+            )?;
+
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "INSERT OR IGNORE INTO archive.usage_events
+                 SELECT * FROM main.usage_events WHERE ts_start < ?1",
+                params![before_ms],
+            )?;
+            let deleted = tx.execute(
+                "DELETE FROM main.usage_events WHERE ts_start < ?1",
+                params![before_ms],
+            )?;
+            tx.commit()?;
+            Ok(deleted as u64)
+        })();
+
+        let _ = conn.execute_batch("DETACH DATABASE archive;");
+        let archived_events = res?;
+
+        Ok(ArchiveReport {
+            archived_events,
+            archive_path: archive_path.to_path_buf(),
+            cutoff_ms: before_ms,
+        })
+    }
+
     /// Comprehensive token velocity & burn rate computation anchored at `anchor_ms`
     /// (defaults to `now_ms()`).
     pub fn token_rate_overview(
@@ -1340,6 +1412,17 @@ impl super::Store {
             top_apps_1h,
         })
     }
+}
+
+/// Report summarizing an archiving operation of historical events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveReport {
+    /// Number of raw events transferred into the cold archive.
+    pub archived_events: u64,
+    /// Destination path of the archive SQLite database.
+    pub archive_path: std::path::PathBuf,
+    /// Cutoff epoch timestamp (ms): events older than this were archived.
+    pub cutoff_ms: i64,
 }
 
 /// Positional `?1/?2/…` params bound in order — never mix with other
