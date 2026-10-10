@@ -80,6 +80,12 @@ jobs:
         shell: bash
         run: cargo test --workspace
 
+      # The FFI integration test loads the DLL from ../target/debug, which
+      # does not exist yet: package.ps1 builds it later, after flutter test.
+      - name: Build FFI DLL for integration tests
+        shell: bash
+        run: cargo build -p globaltokentracker-ffi
+
       - name: Flutter analyze
         working-directory: flutter_ui
         run: flutter analyze lib/
