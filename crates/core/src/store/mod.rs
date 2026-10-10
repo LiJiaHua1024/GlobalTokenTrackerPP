@@ -285,6 +285,34 @@ impl Store {
             )?;
             tx.commit()?;
         }
+        // Gemini Antigravity unpriced fix + Qoder credit-based project transcript upgrade.
+        // Dropping cursors makes both re-read from offset 0:
+        // Antigravity maps `gemini-3.8-flash-n` to `gemini-3.8-flash` with accurate pricing.
+        // Old Qoder zero-token/zero-credit placeholder rows are purged so real credits are stored.
+        const RESCAN_ANTIGRAVITY_QODER: &str = "mig_rescan_antigravity_qoder_v1";
+        if self.get_state(RESCAN_ANTIGRAVITY_QODER)?.is_none() {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute(
+                "DELETE FROM sync_cursors WHERE source IN (?1, ?2)",
+                [
+                    crate::model::apps::GEMINI_ANTIGRAVITY,
+                    crate::model::apps::QODER,
+                ],
+            )?;
+            tx.execute(
+                "DELETE FROM usage_events WHERE app IN (?1, ?2)",
+                [
+                    crate::model::apps::GEMINI_ANTIGRAVITY,
+                    crate::model::apps::QODER,
+                ],
+            )?;
+            tx.execute(
+                "INSERT INTO app_state(key, value) VALUES (?1, '1')
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [RESCAN_ANTIGRAVITY_QODER],
+            )?;
+            tx.commit()?;
+        }
         let version: i64 = self.conn.query_row(
             "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
             [],
@@ -590,6 +618,90 @@ mod tests {
         put(&s);
         s.migrate().unwrap();
         assert_eq!(cursors(&s).len(), 4);
+    }
+
+    #[test]
+    fn antigravity_qoder_rescan_drops_cursors_and_purges_old_qoder_events() {
+        let s = Store::open_memory().unwrap();
+        for (src, path) in [
+            (apps::GEMINI_ANTIGRAVITY, "p1"),
+            (apps::QODER, "p2"),
+            (apps::CLAUDE, "p3"),
+        ] {
+            s.conn()
+                .execute(
+                    "INSERT INTO sync_cursors(source, file_path, last_byte_offset) VALUES (?1, ?2, 10)",
+                    [src, path],
+                )
+                .unwrap();
+        }
+        s.upsert_event(&UsageEvent {
+            dedup_key: "old_antigravity".into(),
+            app: apps::GEMINI_ANTIGRAVITY.into(),
+            ..Default::default()
+        })
+        .unwrap();
+        s.upsert_event(&UsageEvent {
+            dedup_key: "old_qoder".into(),
+            app: apps::QODER.into(),
+            ..Default::default()
+        })
+        .unwrap();
+        s.upsert_event(&UsageEvent {
+            dedup_key: "claude_ev".into(),
+            app: apps::CLAUDE.into(),
+            input_tokens: 10,
+            ..Default::default()
+        })
+        .unwrap();
+
+        s.conn()
+            .execute(
+                "DELETE FROM app_state WHERE key='mig_rescan_antigravity_qoder_v1'",
+                [],
+            )
+            .unwrap();
+        s.migrate().unwrap();
+
+        let cursors: Vec<String> = s
+            .conn()
+            .prepare("SELECT source FROM sync_cursors ORDER BY file_path")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(cursors, [apps::CLAUDE]);
+
+        let agy_cnt: i64 = s
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM usage_events WHERE app = ?1",
+                [apps::GEMINI_ANTIGRAVITY],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(agy_cnt, 0);
+
+        let qoder_cnt: i64 = s
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM usage_events WHERE app = ?1",
+                [apps::QODER],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(qoder_cnt, 0);
+
+        let claude_cnt: i64 = s
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM usage_events WHERE app = ?1",
+                [apps::CLAUDE],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(claude_cnt, 1);
     }
 
     #[test]

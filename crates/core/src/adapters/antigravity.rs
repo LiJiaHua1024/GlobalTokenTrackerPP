@@ -377,6 +377,24 @@ fn canonical_model(raw: &str) -> Option<&'static str> {
         | "model_placeholder_m36"
         | "model_placeholder_m37" => "gemini-3.1-pro",
         "gemini-3-pro-high" | "gemini-3-pro-low" => "gemini-3-pro",
+        // The 3.8 Flash family:
+        "gemini-3.8-flash"
+        | "gemini-3.8-flash-n"
+        | "gemini-3.8-flash-high"
+        | "gemini-3.8-flash-medium"
+        | "gemini-3.8-flash-low"
+        | "model_placeholder_m318" => "gemini-3.8-flash",
+        // The 3.7 Flash family:
+        "gemini-3.7-flash"
+        | "gemini-3.7-flash-high"
+        | "gemini-3.7-flash-medium"
+        | "gemini-3.7-flash-low"
+        | "gemini-3.7-flash-thinking" => "gemini-3.7-flash",
+        // The 3.6 Flash family:
+        "gemini-3.6-flash"
+        | "gemini-3.6-flash-high"
+        | "gemini-3.6-flash-medium"
+        | "gemini-3.6-flash-low" => "gemini-3.6-flash",
         // The 3.5 Flash family: the `-a`/`-b`/`-agent` ids are retired
         // predecessors of "Gemini 3.5 Flash (High)".
         "gemini-3-flash-a"
@@ -395,6 +413,11 @@ fn canonical_model(raw: &str) -> Option<&'static str> {
         | "model_placeholder_m18"
         | "model_placeholder_m47"
         | "model_placeholder_m84" => "gemini-3-flash-preview",
+        // The 3.1 Flash / Lite family:
+        "gemini-3.1-flash" | "gemini-3.1-flash-lite" => "gemini-3.1-flash-lite",
+        // The 2.5 Flash / Pro family:
+        "gemini-2.5-flash" | "gemini-2.5-flash-lite" => "gemini-2.5-flash",
+        "gemini-2.5-pro" => "gemini-2.5-pro",
         "claude-opus-4-6-thinking" | "claude-opus-4.6-thinking" | "model_placeholder_m26" => {
             "claude-opus-4-6"
         }
@@ -410,6 +433,15 @@ fn canonical_model(raw: &str) -> Option<&'static str> {
 /// sibling to borrow one from. Only labels seen in real databases.
 fn label_model(label: &str) -> Option<&'static str> {
     match label.trim() {
+        "Gemini 3.8 Flash (Low)" | "Gemini 3.8 Flash (Medium)" | "Gemini 3.8 Flash (High)" => {
+            Some("gemini-3.8-flash")
+        }
+        "Gemini 3.7 Flash (Low)" | "Gemini 3.7 Flash (Medium)" | "Gemini 3.7 Flash (High)" => {
+            Some("gemini-3.7-flash")
+        }
+        "Gemini 3.6 Flash (Low)" | "Gemini 3.6 Flash (Medium)" | "Gemini 3.6 Flash (High)" => {
+            Some("gemini-3.6-flash")
+        }
         "Gemini 3.5 Flash (Low)" | "Gemini 3.5 Flash (Medium)" | "Gemini 3.5 Flash (High)" => {
             Some("gemini-3.5-flash")
         }
@@ -1332,6 +1364,12 @@ mod tests {
             "claude-opus-4-6-thinking",
             "claude-sonnet-4-6-thinking",
             "MODEL_OPENAI_GPT_OSS_120B_MEDIUM",
+            "gemini-3.8-flash",
+            "gemini-3.8-flash-n",
+            "gemini-3.8-flash-high",
+            "MODEL_PLACEHOLDER_M318",
+            "gemini-3.7-flash",
+            "gemini-3.6-flash",
         ];
         for id in ids {
             let target = canonical_model(id).unwrap_or_else(|| panic!("{id} has no alias"));

@@ -1,33 +1,24 @@
-//! Qoder adapter (spec §6.x): `~/.qoder/logs/sessions/<group>/<session>/segments/*.jsonl`.
+//! Qoder adapter (spec §6.x): `~/.qoder/projects/<project-dir>/<session>.jsonl`
+//! and `.../subagents/*.jsonl`.
 //!
-//! Qoder's CLI workers run `--no-session-persistence` — no transcript with
-//! per-request `usage` lands on disk, and `logs/runs/*/manifest.json` plus
-//! `qodercli.log` carry only process/runtime metadata. The reliable local
-//! signal is the session segment log: exactly one `session.config.loaded`
-//! line per file (verified 86/86 on a live install) carrying
-//! `data.project_root` and `data.model`.
-//!
-//! One event per segment file: ts from the config line, `duration_ms` from
-//! the segment's first→last line span (the session-root phase is never
-//! logged — headless runs exit without a `phase.finished` wrapper).
-//! Tokens are genuinely unavailable → zero + `Unpriced`, never estimated.
-//!
-//! `ai-code-tracking-session-end` hook payloads and `tmp/telemetry` blobs
-//! were checked: auth tokens and process ids only, no usage counters.
+//! Qoder transcripts are stored in `~/.qoder/projects/`. Each interactive or
+//! subagent conversation step produces an assistant turn carrying vendor
+//! billing metrics in `message.usage.credits` (or `usage.credits`), along with
+//! `cwd`, `sessionId`, `model`, and `request_id`.
 //!
 //! Byte-offset watermarks come from the Jsonl path like other adapters;
-//! dedup is per-file (`qoder:{file_stem}` — stem embeds ts+rand+pid).
+//! dedup is per-request (`qoder:{req_id}`).
 
 use super::{Capability, ScanOutcome, SourceAdapter, SourceItem, SourceKind, complete_lines};
 use crate::model::{Provenance, UsageEvent, apps};
-use crate::normalize::{text, ts_ms};
+use crate::normalize::{derived_duration, epoch_ms, fnum, input_excludes_cache, num, text};
 use anyhow::Result;
 use serde_json::Value;
 use std::path::PathBuf;
 
 pub struct Qoder;
 
-const ROOT: &str = ".qoder/logs/sessions";
+const ROOT: &str = ".qoder/projects";
 
 impl SourceAdapter for Qoder {
     fn id(&self) -> &'static str {
@@ -37,7 +28,7 @@ impl SourceAdapter for Qoder {
         "Qoder"
     }
     fn capability(&self) -> Capability {
-        Capability::Metadata
+        Capability::Precise
     }
 
     fn watch_roots(&self) -> Vec<PathBuf> {
@@ -45,9 +36,10 @@ impl SourceAdapter for Qoder {
     }
 
     fn discover(&self) -> Result<Vec<SourceItem>> {
-        // <group>/<session-uuid>/segments/<file>.jsonl → depth 4.
+        // <project>/<session-uuid>.jsonl (depth 2)
+        // <project>/<session-uuid>/subagents/<agent>.jsonl (depth 4)
         Ok(
-            crate::sync::collect_files(&crate::sync::home(ROOT), "jsonl", 4)
+            crate::sync::collect_files(&crate::sync::home(ROOT), "jsonl", 5)
                 .into_iter()
                 .map(|p| SourceItem {
                     key: p.to_string_lossy().to_string(),
@@ -71,12 +63,10 @@ impl SourceAdapter for Qoder {
             ..Default::default()
         };
 
-        // Buffer the config line; the event is emitted once the segment is
-        // fully walked so first/last timestamps give the observed span.
-        let mut cfg: Option<(u64, Value)> = None; // (offset, line)
-        let mut first_ts: Option<i64> = None;
-        let mut last_ts: Option<i64> = None;
+        let mut current_project: Option<String> = None;
+        let mut last_user_ts: Option<i64> = None;
         let mut pos = 0u64;
+
         for line in seg.split(|&b| b == b'\n') {
             let line_start = from + pos;
             pos += line.len() as u64 + 1;
@@ -87,59 +77,98 @@ impl SourceAdapter for Qoder {
             let Ok(v) = serde_json::from_slice::<Value>(line) else {
                 continue;
             };
-            if let Some(ts) = ts_ms(&v["ts"]) {
-                if first_ts.is_none() {
-                    first_ts = Some(ts);
+
+            let line_type = v.get("type").and_then(Value::as_str).unwrap_or("");
+            match line_type {
+                "workspace-directories" => {
+                    if let Some(first) = v
+                        .get("directories")
+                        .and_then(Value::as_array)
+                        .and_then(|dirs| dirs.first())
+                        .and_then(text)
+                    {
+                        current_project = Some(first);
+                    }
                 }
-                last_ts = Some(ts);
-            }
-            if v.get("type").and_then(Value::as_str) == Some("session.config.loaded") {
-                cfg = Some((line_start, v));
+                "user" => {
+                    last_user_ts = epoch_ms(&v["timestamp"]);
+                }
+                "assistant" => {
+                    let msg = &v["message"];
+                    let usage = msg.get("usage").or_else(|| v.get("usage"));
+                    let Some(usage) = usage else {
+                        continue;
+                    };
+                    if usage.get("billable").and_then(Value::as_bool) == Some(false) {
+                        continue;
+                    }
+
+                    let prompt = num(&usage["input_tokens"]);
+                    let cache_read = num(&usage["cache_read_input_tokens"]);
+                    let cache_write = num(&usage["cache_creation_input_tokens"]);
+                    let input_tokens = input_excludes_cache(prompt, cache_read, cache_write);
+                    let output_tokens = num(&usage["output_tokens"]);
+                    let credits = fnum(&usage["credits"])
+                        .or_else(|| fnum(&usage["original_credits"]))
+                        .filter(|&c| c > 0.0);
+
+                    if credits.is_none() && input_tokens == 0 && output_tokens == 0 {
+                        continue;
+                    }
+
+                    let req_id = text(&usage["request_id"])
+                        .or_else(|| text(&v["requestTokenAnchor"]["requestId"]))
+                        .or_else(|| text(&v["uuid"]))
+                        .or_else(|| text(&msg["id"]))
+                        .unwrap_or_else(|| format!("{}@{}", item.key, line_start));
+
+                    let session_id = text(&v["sessionId"])
+                        .or_else(|| text(&v["session_id"]))
+                        .or_else(|| {
+                            if item.path.parent().and_then(|p| p.file_name())
+                                == Some(std::ffi::OsStr::new("subagents"))
+                            {
+                                item.path
+                                    .parent()
+                                    .and_then(|p| p.parent())
+                                    .and_then(|p| p.file_name())
+                                    .map(|s| s.to_string_lossy().to_string())
+                            } else {
+                                item.path
+                                    .file_stem()
+                                    .map(|s| s.to_string_lossy().to_string())
+                            }
+                        });
+
+                    let project = text(&v["cwd"]).or_else(|| current_project.clone());
+                    let model = text(&msg["model"]).or_else(|| text(&v["model"]));
+                    let ts = epoch_ms(&v["timestamp"]);
+                    let duration_ms = derived_duration(last_user_ts, ts);
+
+                    out.events.push(UsageEvent {
+                        dedup_key: format!("qoder:{req_id}"),
+                        app: apps::QODER.into(),
+                        session_id,
+                        project,
+                        model: model.clone(),
+                        request_model: model,
+                        ts_start: ts,
+                        duration_ms,
+                        input_tokens,
+                        output_tokens,
+                        cache_read_tokens: cache_read,
+                        cache_write_5m_tokens: cache_write,
+                        credits,
+                        status: text(&msg["stop_reason"]),
+                        provenance: Provenance::LocalJsonl,
+                        raw_ref: Some(format!("{}@{}", item.path.display(), line_start)),
+                        ..Default::default()
+                    });
+                }
+                _ => {}
             }
         }
 
-        if let Some((off, v)) = cfg {
-            let data = &v["data"];
-            let ts = ts_ms(&v["ts"]);
-            // File stem embeds timestamp+rand+pid — unique per process run.
-            let stem = item
-                .path
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_else(|| format!("{off}"));
-            // Parent dir is the session uuid.
-            let session_id = item
-                .path
-                .parent()
-                .and_then(|p| p.parent())
-                .and_then(|p| p.file_name())
-                .map(|s| s.to_string_lossy().to_string());
-            out.events.push(UsageEvent {
-                dedup_key: format!("qoder:{stem}"),
-                app: apps::QODER.into(),
-                session_id,
-                project: text(&data["project_root"]),
-                model: text(&data["model"]),
-                request_model: text(&data["model"]),
-                ts_start: first_ts.or(ts),
-                ts_end: last_ts,
-                duration_ms: match (first_ts, last_ts) {
-                    (Some(a), Some(b)) if b > a => Some(b - a),
-                    _ => None,
-                },
-                status: Some(
-                    if data["interactive"].as_bool().unwrap_or(false) {
-                        "interactive"
-                    } else {
-                        "headless"
-                    }
-                    .into(),
-                ),
-                provenance: Provenance::LocalJsonl,
-                raw_ref: Some(format!("{}@{off}", item.path.display())),
-                ..Default::default()
-            });
-        }
         Ok(out)
     }
 }
@@ -157,32 +186,48 @@ mod tests {
     }
 
     #[test]
-    fn config_line_emits_one_session_event() {
-        let p = "/home/u/.qoder/logs/sessions/grp/sess-uuid/segments/run-p42.jsonl";
-        let data = br#"{"ts":"2026-09-26T09:41:50.592+08:00","seq":1,"type":"cli.route.entered","data":{"route":"headlessStreamJson"}}
-{"ts":"2026-09-26T09:41:50.700+08:00","seq":7,"type":"session.config.loaded","data":{"project_root":"C:\\x","model":"smodel","interactive":false}}
-not json at all
-{"ts":"2026-09-26T09:42:01.949+08:00","seq":12,"type":"session.phase.finished","data":{"phase":"mcp_context.refresh","duration_ms":12}}
+    fn project_transcript_emits_credit_events() {
+        let p = "/home/u/.qoder/projects/D--TestProj/sess-1234.jsonl";
+        let data = br#"{"type":"workspace-directories","sessionId":"sess-1234","directories":["D:\\TestProj"]}
+{"type":"user","uuid":"u1","timestamp":"2026-10-08T06:50:50.000Z","message":{"role":"user","content":"hello"}}
+{"type":"assistant","uuid":"a1","timestamp":"2026-10-08T06:51:10.000Z","cwd":"D:\\TestProj","sessionId":"sess-1234","message":{"id":"resp_1","role":"assistant","model":"smodel","stop_reason":"tool_use","usage":{"input_tokens":0,"output_tokens":0,"credits":21.2433,"billable":true,"request_id":"req-abc-123"}}}
 "#;
         let out = Qoder.parse_jsonl(&item(p), 0, data, None).unwrap();
         assert_eq!(out.consumed, data.len() as u64);
         assert_eq!(out.events.len(), 1);
         let ev = &out.events[0];
-        assert_eq!(ev.dedup_key, "qoder:run-p42");
-        assert_eq!(ev.session_id.as_deref(), Some("sess-uuid"));
-        assert_eq!(ev.project.as_deref(), Some("C:\\x"));
+        assert_eq!(ev.dedup_key, "qoder:req-abc-123");
+        assert_eq!(ev.session_id.as_deref(), Some("sess-1234"));
+        assert_eq!(ev.project.as_deref(), Some("D:\\TestProj"));
         assert_eq!(ev.model.as_deref(), Some("smodel"));
-        assert_eq!(ev.status.as_deref(), Some("headless"));
-        // span = first(09:41:50.592) → last(09:42:01.949)
-        assert_eq!(ev.duration_ms, Some(11_357));
-        assert_eq!(ev.input_tokens, 0);
+        assert_eq!(ev.credits, Some(21.2433));
+        assert_eq!(ev.status.as_deref(), Some("tool_use"));
+        assert_eq!(ev.duration_ms, Some(20_000));
+        assert!(ev.is_billable());
     }
 
     #[test]
-    fn no_config_line_no_event() {
-        let p = "/s/grp/uuid/segments/f.jsonl";
-        let data =
-            br#"{"ts":"2026-09-26T09:41:50.592+08:00","type":"session.phase.started","data":{}}
+    fn subagent_transcript_resolves_parent_session() {
+        let p = "/home/u/.qoder/projects/D--TestProj/sess-1234/subagents/agent-xyz.jsonl";
+        let data = br#"{"type":"user","uuid":"u2","timestamp":"2026-10-08T06:51:11.000Z","message":{"role":"user","content":"sub"}}
+{"type":"assistant","uuid":"a2","timestamp":"2026-10-08T06:51:15.000Z","cwd":"D:\\TestProj","message":{"id":"resp_2","role":"assistant","model":"ultimate","stop_reason":"end_turn","usage":{"credits":7.5,"billable":true,"request_id":"req-sub-456"}}}
+"#;
+        let out = Qoder.parse_jsonl(&item(p), 0, data, None).unwrap();
+        assert_eq!(out.events.len(), 1);
+        let ev = &out.events[0];
+        assert_eq!(ev.dedup_key, "qoder:req-sub-456");
+        // Inherits parent sess-1234 from path
+        assert_eq!(ev.session_id.as_deref(), Some("sess-1234"));
+        assert_eq!(ev.model.as_deref(), Some("ultimate"));
+        assert_eq!(ev.credits, Some(7.5));
+        assert_eq!(ev.duration_ms, Some(4_000));
+    }
+
+    #[test]
+    fn non_billable_or_zero_credit_skipped() {
+        let p = "/home/u/.qoder/projects/D--TestProj/sess-1234.jsonl";
+        let data = br#"{"type":"assistant","uuid":"a3","timestamp":"2026-10-08T06:51:20.000Z","cwd":"D:\\TestProj","sessionId":"sess-1234","message":{"id":"resp_3","role":"assistant","model":"smodel","usage":{"credits":0.0,"billable":true,"request_id":"zero"}}}
+{"type":"assistant","uuid":"a4","timestamp":"2026-10-08T06:51:21.000Z","cwd":"D:\\TestProj","sessionId":"sess-1234","message":{"id":"resp_4","role":"assistant","model":"smodel","usage":{"credits":10.0,"billable":false,"request_id":"unbilled"}}}
 "#;
         let out = Qoder.parse_jsonl(&item(p), 0, data, None).unwrap();
         assert!(out.events.is_empty());
@@ -191,8 +236,8 @@ not json at all
 
     #[test]
     fn partial_tail_not_consumed() {
-        let p = "/s/grp/uuid/segments/f.jsonl";
-        let data = b"{\"ts\":\"2026-09-26T09:41:50Z\",\"type\":\"x\",\"data\":{}}\n{\"ts\":\"2026-09-26T09";
+        let p = "/home/u/.qoder/projects/D--TestProj/sess-1234.jsonl";
+        let data = b"{\"type\":\"user\",\"timestamp\":\"2026-10-08T06:50:50Z\"}\n{\"type\":\"assistant\",\"time";
         let out = Qoder.parse_jsonl(&item(p), 0, data, None).unwrap();
         assert!(out.events.is_empty());
         assert!(out.consumed < data.len() as u64);

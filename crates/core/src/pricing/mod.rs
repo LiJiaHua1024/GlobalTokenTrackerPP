@@ -692,6 +692,14 @@ pub fn candidates_with(raw: &str, rules: &Rules) -> Vec<String> {
                 peel(head, &mut out);
             }
         }
+        // `-<letter>` single-letter variant suffix (e.g. `gemini-3.8-flash-n`, `gemini-3-flash-a`).
+        if let Some((head, suf)) = c.rsplit_once('-')
+            && suf.len() == 1
+            && suf.chars().all(|ch| ch.is_ascii_lowercase())
+            && !head.is_empty()
+        {
+            peel(head, &mut out);
+        }
     }
     out
 }
@@ -1094,6 +1102,10 @@ mod tests {
         assert_eq!(
             resolved(&b, "deepseek-v3-2-volc", None),
             Some(("deepseek-v3-2".into(), "prefix"))
+        );
+        assert_eq!(
+            resolved(&b, "deepseek-v4-pro-n", None),
+            Some(("deepseek-v4-pro".into(), "prefix"))
         );
     }
 
