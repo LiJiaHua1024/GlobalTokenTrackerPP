@@ -155,6 +155,16 @@ fn session_files() -> Vec<PathBuf> {
     out
 }
 
+/// Cline writes its own clock into message `ts`. A skewed source clock must
+/// never push rows into the future — trend/rollup days are ts-derived, so a
+/// future ts would show phantom "future" days in the UI. Clamp hard at the
+/// scan time (`now`, captured once per scan so a whole file shares one
+/// ceiling); the past is passed through untouched. Same precedent as the
+/// Antigravity adapter's believable-window check.
+fn clamp_ts(ts: Option<i64>, now: i64) -> Option<i64> {
+    ts.map(|t| t.min(now))
+}
+
 /// Sidecar `<sessionId>.json` next to a v3 messages file: session-level
 /// model/provider/cwd attribution (`model`, `provider`, `cwd`).
 fn session_sidecar(messages_path: &Path) -> (Option<String>, Option<String>, Option<String>) {
@@ -347,6 +357,9 @@ fn scan_task(item: &SourceItem, store: &Store) -> Result<ScanOutcome> {
     let (project, provider) = hist
         .map(|(_, cwd, prov)| (cwd.clone(), prov.clone()))
         .unwrap_or_default();
+    // Scan-time ceiling: a skewed source clock must never push rows into
+    // the future (trend/rollup days are ts-derived).
+    let now = crate::store::now_ms();
 
     let msgs: Vec<Value> = match std::fs::read_to_string(&ui)
         .ok()
@@ -365,7 +378,7 @@ fn scan_task(item: &SourceItem, store: &Store) -> Result<ScanOutcome> {
     // api_req_started is superseded by the next api_req_finished.
     let mut pending: Option<Pending> = None;
     let emit = |out: &mut Vec<UsageEvent>, msg: &Value, info: &Value, _i: usize, suffix: &str| {
-        let ts = epoch_ms(&msg["ts"]);
+        let ts = clamp_ts(epoch_ms(&msg["ts"]), now);
         let tokens_in = num(&info["tokensIn"]);
         let tokens_out = num(&info["tokensOut"]);
         let cache_reads = num(&info["cacheReads"]);
@@ -519,6 +532,9 @@ fn scan_session(item: &SourceItem, store: &Store) -> Result<ScanOutcome> {
         .unwrap_or_default()
         .to_string();
     let (side_model, side_provider, project) = session_sidecar(ui);
+    // Scan-time ceiling: a skewed source clock must never push rows into
+    // the future (trend/rollup days are ts-derived).
+    let now = crate::store::now_ms();
 
     let doc: Value = match std::fs::read_to_string(ui)
         .ok()
@@ -563,7 +579,7 @@ fn scan_session(item: &SourceItem, store: &Store) -> Result<ScanOutcome> {
             continue;
         }
         let msg_id = msg.get("id").and_then(Value::as_str).unwrap_or_default();
-        let ts = epoch_ms(&msg["ts"]);
+        let ts = clamp_ts(epoch_ms(&msg["ts"]), now);
         let info = &msg["modelInfo"];
         let model = info
             .get("id")
@@ -847,6 +863,50 @@ mod tests {
         // Second scan, unchanged file → fast path, nothing re-emitted.
         let out2 = scan_and_commit(&Cline, &store, &item);
         assert!(out2.events.is_empty());
+    }
+
+    #[test]
+    fn future_ts_clamped_to_scan_time() {
+        // A skewed source clock must never push rows into the future:
+        // ts > now lands exactly on now, past ts passes through untouched.
+        let (_root, dir) = session_fixture("clamp");
+        let now = crate::store::now_ms();
+        let doc = format!(
+            r#"{{"version":1,"sessionId":"session_abc","messages":[{},{},{}]}}"#,
+            assist_msg(
+                "future",
+                now + 30 * 86_400_000,
+                r#"{"inputTokens":10,"outputTokens":2,"cacheReadTokens":0,"cacheWriteTokens":0}"#,
+                "cline/m",
+                "cline"
+            ),
+            assist_msg(
+                "past",
+                1779256800001,
+                r#"{"inputTokens":10,"outputTokens":2,"cacheReadTokens":0,"cacheWriteTokens":0}"#,
+                "cline/m",
+                "cline"
+            ),
+            // zero ts (missing clock) → epoch 0, still in the past, untouched
+            r#"{"id":"zero","role":"assistant","content":[{"type":"text","text":"hi"}],"ts":0,"modelInfo":{"id":"cline/m","provider":"cline"},"metrics":{"inputTokens":1,"outputTokens":1,"cacheReadTokens":0,"cacheWriteTokens":0}}"#,
+        );
+        let path = dir.join("session_abc.messages.json");
+        std::fs::write(&path, doc).unwrap();
+        let store = Store::open_memory().unwrap();
+        let item = SourceItem {
+            key: format!("cline-session:{}", path.to_string_lossy()),
+            path: path.clone(),
+            kind: SourceKind::Sqlite,
+        };
+        let out = scan_and_commit(&Cline, &store, &item);
+        assert_eq!(out.events.len(), 3);
+        let fut = out.events.iter().find(|e| e.dedup_key.ends_with(":future")).unwrap();
+        assert!(fut.ts_start.is_some_and(|t| t <= crate::store::now_ms()));
+        let past = out.events.iter().find(|e| e.dedup_key.ends_with(":past")).unwrap();
+        assert_eq!(past.ts_start, Some(1779256800001));
+        let zero = out.events.iter().find(|e| e.dedup_key.ends_with(":zero")).unwrap();
+        // ts=0 parses as epoch 0 (falsy-but-present); clamp passes it through.
+        assert_eq!(zero.ts_start, Some(0));
     }
 
     #[test]
