@@ -128,6 +128,7 @@
 |---|---|---|
 | Claude Code | 本地 JSONL 会话日志 | ✅ token 精确 + 配额（凭据可用时） |
 | Codex | 本地会话日志 | ✅ 精确 + 配额 |
+| Freebuff | 桌面版本地 SQLite 会话库 | ✅ token 精确 + freebucks 每日配额（免费模式按未定价处理） |
 | Devin | OTLP 遥测接收 | ✅ 精确 |
 | OpenCode / ZCode / Grok / WorkBuddy | 本地日志 | ✅ 精确 |
 | MiniMax Code / Kimi Code | 本地日志 | ✅ 精确 |

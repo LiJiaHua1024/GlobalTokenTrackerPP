@@ -60,6 +60,7 @@ It incrementally and non-intrusively aggregates local AI coding tool telemetry: 
 |---|---|---|
 | Claude Code | Local JSONL session logs | ✅ Exact tokens + Quota (when credentialed) |
 | Codex | Local session logs | ✅ Exact + Quota |
+| Freebuff | Desktop-local SQLite session store | ✅ Exact tokens + daily freebucks quota (free mode counts as unpriced) |
 | Devin | OTLP telemetry receiver | ✅ Exact |
 | OpenCode / ZCode / Grok / WorkBuddy | Local logs | ✅ Exact |
 | MiniMax Code / Kimi Code | Local logs | ✅ Exact |

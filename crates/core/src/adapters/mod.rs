@@ -22,6 +22,7 @@ pub mod commandcode;
 pub mod cursor;
 pub mod devin;
 pub mod dsh;
+pub mod freebuff;
 pub mod grok;
 pub mod kimi_code;
 pub mod minimax_code;
@@ -145,6 +146,7 @@ pub fn registry() -> Vec<Box<dyn SourceAdapter>> {
         Box::new(commandcode::CommandCode),
         Box::new(antigravity::Antigravity),
         Box::new(dsh::Dsh),
+        Box::new(freebuff::Freebuff::new()),
     ]
 }
 

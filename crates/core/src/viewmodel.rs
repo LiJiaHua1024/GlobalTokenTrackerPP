@@ -243,6 +243,7 @@ pub fn app_display(app: &str) -> &str {
         "workbuddy" => "WorkBuddy",
         "codebuddy_ide" => "CodeBuddy",
         "codebuddy_cli" => "CodeBuddy CLI",
+        "freebuff" => "Freebuff",
         "qoder" => "Qoder",
         "opencode" => "OpenCode",
         "zcode" => "ZCode",

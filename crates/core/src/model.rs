@@ -13,6 +13,7 @@ pub mod apps {
     pub const WORKBUDDY: &str = "workbuddy";
     pub const CODEBUDDY_CLI: &str = "codebuddy_cli";
     pub const CODEBUDDY_IDE: &str = "codebuddy_ide";
+    pub const FREEBUFF: &str = "freebuff";
     pub const QODER: &str = "qoder";
     pub const CURSOR: &str = "cursor";
     pub const GEMINI: &str = "gemini";
