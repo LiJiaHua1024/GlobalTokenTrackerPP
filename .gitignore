@@ -20,3 +20,4 @@ crates/setup/payload/
 
 # Agent session state
 .zcode/
+.freebuff/
