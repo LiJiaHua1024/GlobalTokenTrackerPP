@@ -1,17 +1,24 @@
 //! OpenCode adapter (spec §6.3): `~/.local/share/opencode/opencode.db`.
 //!
-//! One event per ASSISTANT `message` row — the source-of-truth grain:
-//! `message.data.tokens`/`cost`/`modelID`/`providerID`/`time.created/completed`
-//! are per-API-call values. `session.tokens_*`/`cost` are running sums of the
-//! same messages (verified 1:1), but a session row collapses every request to
-//! the LAST model used and stamps all usage at `time_created` — a session
-//! spanning days lands entirely on its creation day and mislabels any
-//! mid-session model switch. Messages fix both, and give real per-call
-//! durations instead of session-lifetime spans.
+//! One event per ASSISTANT message row — the source-of-truth grain:
+//! `tokens`/`cost`/model/`time.created/completed` are per-API-call values.
+//! Session-level `tokens_*`/`cost` are running sums of the same messages
+//! (verified 1:1), but a session row collapses every request to the LAST model
+//! used and stamps all usage at `time_created` — a session spanning days lands
+//! entirely on its creation day and mislabels any mid-session model switch.
+//! Messages fix both, and give real per-call durations.
+//!
+//! Two schema eras coexist and are both read (same `msg_*` id space, so a row
+//! present in both merges on one dedup key):
+//!   - v1: `message` + `session`, JSON with `modelID`/`providerID`.
+//!   - v2 (OpenCode 2.x): `session_message` + `session_v2`, JSON with nested
+//!     `model.id`/`model.providerID`. This table is a *superset* of the v1
+//!     rows plus everything written after the upgrade, so it is the primary
+//!     source; v1 is consulted only for the messages v2 did not carry over.
 //!
 //! `cost > 0` is OpenCode's own computed USD → `provider_reported`;
 //! `cost == 0` falls back to the price book (free-tier models price to NULL).
-//! High-water mark: `message.time_updated` (1 s overlap for races).
+//! High-water mark: `time_updated` (1 s overlap for races), max across eras.
 //! Migration: `adapter_state="msg-v2"` — on first encounter the legacy
 //! session-grain events (`opencode:session:*`) are purged and the watermark
 //! reset, otherwise old + new rows would double-count.
@@ -26,6 +33,28 @@ use std::path::PathBuf;
 /// Adapter-state marker persisted in `sync_cursors.adapter_state` once the
 /// session-grain → message-grain migration has run for this source.
 const MSG_SCHEMA_STATE: &str = "msg-v2";
+
+/// Shared column list for both schema eras. `m` is the message table and `s`
+/// the session table; the model/provider reads COALESCE the v1 flat keys with
+/// the v2 nested ones so a single row extractor handles either shape.
+const COLS: &str = "
+        m.id, m.session_id, s.directory,
+        json_extract(m.data,'$.cost'),
+        json_extract(m.data,'$.tokens.input'),
+        json_extract(m.data,'$.tokens.output'),
+        json_extract(m.data,'$.tokens.reasoning'),
+        json_extract(m.data,'$.tokens.cache.read'),
+        json_extract(m.data,'$.tokens.cache.write'),
+        json_extract(m.data,'$.tokens.total'),
+        COALESCE(json_extract(m.data,'$.model.id'),
+                 json_extract(m.data,'$.modelID')),
+        COALESCE(json_extract(m.data,'$.model.providerID'),
+                 json_extract(m.data,'$.providerID')),
+        json_extract(m.data,'$.agent'),
+        json_extract(m.data,'$.time.created'),
+        json_extract(m.data,'$.time.completed'),
+        json_extract(m.data,'$.error'),
+        m.time_created, m.time_updated";
 
 pub struct OpenCode;
 
@@ -61,15 +90,23 @@ impl SourceAdapter for OpenCode {
         let conn = open_ro(&item.path)?;
         let mut out = ScanOutcome::default();
 
-        // The message table is the source of truth; fail loudly on any other
-        // schema era instead of silently reporting zero usage.
-        let core_tables: i64 = conn.query_row(
+        // Detect the schema era(s). v2 (`session_message`/`session_v2`) is the
+        // OpenCode 2.x table set and a superset of v1; fail loudly on an
+        // unknown schema rather than silently reporting zero usage.
+        let legacy: i64 = conn.query_row(
             "SELECT COUNT(*) FROM sqlite_master
              WHERE type='table' AND name IN ('session','message')",
             [],
             |r| r.get(0),
         )?;
-        if core_tables != 2 {
+        let v2: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type='table' AND name IN ('session_v2','session_message')",
+            [],
+            |r| r.get(0),
+        )?;
+        let (legacy, has_v2) = (legacy == 2, v2 == 2);
+        if !legacy && !has_v2 {
             bail!(
                 "{}: unsupported opencode schema (no session/message tables)",
                 item.path.display()
@@ -88,27 +125,33 @@ impl SourceAdapter for OpenCode {
             since = 0;
         }
 
-        let mut st = conn.prepare(
-            "SELECT m.id, m.session_id, s.directory,
-                    json_extract(m.data,'$.cost'),
-                    json_extract(m.data,'$.tokens.input'),
-                    json_extract(m.data,'$.tokens.output'),
-                    json_extract(m.data,'$.tokens.reasoning'),
-                    json_extract(m.data,'$.tokens.cache.read'),
-                    json_extract(m.data,'$.tokens.cache.write'),
-                    json_extract(m.data,'$.tokens.total'),
-                    json_extract(m.data,'$.modelID'),
-                    json_extract(m.data,'$.providerID'),
-                    json_extract(m.data,'$.agent'),
-                    json_extract(m.data,'$.time.created'),
-                    json_extract(m.data,'$.time.completed'),
-                    json_extract(m.data,'$.error'),
-                    m.time_created,
-                    m.time_updated
-             FROM message m JOIN session s ON s.id = m.session_id
-             WHERE json_extract(m.data,'$.role') = 'assistant'
-               AND m.time_updated > ?1",
-        )?;
+        // v2 is authoritative when present; the v1 table is still scanned for
+        // the few messages the 2.x upgrade left behind (same id ⇒ merge, not
+        // double-count). `?1` is the shared watermark in both branches.
+        let sql = match (has_v2, legacy) {
+            (true, true) => format!(
+                "SELECT {COLS} FROM session_message m
+                   JOIN session_v2 s ON s.id = m.session_id
+                  WHERE m.type='assistant' AND m.time_updated > ?1
+                 UNION ALL
+                 SELECT {COLS} FROM message m JOIN session s ON s.id = m.session_id
+                  WHERE json_extract(m.data,'$.role')='assistant'
+                    AND m.time_updated > ?1
+                    AND NOT EXISTS (SELECT 1 FROM session_message x WHERE x.id = m.id)"
+            ),
+            (true, false) => format!(
+                "SELECT {COLS} FROM session_message m
+                   JOIN session_v2 s ON s.id = m.session_id
+                  WHERE m.type='assistant' AND m.time_updated > ?1"
+            ),
+            (false, true) => format!(
+                "SELECT {COLS} FROM message m JOIN session s ON s.id = m.session_id
+                  WHERE json_extract(m.data,'$.role')='assistant'
+                    AND m.time_updated > ?1"
+            ),
+            (false, false) => unreachable!("schema check above rejects this"),
+        };
+        let mut st = conn.prepare(&sql)?;
         let rows = st.query_map(rusqlite::params![since as i64], |r| {
             Ok(MsgRow {
                 id: r.get(0)?,
@@ -514,6 +557,146 @@ mod tests {
         assert_eq!(out2.events[0].dedup_key, "opencode:msg:m1");
         assert_eq!(out2.events[0].output_tokens, 50);
         assert_eq!(out2.events[0].cache_read_tokens, 900);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// OpenCode 2.x schema: `session_message` + `session_v2`.
+    fn fixture_v2(path: &std::path::Path) -> Connection {
+        let c = Connection::open(path).unwrap();
+        c.execute_batch(
+            "CREATE TABLE session_v2(
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL DEFAULT 'p',
+                directory TEXT NOT NULL, time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL);
+             CREATE TABLE session_message(
+                id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL,
+                seq INTEGER NOT NULL, time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL, data TEXT NOT NULL);",
+        )
+        .unwrap();
+        c
+    }
+
+    /// `session_message.data` as OpenCode 2.x writes it: nested `model`, no
+    /// `role` key (the type lives in the `type` column), no `tokens.total`.
+    fn v2_msg_json(
+        model: &str,
+        provider: &str,
+        cost: f64,
+        tok: (i64, i64, i64),
+        time: (i64, i64),
+    ) -> String {
+        let (tin, tout, cr) = tok;
+        let (t0, t1) = time;
+        format!(
+            r#"{{"time":{{"created":{t0},"completed":{t1}}},"agent":"build",
+            "model":{{"id":"{model}","providerID":"{provider}","variant":"high"}},
+            "finish":"stop","cost":{cost},"tokens":{{"input":{tin},"output":{tout},
+            "reasoning":0,"cache":{{"write":0,"read":{cr}}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn v2_schema_reads_assistant_messages() {
+        let dir = tmpdir("v2");
+        let src = dir.join("opencode.db");
+        let c = fixture_v2(&src);
+        c.execute(
+            "INSERT INTO session_v2 VALUES('s1','p','D:\\proj',1_000_000,1_000_000)",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO session_message VALUES('m1','s1','assistant',1,2_000_000,2_000_000,?1)",
+            [v2_msg_json(
+                "deepseek-x",
+                "opencode",
+                0.25,
+                (100, 10, 500),
+                (2_000_000, 2_005_000),
+            )],
+        )
+        .unwrap();
+        // A user turn must be ignored (type != assistant).
+        c.execute(
+            "INSERT INTO session_message VALUES('u1','s1','user',2,2_500_000,2_500_000,'{\"text\":\"hi\"}')",
+            [],
+        )
+        .unwrap();
+        drop(c);
+
+        let store = Store::open_memory().unwrap();
+        let out = scan_and_commit(&OpenCode, &store, &item(&src));
+        assert_eq!(out.events.len(), 1);
+        let e = &out.events[0];
+        assert_eq!(e.dedup_key, "opencode:msg:m1");
+        assert_eq!(e.model.as_deref(), Some("deepseek-x"));
+        assert_eq!(e.provider_id.as_deref(), Some("opencode"));
+        assert_eq!(e.ts_start, Some(2_000_000));
+        assert_eq!(e.ts_end, Some(2_005_000));
+        assert_eq!(e.duration_ms, Some(5_000));
+        assert_eq!(e.input_tokens, 100);
+        assert_eq!(e.cache_read_tokens, 500);
+        assert_eq!(e.cost_usd, Some(0.25));
+        assert_eq!(e.cost_source, Some(CostSource::ProviderReported));
+        assert_eq!(e.project.as_deref(), Some(r"D:\proj"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn v2_superset_unions_v1_orphans_without_double_counting() {
+        let dir = tmpdir("v2union");
+        let src = dir.join("opencode.db");
+        let c = fixture(&src); // v1 tables …
+        c.execute_batch(
+            "CREATE TABLE session_v2(
+                id TEXT PRIMARY KEY, project_id TEXT NOT NULL DEFAULT 'p',
+                directory TEXT NOT NULL, time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL);
+             CREATE TABLE session_message(
+                id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL,
+                seq INTEGER NOT NULL, time_created INTEGER NOT NULL,
+                time_updated INTEGER NOT NULL, data TEXT NOT NULL);",
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO session VALUES('s1','p','/v1','build',NULL,1,1)",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO session_v2 VALUES('s1','p','/v2',1,1)",
+            [],
+        )
+        .unwrap();
+        // m1 migrated into v2 (present in both) — must be ingested once.
+        c.execute(
+            "INSERT INTO message VALUES('m1','s1',100,100,?1)",
+            [msg_json("glm-x", "opencode-go", 0.5, (10, 5, 0), (100, 200))],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO session_message VALUES('m1','s1','assistant',1,100,100,?1)",
+            [v2_msg_json("glm-x", "opencode-go", 0.5, (10, 5, 0), (100, 200))],
+        )
+        .unwrap();
+        // m2 only exists in v1 (the upgrade dropped it) — must still land.
+        c.execute(
+            "INSERT INTO message VALUES('m2','s1',300,300,?1)",
+            [msg_json("ox-free", "opencode", 0.0, (7, 3, 0), (300, 400))],
+        )
+        .unwrap();
+        drop(c);
+
+        let store = Store::open_memory().unwrap();
+        let out = scan_and_commit(&OpenCode, &store, &item(&src));
+        let keys: Vec<&str> = out.events.iter().map(|e| e.dedup_key.as_str()).collect();
+        assert_eq!(keys, vec!["opencode:msg:m1", "opencode:msg:m2"]);
+
+        // A second pass re-reads with the overlap but yields the same keys.
+        let again = scan_and_commit(&OpenCode, &store, &item(&src));
+        let keys2: Vec<&str> = again.events.iter().map(|e| e.dedup_key.as_str()).collect();
+        assert_eq!(keys2, vec!["opencode:msg:m1", "opencode:msg:m2"]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
