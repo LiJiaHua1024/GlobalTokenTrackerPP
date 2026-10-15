@@ -550,30 +550,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Epoch ms at 12:00 UTC of the current UTC day. The adapter buckets
+    /// settled freebucks by UTC date and reports only *today's* bucket, so a
+    /// receipt stamped with a fixed calendar day silently stops counting once
+    /// that day is over. Midday is 12 h from either boundary, so small offsets
+    /// stay on the same day no matter when the test runs.
+    fn today_noon_ms() -> i64 {
+        crate::store::now_ms().div_euclid(86_400_000) * 86_400_000 + 12 * 3_600_000
+    }
+
     #[test]
     fn freebucks_daily_quota_accumulates_settled_receipts() {
         let dir = std::env::temp_dir().join(format!("gtt-fb3-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("projects")).unwrap();
         let refunds = dir.join(REFUNDS_FILE);
+        let base = today_noon_ms();
         std::fs::write(
             &refunds,
             serde_json::json!([
                 {
-                    "receiptId": "r1", "updatedAt": 1791884056386i64,
+                    "receiptId": "r1", "updatedAt": base,
                     "status": "settled", "freebucks": 16.0,
                     "sources": {"daily": 16, "wallet": 0}
                 },
                 {
-                    "receiptId": "r2", "updatedAt": 1791889000000i64,
+                    "receiptId": "r2", "updatedAt": base + 1_000,
                     "status": "settled", "freebucks": 4.5,
                     "sources": {"daily": 4, "wallet": 0.5}
                 },
                 {
-                    "receiptId": "r3", "updatedAt": 1791889000001i64,
+                    "receiptId": "r3", "updatedAt": base + 1_001,
                     "status": "revoked", "freebucks": 99.0
                 },
                 {
-                    "receiptId": "r1", "updatedAt": 1791884056386i64,
+                    "receiptId": "r1", "updatedAt": base,
                     "status": "settled", "freebucks": 16.0
                 }
             ])
@@ -605,7 +615,7 @@ mod tests {
         std::fs::write(
             &refunds,
             serde_json::json!([
-                {"receiptId": "r4", "updatedAt": 1791892000000i64,
+                {"receiptId": "r4", "updatedAt": base + 2_000,
                  "status": "settled", "freebucks": 10.0}
             ])
             .to_string(),
