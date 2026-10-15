@@ -11,7 +11,15 @@ use globaltokentracker_core::Engine;
 use serde::Serialize;
 
 pub struct GttContext {
+    /// Long-lived engine. Only `scan` runs against it, so its lock is
+    /// effectively a scan mutex — never taken by the read endpoints.
     inner: Mutex<Engine>,
+    /// Dedicated connection for UI reads (overview / rates / details /
+    /// sources / prices). Kept separate from `inner` so an in-flight scan —
+    /// which can take tens of seconds on a large log — never blocks the UI.
+    /// WAL lets this connection read the last committed snapshot while the
+    /// scan writes.
+    reads: Mutex<Store>,
     db_path: PathBuf,
 }
 
@@ -134,8 +142,18 @@ unsafe fn gtt_engine_open_impl(db_path: *const c_char) -> *mut GttContext {
         }
     };
 
+    // Second connection purely for reads, so scans don't block the UI.
+    let reads = match Store::open(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[gtt_ffi] Failed to open read connection: {e}");
+            return std::ptr::null_mut();
+        }
+    };
+
     Box::into_raw(Box::new(GttContext {
         inner: Mutex::new(engine),
+        reads: Mutex::new(reads),
         db_path: path,
     }))
 }
@@ -223,7 +241,7 @@ unsafe fn gtt_get_overview_impl(
         return to_error_c_string("Engine context is null");
     }
     let gtt = unsafe { &*ctx };
-    let engine = match gtt.inner.lock() {
+    let store = match gtt.reads.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
@@ -240,7 +258,7 @@ unsafe fn gtt_get_overview_impl(
     let apps = unsafe { parse_string_list(filter_apps_json) };
     let models = unsafe { parse_string_list(filter_models_json) };
 
-    match engine.store.overview(range, apps.as_deref(), models.as_deref()) {
+    match store.overview(range, apps.as_deref(), models.as_deref()) {
         Ok(vm) => to_json_c_string(&vm),
         Err(e) => to_error_c_string(e),
     }
@@ -272,7 +290,7 @@ unsafe fn gtt_get_token_rates_impl(
         return to_error_c_string("Engine context is null");
     }
     let gtt = unsafe { &*ctx };
-    let engine = match gtt.inner.lock() {
+    let store = match gtt.reads.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
@@ -281,7 +299,7 @@ unsafe fn gtt_get_token_rates_impl(
     let apps = unsafe { parse_string_list(filter_apps_json) };
     let models = unsafe { parse_string_list(filter_models_json) };
 
-    match engine.store.token_rate_overview(anchor, apps.as_deref(), models.as_deref()) {
+    match store.token_rate_overview(anchor, apps.as_deref(), models.as_deref()) {
         Ok(rates) => to_json_c_string(&rates),
         Err(e) => to_error_c_string(e),
     }
@@ -312,7 +330,7 @@ unsafe fn gtt_get_details_impl(
         return to_error_c_string("Engine context is null");
     }
     let gtt = unsafe { &*ctx };
-    let engine = match gtt.inner.lock() {
+    let store = match gtt.reads.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
@@ -320,7 +338,7 @@ unsafe fn gtt_get_details_impl(
     let apps = unsafe { parse_string_list(filter_apps_json) };
     let models = unsafe { parse_string_list(filter_models_json) };
 
-    match engine.store.detail(page, page_size, apps.as_deref(), models.as_deref()) {
+    match store.detail(page, page_size, apps.as_deref(), models.as_deref()) {
         Ok(vm) => to_json_c_string(&vm),
         Err(e) => to_error_c_string(e),
     }
@@ -337,12 +355,12 @@ unsafe fn gtt_get_sources_impl(ctx: *mut GttContext) -> *mut c_char {
         return to_error_c_string("Engine context is null");
     }
     let gtt = unsafe { &*ctx };
-    let engine = match gtt.inner.lock() {
+    let store = match gtt.reads.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
 
-    match engine.store.source_health() {
+    match store.source_health() {
         Ok(sources) => to_json_c_string(&sources),
         Err(e) => to_error_c_string(e),
     }
@@ -359,13 +377,13 @@ unsafe fn gtt_get_prices_impl(ctx: *mut GttContext, limit: usize) -> *mut c_char
         return to_error_c_string("Engine context is null");
     }
     let gtt = unsafe { &*ctx };
-    let engine = match gtt.inner.lock() {
+    let store = match gtt.reads.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
 
     let lim = if limit == 0 { 5000 } else { limit } as i64;
-    match engine.store.price_rows(lim) {
+    match store.price_rows(lim) {
         Ok(prices) => to_json_c_string(&prices),
         Err(e) => to_error_c_string(e),
     }
@@ -422,10 +440,12 @@ unsafe fn gtt_poll_quotas_impl(ctx: *mut GttContext) -> *mut c_char {
     if ctx.is_null() {
         return to_error_c_string("Engine context is null");
     }
-    let gtt = unsafe { &*ctx };
-    let engine = match gtt.inner.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
+    // Network polling can take seconds. Use a dedicated connection so this
+    // never holds the scan lock (and never blocks the UI reads).
+    let db_path = unsafe { &*ctx }.db_path.clone();
+    let store = match Store::open(&db_path) {
+        Ok(store) => store,
+        Err(e) => return to_error_c_string(e),
     };
 
     // Each poller fails independently; collect the per-source
@@ -441,7 +461,7 @@ unsafe fn gtt_poll_quotas_impl(ctx: *mut GttContext) -> *mut c_char {
             });
         }
         for q in &outcome.quotas {
-            match engine.store.insert_quota(q) {
+            match store.insert_quota(q) {
                 Ok(true) => count += 1,
                 Ok(false) => {}
                 Err(e) => errors.push(QuotaError {
@@ -480,8 +500,11 @@ mod tests {
         let engine = Engine::new(store).unwrap();
         let ctx = Box::into_raw(Box::new(GttContext {
             inner: Mutex::new(engine),
-            // Only gtt_update_prices reads db_path, and this test never
-            // reaches it — the engine here is backed by an in-memory store.
+            // Reads go through their own connection; an empty in-memory store
+            // is enough to exercise the JSON shape.
+            reads: Mutex::new(Store::open_memory().unwrap()),
+            // Only gtt_update_prices / gtt_poll_quotas read db_path, and this
+            // test never reaches them.
             db_path: PathBuf::new(),
         }));
 
