@@ -3,13 +3,15 @@
 //! - **v3 sessions** (current CLI + Desktop, same store): whole-file JSON docs
 //!   `~/.cline/data/sessions/<sessionId>/<sessionId>.messages.json`
 //!   (`{version, agent, sessionId, messages: [...]}`).
-//!   Every assistant message carries its own per-request **delta**
-//!   `metrics: {inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens}`
-//!   (verified against live data: values fluctuate up AND down across messages,
-//!   message `ts` is epoch ms with the same far-future clock skew seen in
-//!   session filenames, sums match the sidecar `<id>.json`
-//!   `metadata.usage/aggregateUsage` on completed sessions, running sessions
-//!   have no sidecar totals yet). Per-message `modelInfo {id, provider}` plus
+//!   Every assistant message carries one completed turn's
+//!   `metrics: {inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens}`.
+//!   The SDK normalizes `inputTokens` to the FULL prompt — cache reads and
+//!   writes included (its own cost formula subtracts them) — so the uncached
+//!   input stored here is `inputTokens − cacheReadTokens − cacheWriteTokens`.
+//!   Verified on live sessions: per-message sums match the sidecar `<id>.json`
+//!   `metadata.usage/aggregateUsage` field for field. Message `ts` is epoch ms
+//!   with the same far-future clock skew seen in session filenames. Per-message
+//!   `modelInfo {id, provider}` plus
 //!   sidecar top-level `model/provider/cwd` fill attribution; `ts` fills
 //!   `ts_start`. No cost anywhere — rows are `CostSource`-less so pricing falls
 //!   back to the book.
@@ -494,9 +496,10 @@ fn scan_task(item: &SourceItem, store: &Store) -> Result<ScanOutcome> {
 ///
 /// Whole-file doc `{messages: [...]}` rewritten on every turn — same
 /// {len, mtime} fast path as v2. Each assistant message's `metrics` is one
-/// per-request delta row (dedup key `cline:<session>:<msgId>`; the id is
-/// stable across rewrites, unlike row `ts`). No cost is recorded anywhere
-/// in v3 — rows carry no `CostSource` so the price book prices them.
+/// completed turn (dedup key `cline:<session>:<msgId>`; the id is stable
+/// across rewrites, unlike row `ts`). `inputTokens` is the full prompt, cache
+/// included, so the uncached part is stored. No cost is recorded anywhere in
+/// v3 — rows carry no `CostSource` so the price book prices them.
 fn scan_session(item: &SourceItem, store: &Store) -> Result<ScanOutcome> {
     let ui = &item.path;
     let meta = std::fs::metadata(ui)?;
@@ -568,10 +571,12 @@ fn scan_session(item: &SourceItem, store: &Store) -> Result<ScanOutcome> {
         if !met.is_object() {
             continue;
         }
-        let tokens_in = num(&met["inputTokens"]);
         let tokens_out = num(&met["outputTokens"]);
         let cache_reads = num(&met["cacheReadTokens"]);
         let cache_writes = num(&met["cacheWriteTokens"]);
+        // The SDK reports the FULL prompt (cache included); GTT stores the
+        // uncached part and keeps the cache in its own columns.
+        let tokens_in = num(&met["inputTokens"]).saturating_sub(cache_reads + cache_writes);
         // Live data: every assistant turn carries nonzero output; error-only
         // rows (e.g. socket disconnect, displayOnly) carry no metrics object
         // values at all. All-zero rows are not billable — skip.
@@ -793,7 +798,7 @@ mod tests {
             r#"{{"version":1,"sessionId":"session_abc","messages":[{},{},{},{},{},{},{}]}}"#,
             // user row: never counted
             r#"{"id":"u1","role":"user","content":[{"type":"text","text":"hi"}],"ts":1779256800001}"#,
-            // two delta rows, fluctuating values (NOT cumulative)
+            // two completed turns; inputTokens is the full prompt per turn
             assist_msg(
                 "m1",
                 1779256800002,
@@ -843,7 +848,8 @@ mod tests {
             ]
         );
         let e1 = &out.events[0];
-        assert_eq!(e1.input_tokens, 100);
+        // 100 full prompt − 50 cache read.
+        assert_eq!(e1.input_tokens, 50);
         assert_eq!(e1.output_tokens, 10);
         assert_eq!(e1.cache_read_tokens, 50);
         assert_eq!(e1.cache_write_5m_tokens, 0);

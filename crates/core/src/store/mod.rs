@@ -346,6 +346,48 @@ impl Store {
             )?;
             tx.commit()?;
         }
+        // Cline SDK sessions used to store the full prompt as uncached input
+        // (cache reads were also stored separately, double-counting them).
+        // Reset the v3 cursors and drop the re-readable rows so the next scan
+        // re-emits them with the uncached input; deleted-session history is
+        // left alone because there is no file left to re-read.
+        const RESCAN_CLINE_INPUT: &str = "mig_rescan_cline_input_v1";
+        if self.get_state(RESCAN_CLINE_INPUT)?.is_none() {
+            let tx = self.conn.unchecked_transaction()?;
+            let paths: Vec<String> = {
+                let mut st = tx.prepare(
+                    "SELECT DISTINCT raw_ref FROM usage_events
+                     WHERE app = ?1 AND raw_ref LIKE '%.messages.json#%'",
+                )?;
+                let rows = st.query_map([crate::model::apps::CLINE], |r| {
+                    r.get::<_, Option<String>>(0)
+                })?;
+                rows.flatten()
+                    .flatten()
+                    .filter_map(|raw| raw.split_once('#').map(|(p, _)| p.to_string()))
+                    .collect()
+            };
+            let mut seen = std::collections::BTreeSet::new();
+            for path in paths {
+                if !seen.insert(path.clone()) || !Path::new(&path).is_file() {
+                    continue;
+                }
+                tx.execute(
+                    "DELETE FROM usage_events WHERE app = ?1 AND raw_ref LIKE ?2",
+                    params![crate::model::apps::CLINE, format!("{path}#%")],
+                )?;
+            }
+            tx.execute(
+                "DELETE FROM sync_cursors WHERE source = ?1 AND file_path LIKE '%.messages.json'",
+                [crate::model::apps::CLINE],
+            )?;
+            tx.execute(
+                "INSERT INTO app_state(key, value) VALUES (?1, '1')
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [RESCAN_CLINE_INPUT],
+            )?;
+            tx.commit()?;
+        }
         let version: i64 = self.conn.query_row(
             "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
             [],
@@ -735,6 +777,86 @@ mod tests {
             )
             .unwrap();
         assert_eq!(claude_cnt, 1);
+    }
+
+    #[test]
+    fn cline_input_rescan_drops_v3_rows_and_cursors_only() {
+        let s = Store::open_memory().unwrap();
+        let dir = std::env::temp_dir().join(format!("gtt-cline-mig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let live = dir.join("session_a.messages.json");
+        std::fs::write(&live, "{}").unwrap();
+        let gone = dir.join("session_gone.messages.json");
+        let task = dir.join("tasks/t-1");
+
+        for (src, path) in [
+            (apps::CLINE, live.to_string_lossy().to_string()),
+            (apps::CLINE, task.to_string_lossy().to_string()),
+            (
+                apps::CLAUDE,
+                dir.join("claude.jsonl").to_string_lossy().to_string(),
+            ),
+        ] {
+            s.conn()
+                .execute(
+                    "INSERT INTO sync_cursors(source, file_path, last_byte_offset) VALUES (?1, ?2, 10)",
+                    [src, path.as_str()],
+                )
+                .unwrap();
+        }
+        for (key, raw) in [
+            ("cline:live", format!("{}#m1", live.display())),
+            ("cline:orphan", format!("{}#m2", gone.display())),
+            (
+                "cline:v2",
+                format!("{}#1779256800000:started", task.display()),
+            ),
+        ] {
+            s.upsert_event(&UsageEvent {
+                dedup_key: key.into(),
+                app: apps::CLINE.into(),
+                input_tokens: 1,
+                raw_ref: Some(raw),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+
+        s.conn()
+            .execute(
+                "DELETE FROM app_state WHERE key='mig_rescan_cline_input_v1'",
+                [],
+            )
+            .unwrap();
+        s.migrate().unwrap();
+
+        let cursors: Vec<(String, String)> = s
+            .conn()
+            .prepare("SELECT source, file_path FROM sync_cursors ORDER BY file_path")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(cursors.len(), 2, "only the v3 session cursor is reset");
+        assert!(
+            cursors
+                .iter()
+                .any(|(s, p)| s == apps::CLINE && p.ends_with("tasks/t-1"))
+        );
+        assert!(cursors.iter().any(|(s, _)| s == apps::CLAUDE));
+
+        let keys: Vec<String> = s
+            .conn()
+            .prepare("SELECT dedup_key FROM usage_events WHERE app = ?1 ORDER BY dedup_key")
+            .unwrap()
+            .query_map([apps::CLINE], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(keys, ["cline:orphan", "cline:v2"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
