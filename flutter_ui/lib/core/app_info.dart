@@ -2,8 +2,8 @@
 class AppInfo {
   static const String appName = 'GlobalTokenTracker++';
   static const String appShortName = 'GlobalTokenTrackerPP';
-  static const String currentVersion = '1.10.1';
-  static const String currentBuild = '19';
+  static const String currentVersion = '1.11.0';
+  static const String currentBuild = '20';
   static const String platform = 'Windows';
   static const String architecture = 'x64';
 
