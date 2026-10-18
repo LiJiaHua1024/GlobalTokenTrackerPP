@@ -55,7 +55,7 @@ impl SourceAdapter for Qoder {
         item: &SourceItem,
         from: u64,
         data: &[u8],
-        _prior_state: Option<&str>,
+        prior_state: Option<&str>,
     ) -> Result<ScanOutcome> {
         let (seg, consumed) = complete_lines(data);
         let mut out = ScanOutcome {
@@ -64,7 +64,11 @@ impl SourceAdapter for Qoder {
         };
 
         let mut current_project: Option<String> = None;
-        let mut last_user_ts: Option<i64> = None;
+        // Live scans only receive the new byte segment, so the last user
+        // timestamp must survive across scans via the cursor's adapter_state.
+        let mut last_user_ts: Option<i64> = prior_state
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            .and_then(|v| v.get("last_user_ts").and_then(Value::as_i64));
         let mut pos = 0u64;
 
         for line in seg.split(|&b| b == b'\n') {
@@ -141,7 +145,12 @@ impl SourceAdapter for Qoder {
                         });
 
                     let project = text(&v["cwd"]).or_else(|| current_project.clone());
-                    let model = text(&msg["model"]).or_else(|| text(&v["model"]));
+                    let request_model = text(&msg["model"]).or_else(|| text(&v["model"]));
+                    let model = request_model
+                        .as_deref()
+                        .and_then(display_name)
+                        .map(str::to_string)
+                        .or_else(|| request_model.clone());
                     let ts = epoch_ms(&v["timestamp"]);
                     let duration_ms = derived_duration(last_user_ts, ts);
 
@@ -150,8 +159,8 @@ impl SourceAdapter for Qoder {
                         app: apps::QODER.into(),
                         session_id,
                         project,
-                        model: model.clone(),
-                        request_model: model,
+                        model,
+                        request_model,
                         ts_start: ts,
                         duration_ms,
                         input_tokens,
@@ -169,7 +178,24 @@ impl SourceAdapter for Qoder {
             }
         }
 
+        if let Some(ts) = last_user_ts {
+            out.new_state = Some(serde_json::json!({ "last_user_ts": ts }).to_string());
+        }
         Ok(out)
+    }
+}
+
+/// Vendor model keys are opaque aliases; display names come from the run
+/// log's `[QoderInferRequest details] model_config` (`key` / `display_name`).
+fn display_name(key: &str) -> Option<&'static str> {
+    match key {
+        "smodel" => Some("Sonus"),
+        "ultimate" => Some("Ultimate"),
+        "kmodel_latest" => Some("Kimi-K3"),
+        "qmodel_38max" => Some("Qwen3.8-Max"),
+        "cmodel" => Some("Cantus"),
+        "qfmodel" => Some("Qwen3.8-Flash"),
+        _ => None,
     }
 }
 
@@ -199,7 +225,8 @@ mod tests {
         assert_eq!(ev.dedup_key, "qoder:req-abc-123");
         assert_eq!(ev.session_id.as_deref(), Some("sess-1234"));
         assert_eq!(ev.project.as_deref(), Some("D:\\TestProj"));
-        assert_eq!(ev.model.as_deref(), Some("smodel"));
+        assert_eq!(ev.model.as_deref(), Some("Sonus"));
+        assert_eq!(ev.request_model.as_deref(), Some("smodel"));
         assert_eq!(ev.credits, Some(21.2433));
         assert_eq!(ev.status.as_deref(), Some("tool_use"));
         assert_eq!(ev.duration_ms, Some(20_000));
@@ -218,7 +245,8 @@ mod tests {
         assert_eq!(ev.dedup_key, "qoder:req-sub-456");
         // Inherits parent sess-1234 from path
         assert_eq!(ev.session_id.as_deref(), Some("sess-1234"));
-        assert_eq!(ev.model.as_deref(), Some("ultimate"));
+        assert_eq!(ev.model.as_deref(), Some("Ultimate"));
+        assert_eq!(ev.request_model.as_deref(), Some("ultimate"));
         assert_eq!(ev.credits, Some(7.5));
         assert_eq!(ev.duration_ms, Some(4_000));
     }
@@ -241,5 +269,37 @@ mod tests {
         let out = Qoder.parse_jsonl(&item(p), 0, data, None).unwrap();
         assert!(out.events.is_empty());
         assert!(out.consumed < data.len() as u64);
+    }
+
+    #[test]
+    fn user_timestamp_survives_across_segments() {
+        let p = "/home/u/.qoder/projects/D--TestProj/sess-1234.jsonl";
+        let seg1 = br#"{"type":"user","uuid":"u1","timestamp":"2026-10-08T06:50:50.000Z","message":{"role":"user","content":"hi"}}
+"#;
+        let out1 = Qoder.parse_jsonl(&item(p), 0, seg1, None).unwrap();
+        assert!(out1.events.is_empty());
+        let state = out1.new_state.expect("user ts persisted");
+
+        let seg2 = br#"{"type":"assistant","uuid":"a1","timestamp":"2026-10-08T06:51:10.000Z","cwd":"D:\\TestProj","sessionId":"sess-1234","message":{"id":"resp_1","role":"assistant","model":"kmodel_latest","stop_reason":"end_turn","usage":{"credits":1.5,"billable":true,"request_id":"req-x"}}}
+"#;
+        let out2 = Qoder
+            .parse_jsonl(&item(p), seg1.len() as u64, seg2, Some(&state))
+            .unwrap();
+        assert_eq!(out2.events.len(), 1);
+        let ev = &out2.events[0];
+        assert_eq!(ev.duration_ms, Some(20_000));
+        assert_eq!(ev.model.as_deref(), Some("Kimi-K3"));
+        assert_eq!(ev.request_model.as_deref(), Some("kmodel_latest"));
+    }
+
+    #[test]
+    fn unknown_model_key_passes_through() {
+        let p = "/home/u/.qoder/projects/D--TestProj/sess-1234.jsonl";
+        let data = br#"{"type":"assistant","uuid":"a9","timestamp":"2026-10-08T06:51:20.000Z","cwd":"D:\\TestProj","sessionId":"sess-1234","message":{"id":"resp_9","role":"assistant","model":"brand_new_key","stop_reason":"end_turn","usage":{"credits":2.0,"billable":true,"request_id":"req-y"}}}
+"#;
+        let out = Qoder.parse_jsonl(&item(p), 0, data, None).unwrap();
+        let ev = &out.events[0];
+        assert_eq!(ev.model.as_deref(), Some("brand_new_key"));
+        assert_eq!(ev.request_model.as_deref(), Some("brand_new_key"));
     }
 }
