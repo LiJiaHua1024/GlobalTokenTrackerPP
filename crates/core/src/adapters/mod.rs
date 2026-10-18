@@ -17,6 +17,7 @@ pub mod antigravity;
 pub mod claude;
 pub mod cline;
 pub mod codebuddy;
+pub mod codebuddy_cli;
 pub mod codex;
 pub mod commandcode;
 pub mod cursor;
@@ -140,6 +141,7 @@ pub fn registry() -> Vec<Box<dyn SourceAdapter>> {
         Box::new(grok::Grok),
         Box::new(workbuddy::WorkBuddy),
         Box::new(codebuddy::CodeBuddyIde::new()),
+        Box::new(codebuddy_cli::CodeBuddyCli),
         Box::new(minimax_code::MiniMaxCode),
         Box::new(kimi_code::KimiCode),
         Box::new(cline::Cline),

@@ -8,6 +8,9 @@
 //! watermark (`used`/`size`) → quota_snapshots, high-water mark on updated_at.
 //! `credit_json` keys are md5 → unresolvable to model names; per-turn credits
 //! already flow through `rawUsage.credit`.
+//!
+//! The JSONL parser is shared with the CodeBuddy CLI adapter (same Tencent
+//! agent runtime, different data root) — see `parse_raw_usage`.
 
 use super::{Capability, PendingCursor, ScanOutcome, SourceAdapter, SourceItem, SourceKind, complete_lines};
 use crate::model::{Provenance, QuotaSnapshot, UsageEvent, apps};
@@ -15,9 +18,109 @@ use crate::normalize::{epoch_ms, fnum, input_excludes_cache, num, text};
 use crate::store::Store;
 use anyhow::Result;
 use serde_json::Value;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct WorkBuddy;
+
+/// `~/.workbuddy/projects` — JSONL root: `<root>/<project-slug>/<session>.jsonl`
+/// plus `<session>/subagents/agent-*.jsonl`.
+fn projects_root() -> PathBuf {
+    crate::sync::home(".workbuddy/projects")
+}
+
+/// Parse one `projects/**/*.jsonl` segment of the Tencent agent runtime.
+///
+/// WorkBuddy (desktop) and CodeBuddy CLI are two front-ends of the same
+/// runtime, so one parser serves both; `app`/`dedup_prefix` keep their ledger
+/// rows apart. Every record carrying `providerData.rawUsage` is a billed LLM
+/// call — the counts ride on `function_call` rows, assistant `message` rows
+/// carry none of their own — deduped by `providerData.messageId`.
+pub(crate) fn parse_raw_usage(
+    item: &SourceItem,
+    from: u64,
+    data: &[u8],
+    app: &str,
+    dedup_prefix: &str,
+    projects_root: &Path,
+) -> Result<ScanOutcome> {
+    let (seg, consumed) = complete_lines(data);
+    let mut out = ScanOutcome {
+        consumed,
+        ..Default::default()
+    };
+    let session_id = item
+        .path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    // projects/<project-slug>/<session>.jsonl or .../<session>/subagents/agent-*.jsonl
+    let project = item
+        .path
+        .strip_prefix(projects_root)
+        .ok()
+        .and_then(|rel| rel.components().next())
+        .map(|c| c.as_os_str().to_string_lossy().to_string());
+
+    let mut pos = 0u64;
+    for line in seg.split(|&b| b == b'\n') {
+        let line_start = from + pos;
+        pos += line.len() as u64 + 1;
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.is_empty() || !line.windows(8).any(|w| w == b"rawUsage") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        let pd = &v["providerData"];
+        let raw = &pd["rawUsage"];
+        if !raw.is_object() {
+            continue;
+        }
+        // Cache-read variants across providers (spec §6.6): take the max.
+        let cache_read = [
+            "cache_read_input_tokens",
+            "prompt_cache_hit_tokens",
+            "cached_tokens",
+        ]
+        .iter()
+        .map(|k| num(&raw[k]))
+        .chain(std::iter::once(num(
+            &raw["prompt_tokens_details"]["cached_tokens"],
+        )))
+        .max()
+        .unwrap_or(0);
+        let cache_write = ["cache_creation_input_tokens", "prompt_cache_write_tokens"]
+            .iter()
+            .map(|k| num(&raw[k]))
+            .max()
+            .unwrap_or(0);
+        let prompt = num(&raw["prompt_tokens"]);
+        let reasoning = num(&raw["completion_tokens_details"]["reasoning_tokens"])
+            .max(num(&raw["completion_thinking_tokens"]));
+        let response_id =
+            text(&pd["messageId"]).unwrap_or_else(|| format!("{}@{}", item.key, line_start));
+        out.events.push(UsageEvent {
+            dedup_key: format!("{dedup_prefix}:{response_id}"),
+            app: app.into(),
+            session_id: Some(session_id.clone()),
+            project: project.clone(),
+            model: text(&pd["model"]),
+            request_model: text(&pd["requestModelId"]).or_else(|| text(&pd["requestModelName"])),
+            ts_start: epoch_ms(&v["timestamp"]),
+            input_tokens: input_excludes_cache(prompt, cache_read, cache_write),
+            output_tokens: num(&raw["completion_tokens"]),
+            reasoning_tokens: reasoning,
+            cache_read_tokens: cache_read,
+            cache_write_5m_tokens: cache_write,
+            credits: fnum(&raw["credit"]),
+            provenance: Provenance::LocalJsonl,
+            raw_ref: Some(format!("{}@{line_start}", item.path.display())),
+            ..Default::default()
+        });
+    }
+    Ok(out)
+}
 
 impl SourceAdapter for WorkBuddy {
     fn id(&self) -> &'static str {
@@ -35,15 +138,14 @@ impl SourceAdapter for WorkBuddy {
     }
 
     fn discover(&self) -> Result<Vec<SourceItem>> {
-        let mut out: Vec<SourceItem> =
-            crate::sync::collect_files(&crate::sync::home(".workbuddy/projects"), "jsonl", 5)
-                .into_iter()
-                .map(|p| SourceItem {
-                    key: p.to_string_lossy().to_string(),
-                    path: p,
-                    kind: SourceKind::Jsonl,
-                })
-                .collect();
+        let mut out: Vec<SourceItem> = crate::sync::collect_files(&projects_root(), "jsonl", 5)
+            .into_iter()
+            .map(|p| SourceItem {
+                key: p.to_string_lossy().to_string(),
+                path: p,
+                kind: SourceKind::Jsonl,
+            })
+            .collect();
         let db = crate::sync::home(".workbuddy/workbuddy.db");
         if db.exists() {
             out.push(SourceItem {
@@ -62,84 +164,14 @@ impl SourceAdapter for WorkBuddy {
         data: &[u8],
         _prior_state: Option<&str>,
     ) -> Result<ScanOutcome> {
-        let (seg, consumed) = complete_lines(data);
-        let mut out = ScanOutcome {
-            consumed,
-            ..Default::default()
-        };
-        let session_id = item
-            .path
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
-        // projects/<project-slug>/<session>.jsonl or .../<session>/subagents/agent-*.jsonl
-        let project = item
-            .path
-            .strip_prefix(crate::sync::home(".workbuddy/projects"))
-            .ok()
-            .and_then(|rel| rel.components().next())
-            .map(|c| c.as_os_str().to_string_lossy().to_string());
-
-        let mut pos = 0u64;
-        for line in seg.split(|&b| b == b'\n') {
-            let line_start = from + pos;
-            pos += line.len() as u64 + 1;
-            let line = line.strip_suffix(b"\r").unwrap_or(line);
-            if line.is_empty() || !line.windows(8).any(|w| w == b"rawUsage") {
-                continue;
-            }
-            let Ok(v) = serde_json::from_slice::<Value>(line) else {
-                continue;
-            };
-            let pd = &v["providerData"];
-            let raw = &pd["rawUsage"];
-            if !raw.is_object() {
-                continue;
-            }
-            // Cache-read variants across providers (spec §6.6): take the max.
-            let cache_read = [
-                "cache_read_input_tokens",
-                "prompt_cache_hit_tokens",
-                "cached_tokens",
-            ]
-            .iter()
-            .map(|k| num(&raw[k]))
-            .chain(std::iter::once(num(
-                &raw["prompt_tokens_details"]["cached_tokens"],
-            )))
-            .max()
-            .unwrap_or(0);
-            let cache_write = ["cache_creation_input_tokens", "prompt_cache_write_tokens"]
-                .iter()
-                .map(|k| num(&raw[k]))
-                .max()
-                .unwrap_or(0);
-            let prompt = num(&raw["prompt_tokens"]);
-            let reasoning = num(&raw["completion_tokens_details"]["reasoning_tokens"])
-                .max(num(&raw["completion_thinking_tokens"]));
-            let response_id =
-                text(&pd["messageId"]).unwrap_or_else(|| format!("{}@{}", item.key, line_start));
-            out.events.push(UsageEvent {
-                dedup_key: format!("workbuddy:{response_id}"),
-                app: apps::WORKBUDDY.into(),
-                session_id: Some(session_id.clone()),
-                project: project.clone(),
-                model: text(&pd["model"]),
-                request_model: text(&pd["requestModelId"])
-                    .or_else(|| text(&pd["requestModelName"])),
-                ts_start: epoch_ms(&v["timestamp"]),
-                input_tokens: input_excludes_cache(prompt, cache_read, cache_write),
-                output_tokens: num(&raw["completion_tokens"]),
-                reasoning_tokens: reasoning,
-                cache_read_tokens: cache_read,
-                cache_write_5m_tokens: cache_write,
-                credits: fnum(&raw["credit"]),
-                provenance: Provenance::LocalJsonl,
-                raw_ref: Some(format!("{}@{}", item.path.display(), line_start)),
-                ..Default::default()
-            });
-        }
-        Ok(out)
+        parse_raw_usage(
+            item,
+            from,
+            data,
+            apps::WORKBUDDY,
+            "workbuddy",
+            &projects_root(),
+        )
     }
 
     /// `session_usage` → per-session context watermark quota rows.

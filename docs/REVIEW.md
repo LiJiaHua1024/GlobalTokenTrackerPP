@@ -933,3 +933,11 @@
 - **改动**（`crates/setup/src/main.rs`）：载荷与 setup 副本均写 `.<name>.gtt-new` 临时文件 → 校验落盘长度（不完整即删临时文件并报错）→ `rename_retry`（40×250ms 重试跨镜像回收窗口）原子换入。失败时旧版本完好、仅留临时文件，不再出现 0 字节。
 - **来源**：上游 jichuo1/GlobalTokenTracker `7a0c067`（S90）。
 - **验证**：`cargo test -p globaltokentracker-setup` 12 过；clippy `-D warnings` 0；改动区域无新增 fmt 漂移（该文件存量漂移未动）。
+
+## S73 CodeBuddy CLI 适配（复用 WorkBuddy 同运行时解析器） ✅
+
+- **诉求**：日常在用 CodeBuddy CLI，但面板里只有 WorkBuddy 的数据，看不到 CLI 的任何用量。
+- **数据取证**（本机实测，非猜测）：`~/.codebuddy/projects/<encoded-cwd>/<sessionId>.jsonl` + `<sessionId>/subagents/agent-*.jsonl`（`blobs/`/`traces/`/`file-history/` 无用量且高频变动，不扫不监听）。记录类型只有 `function_call`/`function_call_result`/`message`/`reasoning`/`summary`——**没有** Claude Code 的 `type:"assistant"` + `message.usage` 行；计费计数全在 `type:"function_call"` 行的 `providerData.rawUsage`（`prompt_tokens` 含缓存命中，缓存读在 `prompt_cache_hit_tokens`/`prompt_tokens_details.cached_tokens`，`completion_tokens` 含 `reasoning_tokens`，`credit` 为积分），与 WorkBuddy 桌面端**逐字段同构**（同一 Tencent agent runtime，`providerData.agent` 亦为 `cli`）。去重键 `providerData.messageId` 实测安全：427 用量行 / 427 唯一 id / 0 重复。
+- **改动**：`adapters/workbuddy.rs` 把 JSONL 段解析抽成 `pub(crate) parse_raw_usage(item, from, data, app, dedup_prefix, projects_root)`（行为逐字节不变，仅把 app id / 去重前缀 / 数据根参数化）；新增 `adapters/codebuddy_cli.rs`（app id `codebuddy_cli`、根 `~/.codebuddy/projects`、深度 5 递归覆盖子代理、`Capability::Precise`、watch 只挂 projects 根）并注册进 `registry()`。`session_id` 沿用文件名 stem（与 WorkBuddy 一致：子代理文件报自己的名字），`project` 取 encoded-cwd slug。
+- **不做**：不并入 `workbuddy`（CLI / IDE / 桌面端三本账独立，同 `codebuddy_ide` 先例）；不采 `history.jsonl`（只有输入历史，无 token）。
+- **验证**：`cargo test --workspace` 204 过（core 179，含新增 4 例：真实 `function_call` 行的 token 减法与 credits、子代理路径与发现深度、同 `messageId` 合并为一行、半行尾部不消费）；clippy `--workspace --all-targets -D warnings` 0；`cargo fmt --check -p globaltokentracker-core` 无新增漂移（仅剩存量）。端到端跑通（干净临时账本，`--db` 指向独立子目录以避开 `Store::open` 的 backups 自动恢复）：`scan codebuddy_cli` → 18 文件 / 16 扫描 / +454 事件；`report all` 得 `codebuddy_cli` 454 事件 / input 1,880,795 / cache_read 43,710,208 / credits 1851.19；导出明细核对 `model` / `project` / `session` / `raw_ref` 均落位。

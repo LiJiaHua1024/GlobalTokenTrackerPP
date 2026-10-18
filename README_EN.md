@@ -66,6 +66,7 @@ It incrementally and non-intrusively aggregates local AI coding tool telemetry: 
 | MiniMax Code / Kimi Code | Local logs | ✅ Exact |
 | Cline | `ui_messages.json` + editor globalStorage | ✅ Exact (with tool-reported cost) |
 | Command Code | Local JSONL | ✅ Exact (with tool-reported cost) |
+| CodeBuddy CLI | Local JSONL session logs | ✅ Exact |
 | CodeBuddy IDE | `state.vscdb` / session store | 🟡 Session-level + model multipliers |
 | Cursor / Qoder | Credentials + official quota APIs | 🟡 Quota-oriented |
 

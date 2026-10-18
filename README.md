@@ -134,6 +134,7 @@
 | MiniMax Code / Kimi Code | 本地日志 | ✅ 精确 |
 | Cline | `ui_messages.json` + 编辑器 globalStorage | ✅ 精确（含工具自报成本） |
 | Command Code | 本地 JSONL | ✅ 精确（含工具自报成本） |
+| CodeBuddy CLI | 本地 JSONL 会话日志 | ✅ 精确 |
 | CodeBuddy IDE | `state.vscdb` / 会话库 | 🟡 会话级 + 模型倍率 |
 | Cursor / Qoder | 凭据 + 官方配额 API | 🟡 配额为主 |
 
