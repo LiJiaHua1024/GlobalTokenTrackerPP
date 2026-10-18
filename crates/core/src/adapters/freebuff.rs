@@ -139,14 +139,100 @@ fn fingerprint(db: &Path) -> String {
     format!("{}|{}", stamp(db), stamp(Path::new(&wal)))
 }
 
-/// Free-mode model ids carry no price-book identity; route them to Unpriced
-/// instead of letting characters like `fbm1.AAEA…` match some real model.
-fn resolvable_model(v: &str) -> Option<String> {
-    if v.starts_with("m-") || v.starts_with("fbm1.") || v.is_empty() {
-        None
-    } else {
-        Some(v.to_string())
+/// Freebuff model ids (desktop v0.0.172 catalog constants) used to resolve
+/// the opaque `m-…` handles the free tier stores in `threads.model`.
+const MODEL_IDS: &[&str] = &[
+    "mimo/mimo-v2.5",
+    "mimo/mimo-v2.5-pro",
+    "mimo/mimo-v2.6-pro",
+    "z-ai/glm-5.2",
+    "z-ai/glm-5.3",
+    "z-ai/glm-5.3-flash",
+    "z-ai/glm-5.3-flashx",
+    "z-ai/glm-5.3-prime",
+    "z-ai/glm-5-turbo",
+    "deepseek/deepseek-v4-flash",
+    "deepseek/deepseek-v4-flash-fast",
+    "deepseek/deepseek-v4.1-flash",
+    "deepseek/deepseek-v4-pro",
+    "minimax/minimax-m3",
+    "moonshotai/kimi-k3",
+    "moonshotai/kimi-k2.6",
+    "moonshotai/kimi-k2.7-code",
+    "crof/kimi-k3-eco",
+    "openai/gpt-5.5",
+    "openai/gpt-5.5-pro",
+    "openai/gpt-5.4-pro",
+    "openai/gpt-5.6-luna",
+    "openai/gpt-5.6-luna-es",
+    "openai/gpt-5.6-luna-pro",
+    "openai/gpt-5.6-sol",
+    "openai/gpt-5.6-sol-pro",
+    "openai/gpt-5.6-terra",
+    "openai/gpt-5.6-terra-pro",
+    "openai/gpt-6-luna",
+    "openai/gpt-6-luna-pro",
+    "openai/gpt-6-sol",
+    "openai/gpt-6-sol-pro",
+    "openai/gpt-6.1-sol",
+    "openai/gpt-6-astra",
+    "openai/gpt-6-astra-pro",
+    "openai/o3-pro",
+    "anthropic/claude-fable-5.1",
+    "anthropic/claude-opus-5.5",
+    "anthropic/claude-opus-5",
+    "anthropic/claude-sonnet-5",
+    "anthropic/claude-opus-4.8",
+    "anthropic/claude-sonnet-4.6",
+    "google/gemini-3.8-flash",
+    "google/gemini-3.7-flash",
+    "google/gemini-3.6-flash",
+    "google/gemini-3.5-flash",
+    "google/gemini-3.1-pro-preview",
+    "qwen/qwen3.8-max-prime",
+    "qwen/qwen3.8-max-0902",
+    "qwen/qwen3.8-flash",
+    "qwen/qwen3.8-27b",
+    "qwen/qwen3.7-max",
+    "qwen/qwen3.7-plus",
+    "qwen/qwen3.6-max-preview",
+    "qwen/qwen3.6-plus",
+    "x-ai/grok-4.7",
+    "x-ai/grok-4.6",
+    "x-ai/grok-4.5",
+    "x-ai/grok-4.20",
+    "mistralai/mistral-large",
+    "mistralai/codestral-2508",
+    "meta-llama/llama-4-maverick",
+    "meta/muse-spark-1.2-contributor",
+    "meta/muse-spark-1.3-contributor",
+    "stealth/ox-alpha",
+    "stealth/space-bunny-alpha",
+];
+
+/// The desktop's `freebuffLegacyModelDigest` (two FNV-1a lanes over UTF-16).
+fn legacy_digest(model_id: &str) -> String {
+    let (mut h1, mut h2) = (2_166_136_261u32, 1_523_705_862u32);
+    for c in format!("freebuff-legacy-model:{model_id}").encode_utf16() {
+        h1 = (h1 ^ c as u32).wrapping_mul(16_777_619);
+        h2 = (h2 ^ c as u32).wrapping_mul(1_540_483_477);
     }
+    format!("{h1:08x}{h2:08x}")
+}
+
+/// Resolve a `m-xxxxxxxxxx` catalog handle back to its model id. Unknown
+/// handles and `fbm1.*` carry no price-book identity → Unpriced.
+fn resolvable_model(v: &str) -> Option<String> {
+    if v.is_empty() || v.starts_with("fbm1.") {
+        return None;
+    }
+    if !v.starts_with("m-") {
+        return Some(v.to_string());
+    }
+    MODEL_IDS.iter().find_map(|id| {
+        let digest = legacy_digest(&format!("key:{id}"));
+        (format!("m-{}", &digest[..10]) == v).then(|| id.to_string())
+    })
 }
 
 impl SourceAdapter for Freebuff {
@@ -508,7 +594,7 @@ mod tests {
     }
 
     #[test]
-    fn free_mode_model_is_unpriced_and_watermark_skips_old_rows() {
+    fn catalog_handle_resolves_and_watermark_skips_old_rows() {
         let dir = std::env::temp_dir().join(format!("gtt-fb2-{}", std::process::id()));
         let proj = dir.join("P-uuid");
         std::fs::create_dir_all(&proj).unwrap();
@@ -530,7 +616,11 @@ mod tests {
         let a = Freebuff::with_root(dir.clone());
         let out = scan_and_commit(&a, &store, &item);
         assert_eq!(out.events.len(), 1);
-        assert_eq!(out.events[0].model, None);
+        assert_eq!(out.events[0].model.as_deref(), Some("z-ai/glm-5.3-flash"));
+        assert_eq!(
+            out.events[0].request_model.as_deref(),
+            Some("z-ai/glm-5.3-flash")
+        );
         assert_eq!(out.events[0].input_tokens, 500);
 
         // New turn after the watermark: user rows advance nothing usable and
@@ -656,9 +746,28 @@ mod tests {
 
     #[test]
     fn resolvable_model_gate() {
-        assert_eq!(resolvable_model("z-ai/glm-5.3-flash").as_deref(), Some("z-ai/glm-5.3-flash"));
-        assert_eq!(resolvable_model("openai/gpt-6-luna"), Some("openai/gpt-6-luna".into()));
-        assert_eq!(resolvable_model("m-7e20df6765"), None);
+        assert_eq!(
+            resolvable_model("z-ai/glm-5.3-flash").as_deref(),
+            Some("z-ai/glm-5.3-flash")
+        );
+        assert_eq!(
+            resolvable_model("openai/gpt-6-luna"),
+            Some("openai/gpt-6-luna".into())
+        );
+        // Handles observed in a real desktop store resolve to catalog ids.
+        assert_eq!(
+            resolvable_model("m-7e20df6765").as_deref(),
+            Some("z-ai/glm-5.3-flash")
+        );
+        assert_eq!(
+            resolvable_model("m-00032eaeec").as_deref(),
+            Some("mimo/mimo-v2.5")
+        );
+        assert_eq!(
+            resolvable_model("m-096e75164d").as_deref(),
+            Some("deepseek/deepseek-v4-flash")
+        );
+        assert_eq!(resolvable_model("m-0000000000"), None);
         assert_eq!(resolvable_model("fbm1.AAEA…"), None);
         assert_eq!(resolvable_model(""), None);
     }
