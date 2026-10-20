@@ -25,7 +25,8 @@ class QuotaCardWidget extends StatelessWidget {
               children: [
                 Row(
                   children: [
-                    Icon(Icons.shield_outlined, size: 20, color: theme.colorScheme.primary),
+                    Icon(Icons.shield_outlined,
+                        size: 20, color: theme.colorScheme.primary),
                     const SizedBox(width: 8),
                     Text(
                       group.display,
@@ -37,13 +38,16 @@ class QuotaCardWidget extends StatelessWidget {
                 ),
                 if (group.worstPct != null)
                   Builder(builder: (context) {
-                    final worstVal = group.worstPct!;
-                    final displayPct = worstVal > 1.0 ? worstVal : (worstVal * 100.0);
-                    final colorPct = worstVal > 1.0 ? (worstVal / 100.0) : worstVal;
+                    // Adapters normalize used_percent to 0–100. Do not guess a
+                    // 0–1 scale here: a real 1% would otherwise display 100%.
+                    final displayPct = group.worstPct!;
+                    final colorPct = (displayPct / 100.0).clamp(0.0, 1.0);
                     return Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 4),
                       decoration: BoxDecoration(
-                        color: _getPctColor(colorPct, theme).withValues(alpha: 0.15),
+                        color: _getPctColor(colorPct, theme)
+                            .withValues(alpha: 0.15),
                         borderRadius: BorderRadius.circular(12),
                       ),
                       child: Text(
@@ -60,12 +64,14 @@ class QuotaCardWidget extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             ...group.rows.map((row) {
-              final rawPct = row.usedPercent ??
-                  (row.used != null && row.limitValue != null && row.limitValue! > 0
-                      ? (row.used! / row.limitValue!)
+              final percent = row.usedPercent ??
+                  (row.used != null &&
+                          row.limitValue != null &&
+                          row.limitValue! > 0
+                      ? (row.used! / row.limitValue! * 100.0)
                       : 0.0);
-              final normalizedPct = rawPct > 1.0 ? (rawPct / 100.0) : rawPct;
-              final pctClamped = normalizedPct.clamp(0.0, 1.0);
+              final normalizedPct = (percent / 100.0).clamp(0.0, 1.0);
+              final pctClamped = normalizedPct;
 
               return Padding(
                 padding: const EdgeInsets.symmetric(vertical: 4.0),
@@ -84,7 +90,9 @@ class QuotaCardWidget extends StatelessWidget {
                         Text(
                           row.used != null && row.limitValue != null
                               ? '${themeProvider.formatTokens(row.used!)} / ${themeProvider.formatTokens(row.limitValue!)}'
-                              : (row.used != null ? themeProvider.formatTokens(row.used!) : '未知'),
+                              : (row.used != null
+                                  ? themeProvider.formatTokens(row.used!)
+                                  : '未知'),
                           style: theme.textTheme.bodySmall?.copyWith(
                             color: theme.colorScheme.outline,
                           ),
@@ -97,8 +105,10 @@ class QuotaCardWidget extends StatelessWidget {
                       child: LinearProgressIndicator(
                         value: pctClamped,
                         minHeight: 6,
-                        backgroundColor: theme.colorScheme.surfaceContainerHighest,
-                        valueColor: AlwaysStoppedAnimation<Color>(_getPctColor(normalizedPct, theme)),
+                        backgroundColor:
+                            theme.colorScheme.surfaceContainerHighest,
+                        valueColor: AlwaysStoppedAnimation<Color>(
+                            _getPctColor(normalizedPct, theme)),
                       ),
                     ),
                   ],
