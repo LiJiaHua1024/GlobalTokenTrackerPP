@@ -109,13 +109,21 @@ impl Range {
     }
 }
 
+/// Local start-of-day `days_ago` calendar days back, epoch ms (0 = today).
+///
+/// Calendar arithmetic, not `days_ago * 24h`: subtracting a fixed duration
+/// lands at 23:00/01:00 across a DST transition.
+fn day_start_at(today: jiff::civil::Date, days_ago: i64, tz: &jiff::tz::TimeZone) -> Option<i64> {
+    let date = today.checked_sub(jiff::Span::new().days(days_ago)).ok()?;
+    date.to_zoned(tz.clone())
+        .ok()
+        .map(|z| z.timestamp().as_millisecond())
+}
+
 /// Local start-of-day `days_ago` days back, epoch ms (0 = today).
 pub fn day_start_ms(days_ago: i64) -> i64 {
     let now = jiff::Zoned::now();
-    now.start_of_day()
-        .and_then(|d| d.checked_sub(jiff::SignedDuration::from_hours(days_ago * 24)))
-        .map(|d| d.timestamp().as_millisecond())
-        .unwrap_or_default()
+    day_start_at(now.date(), days_ago, &jiff::tz::TimeZone::system()).unwrap_or_default()
 }
 
 /// A calendar picker's day (encoded as UTC-midnight epoch ms) → that civil
@@ -350,13 +358,15 @@ impl Store {
                 std::collections::BTreeMap::new();
             for r in self.bucket_models(Some(start_30d), None, false, &tz, apps, models)? {
                 let key = r.bucket.clone();
-                let b = buckets_30d.entry(key.clone()).or_insert_with(|| TrendBucket {
-                    date: key,
-                    events: 0,
-                    tokens: 0,
-                    cost_usd: 0.0,
-                    top: Vec::new(),
-                });
+                let b = buckets_30d
+                    .entry(key.clone())
+                    .or_insert_with(|| TrendBucket {
+                        date: key,
+                        events: 0,
+                        tokens: 0,
+                        cost_usd: 0.0,
+                        top: Vec::new(),
+                    });
                 b.events += r.events;
                 b.tokens += r.tokens;
                 b.cost_usd += r.cost_usd;
@@ -676,5 +686,21 @@ mod tests {
             assert_eq!(super::Range::from_key(r.key()), r);
             assert_eq!(super::Range::from_label(r.label()), r);
         }
+    }
+
+    #[test]
+    fn day_start_uses_calendar_days_across_dst() {
+        // US spring-forward: 2026-03-08 loses an hour. The previous 24h from
+        // 2026-03-09 00:00 is 2026-03-08 01:00, but a "day ago" window starts
+        // at local midnight.
+        let tz = jiff::tz::TimeZone::get("America/New_York").unwrap();
+        let today = jiff::civil::date(2026, 3, 9);
+        let got = super::day_start_at(today, 1, &tz).unwrap();
+        let want = jiff::civil::date(2026, 3, 8)
+            .to_zoned(tz)
+            .unwrap()
+            .timestamp()
+            .as_millisecond();
+        assert_eq!(got, want);
     }
 }
