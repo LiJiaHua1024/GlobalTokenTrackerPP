@@ -10,8 +10,8 @@
 //!
 //! - `totalTokens = inputTokens + outputTokens` → `inputTokens` INCLUDES
 //!   cache reads (input − cached = fresh input), exactly the OpenAI semantic.
-//! - `reasoningOutputTokens ⊆ outputTokens` → subtracted back out so the
-//!   headline `input+output+cache_read` convention stays vendor-consistent.
+//! - `reasoningOutputTokens ⊆ outputTokens` → kept inside `output_tokens`
+//!   because pricing bills output only; `reasoning_tokens` is the audit subset.
 //!
 //! Free-mode threads report an opaque model id (`m-…` / `fbm1.…`) and
 //! `costUsd: 0` — tokens stay exact, cost stays honestly unpriced (these runs
@@ -38,7 +38,7 @@ use crate::model::{Provenance, QuotaSnapshot, UsageEvent, apps};
 use crate::normalize::{input_excludes_cache, num};
 use crate::store::Store;
 use anyhow::Result;
-use rusqlite::{Connection, OptionalExtension, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
@@ -351,7 +351,10 @@ impl Freebuff {
                 ts_start: Some(ts),
                 ts_end: Some(ts),
                 input_tokens: input_excludes_cache(input, cached, 0),
-                output_tokens: output - reasoning,
+                // The provider bills reasoning as output. `compute_at` prices
+                // `output_tokens` only, so subtracting the subset here would
+                // silently drop those tokens from BYOK cost.
+                output_tokens: output,
                 reasoning_tokens: reasoning,
                 cache_read_tokens: cached,
                 provenance: Provenance::LocalSqlite,
@@ -455,15 +458,15 @@ impl Freebuff {
     /// basename), falling back to the folder `<name>-<projectId>`.
     fn project_name(&self, item: &SourceItem) -> Option<String> {
         let dir = item.path.parent()?;
-        let basename = |p: &Path| {
-            p.file_name().map(|s| s.to_string_lossy().to_string())
-        };
+        let basename = |p: &Path| p.file_name().map(|s| s.to_string_lossy().to_string());
         let from_json = std::fs::read_to_string(dir.join("project.json"))
             .ok()
             .and_then(|s| serde_json::from_str::<Value>(&s).ok())
             .and_then(|v| text(&v, "projectPath"))
             .and_then(|p| basename(Path::new(&p)));
-        from_json.or_else(|| basename(dir)).filter(|s| !s.is_empty())
+        from_json
+            .or_else(|| basename(dir))
+            .filter(|s| !s.is_empty())
     }
 }
 
@@ -577,15 +580,15 @@ mod tests {
         // input excludes cache read: 39427 − 28288
         assert_eq!(e1.input_tokens, 39427 - 28288);
         assert_eq!(e1.cache_read_tokens, 28288);
-        // output reported WITH reasoning tucked in → split per headline rules
-        assert_eq!(e1.output_tokens, 293 - 60);
+        // output includes reasoning; the subset stays visible for auditing
+        assert_eq!(e1.output_tokens, 293);
         assert_eq!(e1.reasoning_tokens, 60);
         assert_eq!(e1.ts_start, Some(1791884002000));
         assert!(e1.cost_usd.is_none());
 
         let e2 = &out.events[1];
         assert_eq!(e2.input_tokens, 20017 - 19584);
-        assert_eq!(e2.output_tokens, 478 - 155);
+        assert_eq!(e2.output_tokens, 478);
 
         // Unchanged fingerprint → zero work, zero events.
         let out2 = scan_and_commit(&a, &store, &item);
@@ -602,10 +605,7 @@ mod tests {
         make_db(&db, Some("m-7e20df6765"));
         msgs(
             &db,
-            &[
-                ("user", 0, 0, 0, 0, 1),
-                ("assistant", 1000, 500, 50, 0, 2),
-            ],
+            &[("user", 0, 0, 0, 0, 1), ("assistant", 1000, 500, 50, 0, 2)],
         );
         let store = Store::open_memory().unwrap();
         let item = SourceItem {
@@ -626,10 +626,12 @@ mod tests {
         // New turn after the watermark: user rows advance nothing usable and
         // the fingerprint change re-opens the rewrite window — the re-read
         // seq-2 row MUST re-emit onto the SAME dedup key (no double count).
-        msgs(&db, &[("user", 0, 0, 0, 0, 3), ("assistant", 300, 100, 20, 5, 4)]);
+        msgs(
+            &db,
+            &[("user", 0, 0, 0, 0, 3), ("assistant", 300, 100, 20, 5, 4)],
+        );
         let out2 = scan_and_commit(&a, &store, &item);
-        let mut keys: Vec<&str> =
-            out2.events.iter().map(|e| e.dedup_key.as_str()).collect();
+        let mut keys: Vec<&str> = out2.events.iter().map(|e| e.dedup_key.as_str()).collect();
         keys.sort_unstable();
         assert_eq!(keys, ["freebuff:t1:2", "freebuff:t1:4"]);
         let fresh = &out2.events[1];
@@ -789,7 +791,10 @@ mod tests {
         let a = Freebuff::with_root(dir.clone());
         assert!(scan_and_commit(&a, &store, &item).events.is_empty());
         // Simulate a streamed turn: a user row and a new assistant seq appear.
-        msgs(&db, &[("user", 0, 0, 0, 0, 2), ("assistant", 10, 0, 5, 0, 3)]);
+        msgs(
+            &db,
+            &[("user", 0, 0, 0, 0, 2), ("assistant", 10, 0, 5, 0, 3)],
+        );
         let out = scan_and_commit(&a, &store, &item);
         assert_eq!(out.events.len(), 1); // the new assistant seq, not the user one
         let _ = std::fs::remove_dir_all(&dir);
