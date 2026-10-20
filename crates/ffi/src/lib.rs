@@ -5,9 +5,9 @@ use std::os::raw::c_char;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use globaltokentracker_core::store::{default_db_path, Store};
-use globaltokentracker_core::viewmodel::Range;
 use globaltokentracker_core::Engine;
+use globaltokentracker_core::store::{Store, default_db_path};
+use globaltokentracker_core::viewmodel::Range;
 use serde::Serialize;
 
 pub struct GttContext {
@@ -47,7 +47,10 @@ fn to_c_string(s: String) -> *mut c_char {
 
 fn to_json_c_string<T: Serialize>(val: &T) -> *mut c_char {
     let s = serde_json::to_string(val).unwrap_or_else(|e| {
-        format!(r#"{{"ok":false,"error":{}}}"#, serde_json::to_string(&e.to_string()).unwrap_or_default())
+        format!(
+            r#"{{"ok":false,"error":{}}}"#,
+            serde_json::to_string(&e.to_string()).unwrap_or_default()
+        )
     });
     to_c_string(s)
 }
@@ -65,7 +68,11 @@ unsafe fn parse_opt_str(ptr: *const c_char) -> Option<String> {
         return None;
     }
     let c_str = unsafe { CStr::from_ptr(ptr) };
-    c_str.to_str().ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    c_str
+        .to_str()
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 unsafe fn parse_string_list(ptr: *const c_char) -> Option<Vec<String>> {
@@ -84,7 +91,12 @@ fn catch_unwind_ptr<T>(f: impl FnOnce() -> *mut T, fallback: *mut T) -> *mut T {
 }
 
 fn catch_unwind_json(f: impl FnOnce() -> *mut c_char) -> *mut c_char {
-    catch_unwind_ptr(f, to_error_c_string("internal panic"))
+    // Build the fallback only on panic. Passing it as an eager argument leaked
+    // one CString per successful FFI call (the hot scan/overview paths).
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(ptr) => ptr,
+        Err(_) => to_error_c_string("internal panic"),
+    }
 }
 
 /// Returns default ledger database path as a C string.
@@ -527,9 +539,7 @@ mod tests {
             gtt_free_string(c_str);
         }
 
-        let rates_str = unsafe {
-            gtt_get_token_rates(ctx, 0, std::ptr::null(), std::ptr::null())
-        };
+        let rates_str = unsafe { gtt_get_token_rates(ctx, 0, std::ptr::null(), std::ptr::null()) };
         assert!(!rates_str.is_null());
         let rates_json = unsafe { CStr::from_ptr(rates_str) }.to_str().unwrap();
         assert!(rates_json.contains("timeline_1h"));
