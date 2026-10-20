@@ -119,11 +119,13 @@ class _VelocityPageState extends State<VelocityPage>
     }
   }
 
-  Future<void> _refreshRates({bool silent = false, bool triggerScan = false}) async {
-    if (_isRefreshing && !silent) return;
-    if (!silent) {
-      setState(() => _isRefreshing = true);
-    }
+  Future<void> _refreshRates(
+      {bool silent = false, bool triggerScan = false}) async {
+    // Silent timer ticks must also respect the in-flight guard: a scan can
+    // easily outlive the 3s poll interval and pile up behind the engine lock.
+    if (_isRefreshing) return;
+    _isRefreshing = true;
+    if (!silent && mounted) setState(() {});
 
     try {
       if (triggerScan || _isLiveMonitoring) {
@@ -142,13 +144,17 @@ class _VelocityPageState extends State<VelocityPage>
           _rates = rates;
           _isRefreshing = false;
         });
+      } else {
+        _isRefreshing = false;
       }
     } catch (e) {
-      if (mounted && !silent) {
+      if (mounted) {
         setState(() {
           _isRefreshing = false;
           _error = e.toString();
         });
+      } else {
+        _isRefreshing = false;
       }
     }
   }
@@ -361,12 +367,15 @@ class _VelocityPageState extends State<VelocityPage>
                     FadeTransition(
                       opacity: _pulseAnimation,
                       child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 3),
                         decoration: BoxDecoration(
-                          color: const Color(0xFF34A853).withValues(alpha: 0.15),
+                          color:
+                              const Color(0xFF34A853).withValues(alpha: 0.15),
                           borderRadius: BorderRadius.circular(16),
                           border: Border.all(
-                            color: const Color(0xFF34A853).withValues(alpha: 0.45),
+                            color:
+                                const Color(0xFF34A853).withValues(alpha: 0.45),
                           ),
                         ),
                         child: Row(
@@ -395,9 +404,11 @@ class _VelocityPageState extends State<VelocityPage>
                     )
                   else
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 3),
                       decoration: BoxDecoration(
-                        color: theme.colorScheme.outlineVariant.withValues(alpha: 0.25),
+                        color: theme.colorScheme.outlineVariant
+                            .withValues(alpha: 0.25),
                         borderRadius: BorderRadius.circular(16),
                       ),
                       child: Text(
@@ -440,7 +451,8 @@ class _VelocityPageState extends State<VelocityPage>
         ),
         const SizedBox(width: 8),
         OutlinedButton.icon(
-          onPressed: _isRefreshing ? null : () => _refreshRates(triggerScan: true),
+          onPressed:
+              _isRefreshing ? null : () => _refreshRates(triggerScan: true),
           icon: const Icon(Icons.sync, size: 18),
           label: const Text('扫描日志'),
         ),
@@ -469,7 +481,8 @@ class _VelocityPageState extends State<VelocityPage>
       children: [
         Text(
           '工具过滤: ',
-          style: theme.textTheme.labelMedium?.copyWith(color: theme.colorScheme.outline),
+          style: theme.textTheme.labelMedium
+              ?.copyWith(color: theme.colorScheme.outline),
         ),
         ..._availableApps.map((app) {
           final isSelected = _selectedApps.contains(app);
@@ -541,9 +554,8 @@ class _VelocityPageState extends State<VelocityPage>
     RateMetric metric,
   ) {
     return LayoutBuilder(builder: (context, constraints) {
-      final cols = constraints.maxWidth > 950
-          ? 4
-          : (constraints.maxWidth > 550 ? 2 : 1);
+      final cols =
+          constraints.maxWidth > 950 ? 4 : (constraints.maxWidth > 550 ? 2 : 1);
       return GridView.count(
         crossAxisCount: cols,
         crossAxisSpacing: 14,
@@ -556,7 +568,8 @@ class _VelocityPageState extends State<VelocityPage>
           _buildKpiCard(
             context,
             title: 'Token 增长速率',
-            value: '${themeProvider.formatTokens(metric.tokensPerMin.round())} /min',
+            value:
+                '${themeProvider.formatTokens(metric.tokensPerMin.round())} /min',
             subtitle:
                 '${_formatTps(metric.tokensPerSec)} tok/s · 增量 ${themeProvider.formatTokens(metric.totalTokens)}',
             icon: Icons.trending_up_rounded,
@@ -722,7 +735,8 @@ class _VelocityPageState extends State<VelocityPage>
                 ),
                 if (hasData)
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                     decoration: BoxDecoration(
                       color: const Color(0xFF1A73E8).withValues(alpha: 0.1),
                       borderRadius: BorderRadius.circular(8),
@@ -755,14 +769,17 @@ class _VelocityPageState extends State<VelocityPage>
                     drawVerticalLine: false,
                     horizontalInterval: maxY / 4,
                     getDrawingHorizontalLine: (value) => FlLine(
-                      color: theme.colorScheme.outlineVariant.withValues(alpha: 0.2),
+                      color: theme.colorScheme.outlineVariant
+                          .withValues(alpha: 0.2),
                       strokeWidth: 1,
                       dashArray: [4, 4],
                     ),
                   ),
                   titlesData: FlTitlesData(
-                    rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                    topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                    rightTitles: const AxisTitles(
+                        sideTitles: SideTitles(showTitles: false)),
+                    topTitles: const AxisTitles(
+                        sideTitles: SideTitles(showTitles: false)),
                     leftTitles: AxisTitles(
                       sideTitles: SideTitles(
                         showTitles: true,
@@ -828,7 +845,8 @@ class _VelocityPageState extends State<VelocityPage>
                   lineBarsData: [
                     LineChartBarData(
                       spots: timeline.asMap().entries.map((e) {
-                        return FlSpot(e.key.toDouble(), e.value.totalTokens.toDouble());
+                        return FlSpot(
+                            e.key.toDouble(), e.value.totalTokens.toDouble());
                       }).toList(),
                       isCurved: true,
                       curveSmoothness: 0.25,
@@ -882,7 +900,8 @@ class _VelocityPageState extends State<VelocityPage>
           children: [
             Row(
               children: [
-                Icon(Icons.layers_outlined, size: 20, color: theme.colorScheme.primary),
+                Icon(Icons.layers_outlined,
+                    size: 20, color: theme.colorScheme.primary),
                 const SizedBox(width: 8),
                 Text(
                   '高频并发模型排行',
@@ -909,10 +928,12 @@ class _VelocityPageState extends State<VelocityPage>
                   margin: const EdgeInsets.only(bottom: 10),
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
-                    color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.25),
+                    color: theme.colorScheme.surfaceContainerHighest
+                        .withValues(alpha: 0.25),
                     borderRadius: BorderRadius.circular(10),
                     border: Border.all(
-                      color: theme.colorScheme.outlineVariant.withValues(alpha: 0.2),
+                      color: theme.colorScheme.outlineVariant
+                          .withValues(alpha: 0.2),
                     ),
                   ),
                   child: Column(
@@ -921,9 +942,11 @@ class _VelocityPageState extends State<VelocityPage>
                       Row(
                         children: [
                           Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 6, vertical: 2),
                             decoration: BoxDecoration(
-                              color: theme.colorScheme.primary.withValues(alpha: 0.12),
+                              color: theme.colorScheme.primary
+                                  .withValues(alpha: 0.12),
                               borderRadius: BorderRadius.circular(4),
                             ),
                             child: Text(
@@ -972,8 +995,9 @@ class _VelocityPageState extends State<VelocityPage>
                               child: LinearProgressIndicator(
                                 value: (m.percentage / 100.0).clamp(0.0, 1.0),
                                 minHeight: 6,
-                                backgroundColor:
-                                    theme.colorScheme.outlineVariant.withValues(alpha: 0.2),
+                                backgroundColor: theme
+                                    .colorScheme.outlineVariant
+                                    .withValues(alpha: 0.2),
                                 valueColor: AlwaysStoppedAnimation<Color>(
                                   theme.colorScheme.primary,
                                 ),
@@ -983,7 +1007,8 @@ class _VelocityPageState extends State<VelocityPage>
                           const SizedBox(width: 12),
                           Text(
                             '${m.percentage.toStringAsFixed(1)}%',
-                            style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12),
+                            style: const TextStyle(
+                                fontWeight: FontWeight.w600, fontSize: 12),
                           ),
                           const SizedBox(width: 12),
                           Text(
@@ -1030,7 +1055,8 @@ class _VelocityPageState extends State<VelocityPage>
           children: [
             Row(
               children: [
-                Icon(Icons.apps_rounded, size: 20, color: const Color(0xFF8E24AA)),
+                Icon(Icons.apps_rounded,
+                    size: 20, color: const Color(0xFF8E24AA)),
                 const SizedBox(width: 8),
                 Text(
                   '并发工具速率分布',
@@ -1057,10 +1083,12 @@ class _VelocityPageState extends State<VelocityPage>
                   margin: const EdgeInsets.only(bottom: 10),
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
-                    color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.25),
+                    color: theme.colorScheme.surfaceContainerHighest
+                        .withValues(alpha: 0.25),
                     borderRadius: BorderRadius.circular(10),
                     border: Border.all(
-                      color: theme.colorScheme.outlineVariant.withValues(alpha: 0.2),
+                      color: theme.colorScheme.outlineVariant
+                          .withValues(alpha: 0.2),
                     ),
                   ),
                   child: Column(
@@ -1093,8 +1121,9 @@ class _VelocityPageState extends State<VelocityPage>
                               child: LinearProgressIndicator(
                                 value: (a.percentage / 100.0).clamp(0.0, 1.0),
                                 minHeight: 6,
-                                backgroundColor:
-                                    theme.colorScheme.outlineVariant.withValues(alpha: 0.2),
+                                backgroundColor: theme
+                                    .colorScheme.outlineVariant
+                                    .withValues(alpha: 0.2),
                                 valueColor: const AlwaysStoppedAnimation<Color>(
                                   Color(0xFF8E24AA),
                                 ),
@@ -1104,7 +1133,8 @@ class _VelocityPageState extends State<VelocityPage>
                           const SizedBox(width: 12),
                           Text(
                             '${a.percentage.toStringAsFixed(1)}%',
-                            style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12),
+                            style: const TextStyle(
+                                fontWeight: FontWeight.w600, fontSize: 12),
                           ),
                         ],
                       ),
@@ -1140,7 +1170,8 @@ class _VelocityPageState extends State<VelocityPage>
           children: [
             Row(
               children: [
-                const Icon(Icons.insights_rounded, size: 20, color: Color(0xFFFBBC05)),
+                const Icon(Icons.insights_rounded,
+                    size: 20, color: Color(0xFFFBBC05)),
                 const SizedBox(width: 8),
                 Text(
                   '并发爆发极值洞察',
@@ -1159,7 +1190,8 @@ class _VelocityPageState extends State<VelocityPage>
                   color: theme.colorScheme.surface,
                   borderRadius: BorderRadius.circular(12),
                   border: Border.all(
-                    color: theme.colorScheme.outlineVariant.withValues(alpha: 0.25),
+                    color: theme.colorScheme.outlineVariant
+                        .withValues(alpha: 0.25),
                   ),
                 ),
                 child: Column(
@@ -1197,7 +1229,8 @@ class _VelocityPageState extends State<VelocityPage>
                   color: theme.colorScheme.surface,
                   borderRadius: BorderRadius.circular(12),
                   border: Border.all(
-                    color: theme.colorScheme.outlineVariant.withValues(alpha: 0.25),
+                    color: theme.colorScheme.outlineVariant
+                        .withValues(alpha: 0.25),
                   ),
                 ),
                 child: Column(

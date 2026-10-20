@@ -82,10 +82,11 @@ class _TokenRateDashboardState extends State<TokenRateDashboard>
   }
 
   Future<void> _refreshRates({bool silent = false}) async {
+    // Silent timer ticks must also respect the in-flight guard: a scan can
+    // easily outlive the 3s poll interval and pile up behind the engine lock.
     if (_isRefreshing) return;
-    if (!silent) {
-      setState(() => _isRefreshing = true);
-    }
+    _isRefreshing = true;
+    if (!silent && mounted) setState(() {});
 
     try {
       if (_isLiveMonitoring) {
@@ -106,10 +107,14 @@ class _TokenRateDashboardState extends State<TokenRateDashboard>
           _isRefreshing = false;
         });
         widget.onDataChanged?.call();
+      } else {
+        _isRefreshing = false;
       }
     } catch (_) {
-      if (mounted && !silent) {
+      if (mounted) {
         setState(() => _isRefreshing = false);
+      } else {
+        _isRefreshing = false;
       }
     }
   }
@@ -222,10 +227,12 @@ class _TokenRateDashboardState extends State<TokenRateDashboard>
                               vertical: 3,
                             ),
                             decoration: BoxDecoration(
-                              color: const Color(0xFF34A853).withValues(alpha: 0.15),
+                              color: const Color(0xFF34A853)
+                                  .withValues(alpha: 0.15),
                               borderRadius: BorderRadius.circular(12),
                               border: Border.all(
-                                color: const Color(0xFF34A853).withValues(alpha: 0.4),
+                                color: const Color(0xFF34A853)
+                                    .withValues(alpha: 0.4),
                               ),
                             ),
                             child: Row(
@@ -259,7 +266,8 @@ class _TokenRateDashboardState extends State<TokenRateDashboard>
                             vertical: 3,
                           ),
                           decoration: BoxDecoration(
-                            color: theme.colorScheme.outlineVariant.withValues(alpha: 0.2),
+                            color: theme.colorScheme.outlineVariant
+                                .withValues(alpha: 0.2),
                             borderRadius: BorderRadius.circular(12),
                           ),
                           child: Text(
@@ -352,7 +360,8 @@ class _TokenRateDashboardState extends State<TokenRateDashboard>
                   _buildKpiCard(
                     context,
                     title: 'Token 增长速率',
-                    value: '${themeProvider.formatTokens(metric.tokensPerMin.round())} /min',
+                    value:
+                        '${themeProvider.formatTokens(metric.tokensPerMin.round())} /min',
                     subtitle:
                         '${_formatTps(metric.tokensPerSec)} tok/s · 增量 ${themeProvider.formatTokens(metric.totalTokens)}',
                     icon: Icons.trending_up_rounded,
@@ -382,7 +391,8 @@ class _TokenRateDashboardState extends State<TokenRateDashboard>
                   _buildKpiCard(
                     context,
                     title: '并发请求数与峰值',
-                    value: '${metric.requestsPerMin.toStringAsFixed(1)} req/min',
+                    value:
+                        '${metric.requestsPerMin.toStringAsFixed(1)} req/min',
                     subtitle:
                         '1h 峰值: ${themeProvider.formatTokens(_rates.peak1mIn1h.tokensPerMin.round())}/min (${_formatTps(_rates.peak1mIn1h.tokensPerSec)} TPS)',
                     icon: Icons.bolt_rounded,
@@ -548,14 +558,17 @@ class _TokenRateDashboardState extends State<TokenRateDashboard>
                   drawVerticalLine: false,
                   horizontalInterval: maxY / 4,
                   getDrawingHorizontalLine: (value) => FlLine(
-                    color: theme.colorScheme.outlineVariant.withValues(alpha: 0.2),
+                    color:
+                        theme.colorScheme.outlineVariant.withValues(alpha: 0.2),
                     strokeWidth: 1,
                     dashArray: [4, 4],
                   ),
                 ),
                 titlesData: FlTitlesData(
-                  rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                  topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                  rightTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false)),
+                  topTitles: const AxisTitles(
+                      sideTitles: SideTitles(showTitles: false)),
                   leftTitles: AxisTitles(
                     sideTitles: SideTitles(
                       showTitles: true,
@@ -621,7 +634,8 @@ class _TokenRateDashboardState extends State<TokenRateDashboard>
                 lineBarsData: [
                   LineChartBarData(
                     spots: timeline.asMap().entries.map((e) {
-                      return FlSpot(e.key.toDouble(), e.value.totalTokens.toDouble());
+                      return FlSpot(
+                          e.key.toDouble(), e.value.totalTokens.toDouble());
                     }).toList(),
                     isCurved: true,
                     curveSmoothness: 0.25,
@@ -650,7 +664,8 @@ class _TokenRateDashboardState extends State<TokenRateDashboard>
     );
   }
 
-  Widget _buildTopModelsList(BuildContext context, ThemeProvider themeProvider) {
+  Widget _buildTopModelsList(
+      BuildContext context, ThemeProvider themeProvider) {
     final theme = Theme.of(context);
     final models = _rates.topModels1h.take(6).toList();
 
@@ -673,7 +688,8 @@ class _TokenRateDashboardState extends State<TokenRateDashboard>
                 children: [
                   // App badge
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                     decoration: BoxDecoration(
                       color: theme.colorScheme.primary.withValues(alpha: 0.1),
                       borderRadius: BorderRadius.circular(4),
@@ -727,8 +743,9 @@ class _TokenRateDashboardState extends State<TokenRateDashboard>
                       child: LinearProgressIndicator(
                         value: (m.percentage / 100.0).clamp(0.0, 1.0),
                         minHeight: 6,
-                        backgroundColor:
-                            theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
+                        backgroundColor: theme
+                            .colorScheme.surfaceContainerHighest
+                            .withValues(alpha: 0.5),
                         valueColor: AlwaysStoppedAnimation<Color>(
                           theme.colorScheme.primary,
                         ),
