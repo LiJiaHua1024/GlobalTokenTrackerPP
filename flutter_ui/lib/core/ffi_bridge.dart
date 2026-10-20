@@ -4,6 +4,7 @@ import 'dart:ffi' as ffi;
 import 'dart:io';
 import 'dart:isolate';
 import 'package:ffi/ffi.dart';
+import 'ffi_envelope.dart';
 import 'models.dart';
 
 // Native function typedefs
@@ -13,14 +14,18 @@ typedef _gtt_default_db_path_dart = ffi.Pointer<Utf8> Function();
 typedef _gtt_free_string_c = ffi.Void Function(ffi.Pointer<Utf8> ptr);
 typedef _gtt_free_string_dart = void Function(ffi.Pointer<Utf8> ptr);
 
-typedef _gtt_engine_open_c = ffi.Pointer<ffi.Void> Function(ffi.Pointer<Utf8> dbPath);
-typedef _gtt_engine_open_dart = ffi.Pointer<ffi.Void> Function(ffi.Pointer<Utf8> dbPath);
+typedef _gtt_engine_open_c = ffi.Pointer<ffi.Void> Function(
+    ffi.Pointer<Utf8> dbPath);
+typedef _gtt_engine_open_dart = ffi.Pointer<ffi.Void> Function(
+    ffi.Pointer<Utf8> dbPath);
 
 typedef _gtt_engine_close_c = ffi.Void Function(ffi.Pointer<ffi.Void> ctx);
 typedef _gtt_engine_close_dart = void Function(ffi.Pointer<ffi.Void> ctx);
 
-typedef _gtt_engine_scan_c = ffi.Pointer<Utf8> Function(ffi.Pointer<ffi.Void> ctx);
-typedef _gtt_engine_scan_dart = ffi.Pointer<Utf8> Function(ffi.Pointer<ffi.Void> ctx);
+typedef _gtt_engine_scan_c = ffi.Pointer<Utf8> Function(
+    ffi.Pointer<ffi.Void> ctx);
+typedef _gtt_engine_scan_dart = ffi.Pointer<Utf8> Function(
+    ffi.Pointer<ffi.Void> ctx);
 
 typedef _gtt_get_overview_c = ffi.Pointer<Utf8> Function(
   ffi.Pointer<ffi.Void> ctx,
@@ -67,17 +72,25 @@ typedef _gtt_get_details_dart = ffi.Pointer<Utf8> Function(
   ffi.Pointer<Utf8> filterModelsJson,
 );
 
-typedef _gtt_get_sources_c = ffi.Pointer<Utf8> Function(ffi.Pointer<ffi.Void> ctx);
-typedef _gtt_get_sources_dart = ffi.Pointer<Utf8> Function(ffi.Pointer<ffi.Void> ctx);
+typedef _gtt_get_sources_c = ffi.Pointer<Utf8> Function(
+    ffi.Pointer<ffi.Void> ctx);
+typedef _gtt_get_sources_dart = ffi.Pointer<Utf8> Function(
+    ffi.Pointer<ffi.Void> ctx);
 
-typedef _gtt_get_prices_c = ffi.Pointer<Utf8> Function(ffi.Pointer<ffi.Void> ctx, ffi.Int64 limit);
-typedef _gtt_get_prices_dart = ffi.Pointer<Utf8> Function(ffi.Pointer<ffi.Void> ctx, int limit);
+typedef _gtt_get_prices_c = ffi.Pointer<Utf8> Function(
+    ffi.Pointer<ffi.Void> ctx, ffi.Int64 limit);
+typedef _gtt_get_prices_dart = ffi.Pointer<Utf8> Function(
+    ffi.Pointer<ffi.Void> ctx, int limit);
 
-typedef _gtt_update_prices_c = ffi.Pointer<Utf8> Function(ffi.Pointer<ffi.Void> ctx);
-typedef _gtt_update_prices_dart = ffi.Pointer<Utf8> Function(ffi.Pointer<ffi.Void> ctx);
+typedef _gtt_update_prices_c = ffi.Pointer<Utf8> Function(
+    ffi.Pointer<ffi.Void> ctx);
+typedef _gtt_update_prices_dart = ffi.Pointer<Utf8> Function(
+    ffi.Pointer<ffi.Void> ctx);
 
-typedef _gtt_poll_quotas_c = ffi.Pointer<Utf8> Function(ffi.Pointer<ffi.Void> ctx);
-typedef _gtt_poll_quotas_dart = ffi.Pointer<Utf8> Function(ffi.Pointer<ffi.Void> ctx);
+typedef _gtt_poll_quotas_c = ffi.Pointer<Utf8> Function(
+    ffi.Pointer<ffi.Void> ctx);
+typedef _gtt_poll_quotas_dart = ffi.Pointer<Utf8> Function(
+    ffi.Pointer<ffi.Void> ctx);
 
 class FfiBridge {
   static const _autoPriceRefreshInterval = Duration(hours: 12);
@@ -162,7 +175,8 @@ class FfiBridge {
         try {
           final lib = ffi.DynamicLibrary.open(path);
           // Verify required symbols exist so a stale DLL does not shadow a newer build
-          lib.lookup<ffi.NativeFunction<_gtt_get_token_rates_c>>('gtt_get_token_rates');
+          lib.lookup<ffi.NativeFunction<_gtt_get_token_rates_c>>(
+              'gtt_get_token_rates');
           _resolvedDylibPath = path;
           _dylib = lib;
           return;
@@ -199,7 +213,8 @@ class FfiBridge {
 
   void _bindFunctions() {
     _defaultDbPath = _dylib
-        .lookup<ffi.NativeFunction<_gtt_default_db_path_c>>('gtt_default_db_path')
+        .lookup<ffi.NativeFunction<_gtt_default_db_path_c>>(
+            'gtt_default_db_path')
         .asFunction();
     _freeString = _dylib
         .lookup<ffi.NativeFunction<_gtt_free_string_c>>('gtt_free_string')
@@ -265,7 +280,7 @@ class FfiBridge {
       final raw = ptr.toDartString();
       freeStringFunc(ptr);
 
-      return jsonDecode(raw) as Map<String, dynamic>;
+      return decodeFfiEnvelope(raw) as Map<String, dynamic>;
     });
   }
 
@@ -317,7 +332,7 @@ class FfiBridge {
       final raw = ptr.toDartString();
       freeStringFunc(ptr);
 
-      final json = jsonDecode(raw) as Map<String, dynamic>;
+      final json = decodeFfiEnvelope(raw) as Map<String, dynamic>;
       return OverviewData.fromJson(json);
     });
   }
@@ -335,7 +350,8 @@ class FfiBridge {
     return await Isolate.run(() {
       final dylib = ffi.DynamicLibrary.open(dylibPath);
       final getRatesFunc = dylib
-          .lookup<ffi.NativeFunction<_gtt_get_token_rates_c>>('gtt_get_token_rates')
+          .lookup<ffi.NativeFunction<_gtt_get_token_rates_c>>(
+              'gtt_get_token_rates')
           .asFunction<_gtt_get_token_rates_dart>();
       final freeStringFunc = dylib
           .lookup<ffi.NativeFunction<_gtt_free_string_c>>('gtt_free_string')
@@ -358,7 +374,7 @@ class FfiBridge {
       final raw = ptr.toDartString();
       freeStringFunc(ptr);
 
-      final json = jsonDecode(raw) as Map<String, dynamic>;
+      final json = decodeFfiEnvelope(raw) as Map<String, dynamic>;
       if (json['ok'] == false) {
         throw Exception(json['error'] ?? "Unknown FFI error");
       }
@@ -403,7 +419,7 @@ class FfiBridge {
       final raw = ptr.toDartString();
       freeStringFunc(ptr);
 
-      final json = jsonDecode(raw) as Map<String, dynamic>;
+      final json = decodeFfiEnvelope(raw) as Map<String, dynamic>;
       return DetailData.fromJson(json);
     });
   }
@@ -429,8 +445,10 @@ class FfiBridge {
       final raw = ptr.toDartString();
       freeStringFunc(ptr);
 
-      final list = jsonDecode(raw) as List;
-      return list.map((e) => SourceHealth.fromJson(e as Map<String, dynamic>)).toList();
+      final list = decodeFfiEnvelope(raw) as List;
+      return list
+          .map((e) => SourceHealth.fromJson(e as Map<String, dynamic>))
+          .toList();
     });
   }
 
@@ -456,8 +474,10 @@ class FfiBridge {
       final raw = ptr.toDartString();
       freeStringFunc(ptr);
 
-      final list = jsonDecode(raw) as List;
-      return list.map((e) => PriceRow.fromJson(e as Map<String, dynamic>)).toList();
+      final list = decodeFfiEnvelope(raw) as List;
+      return list
+          .map((e) => PriceRow.fromJson(e as Map<String, dynamic>))
+          .toList();
     });
   }
 
@@ -502,7 +522,7 @@ class FfiBridge {
       final raw = ptr.toDartString();
       freeStringFunc(ptr);
 
-      final result = jsonDecode(raw) as Map<String, dynamic>;
+      final result = decodeFfiEnvelope(raw) as Map<String, dynamic>;
       if (result['ok'] == false) {
         throw Exception(result['error'] ?? 'Price update failed');
       }
@@ -531,7 +551,7 @@ class FfiBridge {
       final raw = ptr.toDartString();
       freeStringFunc(ptr);
 
-      return jsonDecode(raw) as Map<String, dynamic>;
+      return decodeFfiEnvelope(raw) as Map<String, dynamic>;
     });
   }
 }
