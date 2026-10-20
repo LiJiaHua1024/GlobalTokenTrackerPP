@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:window_manager/window_manager.dart';
 import '../core/app_info.dart';
+import '../core/ps_quote.dart';
 import '../widgets/custom_title_bar.dart';
 
 class InstallerApp extends StatelessWidget {
@@ -15,7 +16,9 @@ class InstallerApp extends StatelessWidget {
     const seedColor = Color(0xFF1A73E8); // Google Blue M3
 
     return MaterialApp(
-      title: isUninstall ? 'GlobalTokenTracker++ 卸载向导' : 'GlobalTokenTracker++ 安装向导',
+      title: isUninstall
+          ? 'GlobalTokenTracker++ 卸载向导'
+          : 'GlobalTokenTracker++ 安装向导',
       debugShowCheckedModeBanner: false,
       themeMode: ThemeMode.system,
       theme: ThemeData(
@@ -28,7 +31,8 @@ class InstallerApp extends StatelessWidget {
         fontFamily: 'Segoe UI',
         cardTheme: CardThemeData(
           elevation: 0,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
           clipBehavior: Clip.antiAlias,
         ),
       ),
@@ -42,7 +46,8 @@ class InstallerApp extends StatelessWidget {
         fontFamily: 'Segoe UI',
         cardTheme: CardThemeData(
           elevation: 0,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
           clipBehavior: Clip.antiAlias,
         ),
       ),
@@ -55,7 +60,8 @@ class InstallerPage extends StatefulWidget {
   final List<String> args;
   final bool isUninstall;
 
-  const InstallerPage({super.key, required this.args, required this.isUninstall});
+  const InstallerPage(
+      {super.key, required this.args, required this.isUninstall});
 
   @override
   State<InstallerPage> createState() => _InstallerPageState();
@@ -103,12 +109,12 @@ class _InstallerPageState extends State<InstallerPage> with WindowListener {
         : '''
         \$exists = \$false
         foreach (\$p in \$parts) { if ((& \$exp \$p) -ieq (& \$exp \$d)) { \$exists = \$true; break } }
-        \$new = if (-not \$exists) { \$(if (\$cur.Length -gt 0) { "\$cur;$dest" } else { "$dest" }) } else { \$cur }
+        \$new = if (-not \$exists) { \$(if (\$cur.Length -gt 0) { "\$cur;\$d" } else { "\$d" }) } else { \$cur }
         \$changed = -not \$exists
         ''';
     return '''
         \$name = 'Path'
-        \$d = "$dest".TrimEnd('\\')
+        \$d = "${psDoubleQuote(dest)}".TrimEnd('\\')
         \$key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', \$true)
         if (-not \$key) { throw 'cannot open HKCU environment key' }
         try {
@@ -144,7 +150,8 @@ $edit
 
     // Parse CLI parameters
     for (int i = 0; i < widget.args.length; i++) {
-      if (widget.args[i] == '--installer-source' && i + 1 < widget.args.length) {
+      if (widget.args[i] == '--installer-source' &&
+          i + 1 < widget.args.length) {
         _installerSource = widget.args[i + 1];
       }
       if (widget.args[i] == '--installer-exe' && i + 1 < widget.args.length) {
@@ -156,8 +163,11 @@ $edit
     }
 
     // Default install location: %LOCALAPPDATA%\Programs\GlobalTokenTrackerPP
-    final localAppData = Platform.environment['LOCALAPPDATA'] ?? r'C:\Users\Default\AppData\Local';
-    final defaultDest = _customDest.isNotEmpty ? _customDest : '$localAppData\\Programs\\GlobalTokenTrackerPP';
+    final localAppData = Platform.environment['LOCALAPPDATA'] ??
+        r'C:\Users\Default\AppData\Local';
+    final defaultDest = _customDest.isNotEmpty
+        ? _customDest
+        : '$localAppData\\Programs\\GlobalTokenTrackerPP';
 
     _pathController = TextEditingController(text: defaultDest);
     windowManager.addListener(this);
@@ -188,7 +198,7 @@ $edit
 
   Future<void> _browseFolder() async {
     try {
-      final initial = _pathController.text.trim();
+      final initial = psSingleQuote(_pathController.text.trim());
       final res = await Process.run('powershell', [
         '-NoProfile',
         '-NonInteractive',
@@ -252,14 +262,18 @@ $edit
       }
 
       // 3. Copy files from installer source
-      final srcDir = _installerSource.isNotEmpty ? Directory(_installerSource) : File(Platform.resolvedExecutable).parent;
+      final srcDir = _installerSource.isNotEmpty
+          ? Directory(_installerSource)
+          : File(Platform.resolvedExecutable).parent;
       final entities = await srcDir.list(recursive: true).toList();
       final totalFiles = entities.whereType<File>().length;
 
       int copiedFiles = 0;
       for (final entity in entities) {
-        final relativePath = entity.path.substring(srcDir.path.length).replaceFirst(RegExp(r'^[/\\]'), '');
-        
+        final relativePath = entity.path
+            .substring(srcDir.path.length)
+            .replaceFirst(RegExp(r'^[/\\]'), '');
+
         // Skip installer helper launcher
         if (relativePath.toLowerCase() == 'installer_ui.exe') {
           continue;
@@ -281,7 +295,8 @@ $edit
           if (mounted) {
             _safeSetState(() {
               _statusMessage = '正在释放: $relativePath';
-              _progress = 0.15 + (0.55 * (copiedFiles / (totalFiles > 0 ? totalFiles : 1)));
+              _progress = 0.15 +
+                  (0.55 * (copiedFiles / (totalFiles > 0 ? totalFiles : 1)));
             });
           }
         }
@@ -300,20 +315,23 @@ $edit
         _statusMessage = '写入 Windows 卸载注册信息...';
         _progress = 0.75;
       });
+      final psDest = psDoubleQuote(dest);
       final regCmd = '''
       \$reg = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\GlobalTokenTrackerPP"
+      \$dir = "$psDest"
       New-Item -Path \$reg -Force | Out-Null
       Set-ItemProperty -Path \$reg -Name "DisplayName" -Value "GlobalTokenTracker++"
       Set-ItemProperty -Path \$reg -Name "DisplayVersion" -Value "${AppInfo.currentVersion}"
       Set-ItemProperty -Path \$reg -Name "Publisher" -Value "GlobalTokenTracker++"
-      Set-ItemProperty -Path \$reg -Name "InstallLocation" -Value "$dest"
-      Set-ItemProperty -Path \$reg -Name "DisplayIcon" -Value "$dest\\globaltokentracker_ui.exe"
-      Set-ItemProperty -Path \$reg -Name "UninstallString" -Value "`"$dest\\globaltokentrackerpp-setup.exe`" --uninstall"
-      Set-ItemProperty -Path \$reg -Name "QuietUninstallString" -Value "`"$dest\\globaltokentrackerpp-setup.exe`" --uninstall --quiet"
+      Set-ItemProperty -Path \$reg -Name "InstallLocation" -Value "\$dir"
+      Set-ItemProperty -Path \$reg -Name "DisplayIcon" -Value "\$dir\\globaltokentracker_ui.exe"
+      Set-ItemProperty -Path \$reg -Name "UninstallString" -Value "`"\$dir\\globaltokentrackerpp-setup.exe`" --uninstall"
+      Set-ItemProperty -Path \$reg -Name "QuietUninstallString" -Value "`"\$dir\\globaltokentrackerpp-setup.exe`" --uninstall --quiet"
       Set-ItemProperty -Path \$reg -Name "NoModify" -Value 1 -Type DWord
       Set-ItemProperty -Path \$reg -Name "NoRepair" -Value 1 -Type DWord
       ''';
-      await Process.run('powershell', ['-NoProfile', '-NonInteractive', '-Command', regCmd]);
+      await Process.run(
+          'powershell', ['-NoProfile', '-NonInteractive', '-Command', regCmd]);
 
       // 6. Create Shortcuts
       if (_shortcutStartMenu || _shortcutDesktop) {
@@ -323,32 +341,36 @@ $edit
         });
 
         final appData = Platform.environment['APPDATA'] ?? '';
-        final startMenuDir = '$appData\\Microsoft\\Windows\\Start Menu\\Programs\\GlobalTokenTracker++';
+        final startMenuDir =
+            '$appData\\Microsoft\\Windows\\Start Menu\\Programs\\GlobalTokenTracker++';
 
         final shortcutCmd = '''
+        \$install = "${psDoubleQuote(dest)}"
+        \$startMenu = "${psDoubleQuote(startMenuDir)}"
         \$ws = New-Object -ComObject WScript.Shell
         if ("$_shortcutStartMenu" -eq "True") {
-            New-Item -ItemType Directory -Force -Path "$startMenuDir" | Out-Null
-            \$s = \$ws.CreateShortcut("$startMenuDir\\GlobalTokenTracker++.lnk")
-            \$s.TargetPath = "$dest\\globaltokentracker_ui.exe"
-            \$s.WorkingDirectory = "$dest"
+            New-Item -ItemType Directory -Force -Path "\$startMenu" | Out-Null
+            \$s = \$ws.CreateShortcut("\$startMenu\\GlobalTokenTracker++.lnk")
+            \$s.TargetPath = "\$install\\globaltokentracker_ui.exe"
+            \$s.WorkingDirectory = "\$install"
             \$s.Save()
 
-            \$u = \$ws.CreateShortcut("$startMenuDir\\卸载 GlobalTokenTracker++.lnk")
-            \$u.TargetPath = "$dest\\globaltokentrackerpp-setup.exe"
+            \$u = \$ws.CreateShortcut("\$startMenu\\卸载 GlobalTokenTracker++.lnk")
+            \$u.TargetPath = "\$install\\globaltokentrackerpp-setup.exe"
             \$u.Arguments = "--uninstall"
-            \$u.WorkingDirectory = "$dest"
+            \$u.WorkingDirectory = "\$install"
             \$u.Save()
         }
         if ("$_shortcutDesktop" -eq "True") {
             \$desktopPath = [System.Environment]::GetFolderPath('Desktop')
             \$d = \$ws.CreateShortcut("\$desktopPath\\GlobalTokenTracker++.lnk")
-            \$d.TargetPath = "$dest\\globaltokentracker_ui.exe"
-            \$d.WorkingDirectory = "$dest"
+            \$d.TargetPath = "\$install\\globaltokentracker_ui.exe"
+            \$d.WorkingDirectory = "\$install"
             \$d.Save()
         }
         ''';
-        await Process.run('powershell', ['-NoProfile', '-NonInteractive', '-Command', shortcutCmd]);
+        await Process.run('powershell',
+            ['-NoProfile', '-NonInteractive', '-Command', shortcutCmd]);
       }
 
       // 7. Add to User PATH
@@ -420,8 +442,7 @@ $edit
       if (!_looksLikeInstallDir(dest)) {
         _safeSetState(() {
           _state = InstallState.error;
-          _errorMessage =
-              '该目录不是本应用的安装目录（缺少主程序），已中止卸载。\n目标目录：$dest';
+          _errorMessage = '该目录不是本应用的安装目录（缺少主程序），已中止卸载。\n目标目录：$dest';
         });
         return;
       }
@@ -442,7 +463,8 @@ $edit
         _progress = 0.4;
       });
       final appData = Platform.environment['APPDATA'] ?? '';
-      final startMenuDir = Directory('$appData\\Microsoft\\Windows\\Start Menu\\Programs\\GlobalTokenTracker++');
+      final startMenuDir = Directory(
+          '$appData\\Microsoft\\Windows\\Start Menu\\Programs\\GlobalTokenTracker++');
       if (await startMenuDir.exists()) {
         await startMenuDir.delete(recursive: true);
       }
@@ -452,7 +474,8 @@ $edit
       Remove-Item "\$desktopPath\\GlobalTokenTracker++.lnk" -Force -ErrorAction SilentlyContinue
       Remove-Item "\$env:USERPROFILE\\Desktop\\GlobalTokenTracker++.lnk" -Force -ErrorAction SilentlyContinue
       ''';
-      await Process.run('powershell', ['-NoProfile', '-NonInteractive', '-Command', removeShortcutsCmd]);
+      await Process.run('powershell',
+          ['-NoProfile', '-NonInteractive', '-Command', removeShortcutsCmd]);
 
       // 3. Remove Registry Key & PATH
       _safeSetState(() {
@@ -462,7 +485,8 @@ $edit
       final cleanRegCmd = '''
       Remove-Item -Path "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\GlobalTokenTrackerPP" -Recurse -Force -ErrorAction SilentlyContinue
       ''';
-      await Process.run('powershell', ['-NoProfile', '-NonInteractive', '-Command', cleanRegCmd]);
+      await Process.run('powershell',
+          ['-NoProfile', '-NonInteractive', '-Command', cleanRegCmd]);
 
       final pathRes = await Process.run('powershell', [
         '-NoProfile',
@@ -481,8 +505,22 @@ $edit
       });
       final installDir = Directory(dest);
       if (await installDir.exists()) {
-        // Schedule deferred deletion via cmd
-        Process.start('cmd', ['/C', 'ping 127.0.0.1 -n 2 >nul & rmdir /S /Q "$dest"'], mode: ProcessStartMode.detached);
+        // Deferred deletion after this process exits. Pass the path through
+        // the environment and use -LiteralPath so quotes/`$`/`%` in it can
+        // never be parsed as PowerShell or cmd syntax.
+        Process.start(
+          'powershell',
+          [
+            '-NoProfile',
+            '-NonInteractive',
+            '-WindowStyle',
+            'Hidden',
+            '-Command',
+            r'Start-Sleep -Seconds 2; for ($i = 0; $i -lt 30; $i++) { try { Remove-Item -LiteralPath $env:GTT_UNINSTALL_DIR -Recurse -Force -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 500 } }',
+          ],
+          environment: {'GTT_UNINSTALL_DIR': dest},
+          mode: ProcessStartMode.detached,
+        );
       }
 
       _safeSetState(() {
@@ -522,13 +560,15 @@ $edit
       body: Column(
         children: [
           CustomTitleBar(
-            title: widget.isUninstall ? 'GlobalTokenTracker++ 卸载向导' : 'GlobalTokenTracker++ 安装向导',
+            title: widget.isUninstall
+                ? 'GlobalTokenTracker++ 卸载向导'
+                : 'GlobalTokenTracker++ 安装向导',
             canMaximize: false,
           ),
-
           Expanded(
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 28.0, vertical: 16.0),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 28.0, vertical: 16.0),
               child: AnimatedSwitcher(
                 duration: const Duration(milliseconds: 300),
                 child: _buildBody(theme),
@@ -570,7 +610,8 @@ $edit
               height: 56,
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(16),
-                color: theme.colorScheme.primaryContainer.withValues(alpha: 0.7),
+                color:
+                    theme.colorScheme.primaryContainer.withValues(alpha: 0.7),
                 boxShadow: [
                   BoxShadow(
                     color: theme.colorScheme.primary.withValues(alpha: 0.25),
@@ -581,7 +622,9 @@ $edit
               ),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(16),
-                child: Image.asset('assets/icon-64.png', errorBuilder: (_, __, ___) => const Icon(Icons.token, size: 36)),
+                child: Image.asset('assets/icon-64.png',
+                    errorBuilder: (_, __, ___) =>
+                        const Icon(Icons.token, size: 36)),
               ),
             ),
             const SizedBox(width: 16),
@@ -613,10 +656,12 @@ $edit
         // Path Selection Card
         Card(
           elevation: 0,
-          color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.4),
+          color:
+              theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.4),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
-            side: BorderSide(color: theme.colorScheme.outlineVariant.withValues(alpha: 0.3)),
+            side: BorderSide(
+                color: theme.colorScheme.outlineVariant.withValues(alpha: 0.3)),
           ),
           child: Padding(
             padding: const EdgeInsets.all(16.0),
@@ -625,7 +670,8 @@ $edit
               children: [
                 Text(
                   '安装路径选择',
-                  style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold),
+                  style: theme.textTheme.titleSmall
+                      ?.copyWith(fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(height: 10),
                 Row(
@@ -633,12 +679,16 @@ $edit
                     Expanded(
                       child: TextField(
                         controller: _pathController,
-                        style: const TextStyle(fontSize: 13, fontFamily: 'Segoe UI'),
+                        style: const TextStyle(
+                            fontSize: 13, fontFamily: 'Segoe UI'),
                         decoration: InputDecoration(
-                          prefixIcon: const Icon(Icons.folder_outlined, size: 20),
+                          prefixIcon:
+                              const Icon(Icons.folder_outlined, size: 20),
                           isDense: true,
-                          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                          contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 10),
+                          border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(10)),
                         ),
                       ),
                     ),
@@ -653,7 +703,8 @@ $edit
                 const SizedBox(height: 8),
                 Text(
                   '与原版 GlobalTokenTracker 完全独立隔离，不会产生任何覆盖或冲突。',
-                  style: TextStyle(fontSize: 11, color: theme.colorScheme.outline),
+                  style:
+                      TextStyle(fontSize: 11, color: theme.colorScheme.outline),
                 ),
               ],
             ),
@@ -664,10 +715,12 @@ $edit
         // Options Card
         Card(
           elevation: 0,
-          color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.4),
+          color:
+              theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.4),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
-            side: BorderSide(color: theme.colorScheme.outlineVariant.withValues(alpha: 0.3)),
+            side: BorderSide(
+                color: theme.colorScheme.outlineVariant.withValues(alpha: 0.3)),
           ),
           child: Column(
             children: [
@@ -680,7 +733,8 @@ $edit
               ),
               CheckboxListTile(
                 value: _shortcutStartMenu,
-                onChanged: (v) => setState(() => _shortcutStartMenu = v ?? true),
+                onChanged: (v) =>
+                    setState(() => _shortcutStartMenu = v ?? true),
                 title: const Text('创建开始菜单快捷方式', style: TextStyle(fontSize: 13)),
                 dense: true,
                 visualDensity: VisualDensity.compact,
@@ -688,7 +742,8 @@ $edit
               CheckboxListTile(
                 value: _addToPath,
                 onChanged: (v) => setState(() => _addToPath = v ?? true),
-                title: const Text('添加到用户环境变量 PATH', style: TextStyle(fontSize: 13)),
+                title: const Text('添加到用户环境变量 PATH',
+                    style: TextStyle(fontSize: 13)),
                 dense: true,
                 visualDensity: VisualDensity.compact,
               ),
@@ -712,8 +767,10 @@ $edit
               icon: const Icon(Icons.download_done, size: 18),
               label: const Text('立即安装'),
               style: FilledButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12)),
               ),
             ),
           ],
@@ -731,8 +788,11 @@ $edit
           const CircularProgressIndicator(strokeWidth: 3),
           const SizedBox(height: 24),
           Text(
-            widget.isUninstall ? '正在卸载 GlobalTokenTracker++' : '正在安装 GlobalTokenTracker++',
-            style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+            widget.isUninstall
+                ? '正在卸载 GlobalTokenTracker++'
+                : '正在安装 GlobalTokenTracker++',
+            style: theme.textTheme.titleMedium
+                ?.copyWith(fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 12),
           Text(
@@ -768,12 +828,14 @@ $edit
               shape: BoxShape.circle,
               color: Colors.green.withValues(alpha: 0.15),
             ),
-            child: const Icon(Icons.check_circle, size: 64, color: Colors.green),
+            child:
+                const Icon(Icons.check_circle, size: 64, color: Colors.green),
           ),
           const SizedBox(height: 16),
           Text(
             widget.isUninstall ? '卸载完成' : '安装成功！',
-            style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold),
+            style: theme.textTheme.headlineSmall
+                ?.copyWith(fontWeight: FontWeight.bold),
           ),
           const SizedBox(height: 8),
           Text(
@@ -798,8 +860,10 @@ $edit
                   icon: const Icon(Icons.rocket_launch, size: 18),
                   label: const Text('立即启动'),
                   style: FilledButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 24, vertical: 12),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
                   ),
                 ),
               ],
@@ -818,9 +882,12 @@ $edit
         children: [
           const Icon(Icons.error_outline, size: 64, color: Colors.red),
           const SizedBox(height: 16),
-          Text('操作失败', style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
+          Text('操作失败',
+              style: theme.textTheme.titleLarge
+                  ?.copyWith(fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
-          Text(_errorMessage ?? '未知错误', style: const TextStyle(color: Colors.red, fontSize: 13)),
+          Text(_errorMessage ?? '未知错误',
+              style: const TextStyle(color: Colors.red, fontSize: 13)),
           const SizedBox(height: 24),
           OutlinedButton(
             onPressed: () => windowManager.close(),
@@ -836,7 +903,8 @@ $edit
       return _buildBody(theme);
     }
 
-    final localAppData = Platform.environment['LOCALAPPDATA'] ?? r'C:\Users\Default\AppData\Local';
+    final localAppData = Platform.environment['LOCALAPPDATA'] ??
+        r'C:\Users\Default\AppData\Local';
     final defaultDest = '$localAppData\\Programs\\GlobalTokenTrackerPP';
     // Show the directory that will actually be deleted, not a hardcoded
     // default — a custom-dir install must be confirmed against its real path.
@@ -854,16 +922,21 @@ $edit
                 color: theme.colorScheme.errorContainer.withValues(alpha: 0.5),
                 borderRadius: BorderRadius.circular(12),
               ),
-              child: Icon(Icons.delete_outline, size: 32, color: theme.colorScheme.error),
+              child: Icon(Icons.delete_outline,
+                  size: 32, color: theme.colorScheme.error),
             ),
             const SizedBox(width: 16),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('确认卸载 GlobalTokenTracker++？', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold)),
+                  Text('确认卸载 GlobalTokenTracker++？',
+                      style: theme.textTheme.titleMedium
+                          ?.copyWith(fontWeight: FontWeight.bold)),
                   const SizedBox(height: 4),
-                  Text('卸载将清理程序安装目录及快捷方式', style: TextStyle(color: theme.colorScheme.outline, fontSize: 13)),
+                  Text('卸载将清理程序安装目录及快捷方式',
+                      style: TextStyle(
+                          color: theme.colorScheme.outline, fontSize: 13)),
                 ],
               ),
             ),
@@ -872,8 +945,10 @@ $edit
         const SizedBox(height: 20),
         Card(
           elevation: 0,
-          color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          color:
+              theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.3),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
           child: Padding(
             padding: const EdgeInsets.all(16.0),
             child: Column(
@@ -881,36 +956,43 @@ $edit
               children: [
                 Text(
                   '将被移除的内容：',
-                  style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.bold),
+                  style: theme.textTheme.bodyMedium
+                      ?.copyWith(fontWeight: FontWeight.bold),
                 ),
                 const SizedBox(height: 8),
                 Text(
                   '• 目标目录：$shownDest',
-                  style: TextStyle(fontSize: 12, color: theme.colorScheme.onSurfaceVariant),
+                  style: TextStyle(
+                      fontSize: 12, color: theme.colorScheme.onSurfaceVariant),
                 ),
                 Text(
                   '• 桌面及开始菜单的全部快捷方式',
-                  style: TextStyle(fontSize: 12, color: theme.colorScheme.onSurfaceVariant),
+                  style: TextStyle(
+                      fontSize: 12, color: theme.colorScheme.onSurfaceVariant),
                 ),
                 Text(
                   '• Windows 注册表卸载条目',
-                  style: TextStyle(fontSize: 12, color: theme.colorScheme.onSurfaceVariant),
+                  style: TextStyle(
+                      fontSize: 12, color: theme.colorScheme.onSurfaceVariant),
                 ),
                 const SizedBox(height: 12),
                 Container(
                   padding: const EdgeInsets.all(10),
                   decoration: BoxDecoration(
-                    color: theme.colorScheme.primaryContainer.withValues(alpha: 0.3),
+                    color: theme.colorScheme.primaryContainer
+                        .withValues(alpha: 0.3),
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Row(
                     children: [
-                      Icon(Icons.shield_outlined, size: 18, color: theme.colorScheme.primary),
+                      Icon(Icons.shield_outlined,
+                          size: 18, color: theme.colorScheme.primary),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
                           '用户 SQLite 账本文件 (%USERPROFILE%\\.globaltokentracker) 将妥善保留，防止历史数据丢失。',
-                          style: TextStyle(fontSize: 11, color: theme.colorScheme.primary),
+                          style: TextStyle(
+                              fontSize: 11, color: theme.colorScheme.primary),
                         ),
                       ),
                     ],
