@@ -10,6 +10,7 @@ use anyhow::Result;
 use rayon::prelude::*;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, warn};
 
@@ -20,7 +21,10 @@ const SEGMENT_BUDGET: u64 = 256 << 20;
 
 pub struct Engine {
     pub store: Store,
-    pub prices: PriceBook,
+    /// Rebuilt from the ledger before every pass: price refreshes write through
+    /// a separate connection (the Flutter FFI refresh path), so a long-lived
+    /// engine would otherwise keep pricing new rows with its startup book.
+    prices: RwLock<PriceBook>,
     adapters: Vec<Box<dyn SourceAdapter>>,
 }
 
@@ -48,13 +52,14 @@ impl Engine {
         let prices = PriceBook::load(&store)?;
         Ok(Self {
             store,
-            prices,
+            prices: RwLock::new(prices),
             adapters: adapters::registry(),
         })
     }
 
     /// One full incremental pass over every enabled adapter.
     pub fn scan_once(&self) -> Result<ScanReport> {
+        self.reload_prices();
         let mut report = ScanReport::default();
         for adapter in &self.adapters {
             let r = self.scan_adapter(adapter.as_ref());
@@ -70,6 +75,7 @@ impl Engine {
     }
 
     pub fn scan_source(&self, id: &str) -> Result<ScanReport> {
+        self.reload_prices();
         let mut report = ScanReport::default();
         for adapter in &self.adapters {
             if adapter.id() == id {
@@ -78,6 +84,15 @@ impl Engine {
         }
         self.refresh_rollups(&report);
         Ok(report)
+    }
+
+    /// Re-read prices and overrides from the ledger. A failure keeps the
+    /// previous book: pricing with last-known prices beats failing the scan.
+    fn reload_prices(&self) {
+        match PriceBook::load(&self.store) {
+            Ok(book) => *self.prices.write().unwrap_or_else(|e| e.into_inner()) = book,
+            Err(e) => tracing::warn!("price book reload failed: {e}"),
+        }
     }
 
     /// Keep daily_rollups in sync — only when this pass ingested something.
@@ -220,7 +235,9 @@ impl Engine {
                         outcome.quotas,
                         &mut report,
                     ) {
-                        report.errors.push(format!("{}: {e:#}", item.path.display()));
+                        report
+                            .errors
+                            .push(format!("{}: {e:#}", item.path.display()));
                         continue; // watermark stays put; the batch is re-read
                     }
                     report.events_skipped += outcome.skipped;
@@ -333,7 +350,10 @@ impl Engine {
                 continue;
             }
             // Price + resolve pricing_model on the way in (idempotent).
-            self.prices.apply(&mut ev);
+            self.prices
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .apply(&mut ev);
             match self.store.upsert_event(&ev) {
                 Ok(true) => {
                     report.events_ingested += 1;
@@ -352,7 +372,10 @@ impl Engine {
                 // pass (replay is idempotent). Quota failures below are
                 // non-fatal — insert_quota dedups, so replaying them is safe.
                 Err(e) => {
-                    return Err(anyhow::anyhow!("{adapter_id} upsert {}: {e:#}", ev.dedup_key));
+                    return Err(anyhow::anyhow!(
+                        "{adapter_id} upsert {}: {e:#}",
+                        ev.dedup_key
+                    ));
                 }
             }
         }
@@ -457,4 +480,40 @@ fn eco_pool() -> &'static rayon::ThreadPool {
             .build()
             .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pricing::Resolution;
+    use crate::store::now_ms;
+
+    #[test]
+    fn reload_prices_sees_rows_written_after_engine_open() {
+        let store = Store::open_memory().unwrap();
+        let engine = Engine::new(store).unwrap();
+        let model = "gtt-reload-sentinel-model";
+        assert!(matches!(
+            engine.prices.read().unwrap().resolve(model, None, None),
+            Resolution::Unpriced
+        ));
+
+        engine
+            .store
+            .conn()
+            .execute(
+                "INSERT OR REPLACE INTO prices(provider, model_id, input, output, source, fetched_at)
+                 VALUES ('test', ?1, 1.0, 2.0, 'test', ?2)",
+                rusqlite::params![model, now_ms()],
+            )
+            .unwrap();
+        engine.reload_prices();
+
+        match engine.prices.read().unwrap().resolve(model, None, None) {
+            Resolution::Priced(_, _, price) => {
+                assert_eq!((price.input, price.output), (1.0, 2.0));
+            }
+            Resolution::Unpriced => panic!("reload did not see the new price"),
+        }
+    }
 }
