@@ -29,7 +29,7 @@ class _TokenRateDashboardState extends State<TokenRateDashboard>
     with SingleTickerProviderStateMixin {
   late TokenRateOverview _rates;
   String _selectedWindow = '1h'; // '1m' | '5m' | '15m' | '1h' | '24h'
-  bool _isLiveMonitoring = false;
+  bool _isLiveMonitoring = true;
   bool _isRefreshing = false;
   Timer? _pollingTimer;
 
@@ -49,6 +49,9 @@ class _TokenRateDashboardState extends State<TokenRateDashboard>
     _pulseAnimation = Tween<double>(begin: 0.4, end: 1.0).animate(
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
+
+    // Live polling is on by default, matching the rate page.
+    _startPolling();
   }
 
   @override
@@ -66,18 +69,24 @@ class _TokenRateDashboardState extends State<TokenRateDashboard>
     super.dispose();
   }
 
+  void _startPolling() {
+    _pollingTimer?.cancel();
+    // Poll every 3 seconds: run scan + refresh rates
+    _pollingTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      _refreshRates(silent: true);
+    });
+    _refreshRates(silent: true);
+  }
+
   void _toggleLiveMonitoring() {
     setState(() {
       _isLiveMonitoring = !_isLiveMonitoring;
     });
 
-    _pollingTimer?.cancel();
     if (_isLiveMonitoring) {
-      // Poll every 3 seconds: run scan + refresh rates
-      _pollingTimer = Timer.periodic(const Duration(seconds: 3), (_) {
-        _refreshRates(silent: true);
-      });
-      _refreshRates(silent: true);
+      _startPolling();
+    } else {
+      _pollingTimer?.cancel();
     }
   }
 
@@ -166,6 +175,50 @@ class _TokenRateDashboardState extends State<TokenRateDashboard>
       return '${(tps / 1000).toStringAsFixed(1)}k';
     }
     return tps.toStringAsFixed(1);
+  }
+
+  String _formatTtft(double? ms) {
+    if (ms == null) return '—';
+    if (ms >= 1000) {
+      final s = ms / 1000;
+      return '${s >= 10 ? s.toStringAsFixed(0) : s.toStringAsFixed(1)} s';
+    }
+    return '${ms.round()} ms';
+  }
+
+  /// `≈` prefix marks timing that includes timestamp-estimated spans.
+  String _formatTpsApprox(double? tps, {required bool estimated}) {
+    if (tps == null) return '—';
+    return '${estimated ? '≈' : ''}${_formatTps(tps)} tok/s';
+  }
+
+  /// Full speed breakdown for a model row tooltip — same figures the rate
+  /// page shows.
+  String _speedTooltip(ModelRateItem m) {
+    final lines = <String>[];
+    final estimated = m.speed.speedEstMs > 0;
+    if (m.speed.speedMs > 0) {
+      final total = (m.speed.speedIn + m.speed.speedOut) / m.speed.speedMs * 1000;
+      final input = m.speed.speedIn / m.speed.speedMs * 1000;
+      lines.add('总 ${_formatTpsApprox(total, estimated: estimated)}');
+      lines.add('输入 ${_formatTpsApprox(input, estimated: estimated)}');
+      lines.add('输出 ${_formatTpsApprox(m.outputTps, estimated: estimated)}');
+    }
+    if (m.speed.decodeMs > 0) {
+      lines.add('解码 ${_formatTps(m.decodeTps ?? 0)} tok/s');
+    }
+    if (m.speed.ttftEvents > 0) {
+      lines.add('预填 ${_formatTps(m.prefillTps ?? 0)} tok/s');
+      lines.add('平均 TTFT ${_formatTtft(m.avgTtftMs)}');
+    }
+    if (m.speed.speedMs > 0) {
+      final tail = estimated
+          ? ' · 估算 ${(m.speed.speedEstMs / m.speed.speedMs * 100).toStringAsFixed(0)}%'
+          : '';
+      lines.add(
+          '${m.speed.timedEvents} 次计时请求 · 有效 ${(m.speed.speedMs / 1000).toStringAsFixed(1)} 秒$tail');
+    }
+    return lines.isEmpty ? '暂无计时数据（速度统计需请求时长或首尾时间戳）' : lines.join('\n');
   }
 
   @override
@@ -343,18 +396,22 @@ class _TokenRateDashboardState extends State<TokenRateDashboard>
             ),
             const SizedBox(height: 16),
 
-            // 4 Rate KPI Cards
+            // Rate KPI Cards
             LayoutBuilder(builder: (context, constraints) {
               final cols = constraints.maxWidth > 900
-                  ? 4
+                  ? 3
                   : (constraints.maxWidth > 520 ? 2 : 1);
+              // Fixed height from content (this card is one notch more
+              // compact than the rate page's) — keeps cards from growing
+              // tall and empty on wide windows.
+              final cardWidth = (constraints.maxWidth - 12.0 * (cols - 1)) / cols;
               return GridView.count(
                 crossAxisCount: cols,
                 crossAxisSpacing: 12,
                 mainAxisSpacing: 12,
                 shrinkWrap: true,
                 physics: const NeverScrollableScrollPhysics(),
-                childAspectRatio: constraints.maxWidth > 900 ? 1.6 : 1.7,
+                childAspectRatio: cardWidth / 110,
                 children: [
                   // KPI 1: Overall Token Velocity
                   _buildKpiCard(
@@ -367,7 +424,28 @@ class _TokenRateDashboardState extends State<TokenRateDashboard>
                     icon: Icons.trending_up_rounded,
                     accentColor: const Color(0xFF1A73E8),
                   ),
-                  // KPI 2: Input / Output Split
+                  // KPI 2: Output speed (request-level, timed events only)
+                  _buildKpiCard(
+                    context,
+                    title: '输出速度',
+                    value: _formatTpsApprox(metric.outputTps,
+                        estimated: metric.speed.speedEstMs > 0),
+                    subtitle:
+                        '解码 ${metric.decodeTps != null ? '${_formatTps(metric.decodeTps!)} tok/s' : '—'} · ${metric.speed.timedEvents} 次请求',
+                    icon: Icons.speed_rounded,
+                    accentColor: const Color(0xFFEA4335),
+                  ),
+                  // KPI 3: Mean TTFT
+                  _buildKpiCard(
+                    context,
+                    title: '平均 TTFT',
+                    value: _formatTtft(metric.avgTtftMs),
+                    subtitle:
+                        '预填 ${metric.prefillTps != null ? '${_formatTps(metric.prefillTps!)} tok/s' : '—'} · ${metric.speed.ttftEvents} 次请求',
+                    icon: Icons.hourglass_top_rounded,
+                    accentColor: const Color(0xFF12B5CB),
+                  ),
+                  // KPI 4: Input / Output Split
                   _buildKpiCard(
                     context,
                     title: '输入 / 输出 速率分布',
@@ -378,7 +456,7 @@ class _TokenRateDashboardState extends State<TokenRateDashboard>
                     icon: Icons.sync_alt_rounded,
                     accentColor: const Color(0xFF8E24AA),
                   ),
-                  // KPI 3: Burn Rate (USD / hour)
+                  // KPI 5: Burn Rate (USD / hour)
                   _buildKpiCard(
                     context,
                     title: '预估费用增速',
@@ -387,7 +465,7 @@ class _TokenRateDashboardState extends State<TokenRateDashboard>
                     icon: Icons.local_fire_department_rounded,
                     accentColor: const Color(0xFF34A853),
                   ),
-                  // KPI 4: Concurrency & Peak Burst
+                  // KPI 6: Concurrency & Peak Burst
                   _buildKpiCard(
                     context,
                     title: '并发请求数与峰值',
@@ -671,105 +749,118 @@ class _TokenRateDashboardState extends State<TokenRateDashboard>
 
     return Column(
       children: models.map((m) {
-        return Container(
-          margin: const EdgeInsets.only(bottom: 8),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          decoration: BoxDecoration(
-            color: theme.colorScheme.surface,
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(
-              color: theme.colorScheme.outlineVariant.withValues(alpha: 0.25),
+        return Tooltip(
+          message: _speedTooltip(m),
+          waitDuration: const Duration(milliseconds: 400),
+          child: Container(
+            margin: const EdgeInsets.only(bottom: 8),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: theme.colorScheme.surface,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: theme.colorScheme.outlineVariant.withValues(alpha: 0.25),
+              ),
             ),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  // App badge
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: theme.colorScheme.primary.withValues(alpha: 0.1),
-                      borderRadius: BorderRadius.circular(4),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    // App badge
+                    Container(
+                      padding:
+                          const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.primary.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text(
+                        m.app,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: theme.colorScheme.primary,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
                     ),
-                    child: Text(
-                      m.app,
+                    const SizedBox(width: 8),
+                    // Model name
+                    Expanded(
+                      child: Text(
+                        m.model,
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          fontWeight: FontWeight.bold,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    // Rate
+                    Text(
+                      '${themeProvider.formatTokens(m.tokensPerMin.round())} /min',
                       style: TextStyle(
-                        fontSize: 11,
-                        color: theme.colorScheme.primary,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  // Model name
-                  Expanded(
-                    child: Text(
-                      m.model,
-                      style: theme.textTheme.bodyMedium?.copyWith(
                         fontWeight: FontWeight.bold,
+                        color: theme.colorScheme.primary,
                       ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
                     ),
-                  ),
-                  // Rate & TPS
+                  ],
+                ),
+                if (m.outputTps != null || m.avgTtftMs != null) ...[
+                  const SizedBox(height: 6),
                   Text(
-                    '${themeProvider.formatTokens(m.tokensPerMin.round())} /min',
-                    style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      color: theme.colorScheme.primary,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    '(${_formatTps(m.tokensPerSec)} TPS)',
+                    [
+                      if (m.outputTps != null)
+                        '输出 ${_formatTpsApprox(m.outputTps, estimated: m.speed.speedEstMs > 0)}',
+                      if (m.decodeTps != null)
+                        '解码 ${_formatTps(m.decodeTps!)} tok/s',
+                      if (m.avgTtftMs != null)
+                        'TTFT ${_formatTtft(m.avgTtftMs)}',
+                    ].join(' · '),
                     style: TextStyle(
                       fontSize: 11,
                       color: theme.colorScheme.outline,
                     ),
                   ),
                 ],
-              ),
-              const SizedBox(height: 6),
-              // Progress Bar + percentage & cost
-              Row(
-                children: [
-                  Expanded(
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(4),
-                      child: LinearProgressIndicator(
-                        value: (m.percentage / 100.0).clamp(0.0, 1.0),
-                        minHeight: 6,
-                        backgroundColor: theme
-                            .colorScheme.surfaceContainerHighest
-                            .withValues(alpha: 0.5),
-                        valueColor: AlwaysStoppedAnimation<Color>(
-                          theme.colorScheme.primary,
+                const SizedBox(height: 6),
+                // Progress Bar + percentage & cost
+                Row(
+                  children: [
+                    Expanded(
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(4),
+                        child: LinearProgressIndicator(
+                          value: (m.percentage / 100.0).clamp(0.0, 1.0),
+                          minHeight: 6,
+                          backgroundColor: theme
+                              .colorScheme.surfaceContainerHighest
+                              .withValues(alpha: 0.5),
+                          valueColor: AlwaysStoppedAnimation<Color>(
+                            theme.colorScheme.primary,
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                  const SizedBox(width: 12),
-                  Text(
-                    '${m.percentage.toStringAsFixed(1)}%',
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      fontWeight: FontWeight.w600,
+                    const SizedBox(width: 12),
+                    Text(
+                      '${m.percentage.toStringAsFixed(1)}%',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 12),
-                  Text(
-                    '\$${m.costUsd.toStringAsFixed(2)}',
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: const Color(0xFF34A853),
-                      fontWeight: FontWeight.w600,
+                    const SizedBox(width: 12),
+                    Text(
+                      '\$${m.costUsd.toStringAsFixed(2)}',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: const Color(0xFF34A853),
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
-                  ),
-                ],
-              ),
-            ],
+                  ],
+                ),
+              ],
+            ),
           ),
         );
       }).toList(),

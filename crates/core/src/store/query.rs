@@ -16,6 +16,8 @@ pub struct Totals {
     pub credits: f64,
     pub cost_usd: f64,
     pub active_ms: u64,
+    /// Request-level speed aggregates over the same scope (timed events only).
+    pub speed: SpeedSums,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -40,6 +42,124 @@ pub struct ShareRow {
     /// input+output+cache_read — same headline convention as `bucket_models`.
     pub tokens: u64,
     pub cost_usd: f64,
+}
+
+/// Request-level speed aggregates. Numerators and denominators stay separate
+/// so every rate is a weighted mean `Σtokens / Σms`, never an average of
+/// per-event ratios — and only events with usable timing participate:
+/// measured `duration_ms`, else the bounded `ts_end - ts_start` span
+/// (`speed_exprs` documents the exact rule).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct SpeedSums {
+    /// Input tokens on events carrying usable timing.
+    pub speed_in: u64,
+    /// Output tokens on events carrying usable timing.
+    pub speed_out: u64,
+    /// Effective timed milliseconds (measured `duration_ms`, else the bounded
+    /// `ts_end - ts_start` span).
+    pub speed_ms: u64,
+    /// The timestamp-estimated slice of `speed_ms`.
+    pub speed_est_ms: u64,
+    /// Events carrying usable timing.
+    pub timed_events: u64,
+    /// Input tokens on events reporting `ttft_ms` (prefill numerator).
+    pub prefill_in: u64,
+    /// Sum of `ttft_ms` on those events (prefill denominator).
+    pub ttft_ms: u64,
+    /// Events reporting `ttft_ms`.
+    pub ttft_events: u64,
+    /// Output tokens on events with both timing and `ttft_ms` — the
+    /// generation-only slice.
+    pub decode_out: u64,
+    /// `timed_ms - ttft_ms` summed on those events.
+    pub decode_ms: u64,
+}
+
+impl SpeedSums {
+    /// End-to-end output throughput in tokens/s over the timed span
+    /// (TTFT wait included) — the headline "output speed" figure.
+    pub fn output_tps(&self) -> Option<f64> {
+        (self.speed_ms > 0).then(|| self.speed_out as f64 / self.speed_ms as f64 * 1000.0)
+    }
+
+    /// Input throughput over the same timed span, in tokens/s.
+    pub fn input_tps(&self) -> Option<f64> {
+        (self.speed_ms > 0).then(|| self.speed_in as f64 / self.speed_ms as f64 * 1000.0)
+    }
+
+    /// Prefill rate — input tokens per TTFT second, over events reporting
+    /// `ttft_ms`. `None` when no event carries it.
+    pub fn prefill_tps(&self) -> Option<f64> {
+        (self.ttft_ms > 0).then(|| self.prefill_in as f64 / self.ttft_ms as f64 * 1000.0)
+    }
+
+    /// Generation-only rate — output tokens per (timed − TTFT) second.
+    pub fn decode_tps(&self) -> Option<f64> {
+        (self.decode_ms > 0).then(|| self.decode_out as f64 / self.decode_ms as f64 * 1000.0)
+    }
+
+    /// Mean time-to-first-token in ms over events reporting `ttft_ms`.
+    pub fn avg_ttft_ms(&self) -> Option<f64> {
+        (self.ttft_events > 0).then(|| self.ttft_ms as f64 / self.ttft_events as f64)
+    }
+
+    /// Share of the timed span that was timestamp-estimated (0.0–1.0).
+    pub fn est_ratio(&self) -> f64 {
+        if self.speed_ms == 0 {
+            0.0
+        } else {
+            self.speed_est_ms as f64 / self.speed_ms as f64
+        }
+    }
+}
+
+/// The ten speed aggregates (in `SpeedSums` field order) a speed-aware query
+/// appends. Effective timing per event: `duration_ms` when measured, else
+/// `ts_end - ts_start` when in `(0, MAX_DERIVED_DURATION_MS]` — longer gaps
+/// span idle time between sessions, so the event stays untimed and out of
+/// every speed figure.
+fn speed_exprs() -> String {
+    let max = crate::normalize::MAX_DERIVED_DURATION_MS;
+    let timed =
+        format!("(duration_ms > 0 OR (ts_end - ts_start > 0 AND ts_end - ts_start <= {max}))");
+    let est = format!(
+        "((duration_ms IS NULL OR duration_ms <= 0) \
+         AND ts_end - ts_start > 0 AND ts_end - ts_start <= {max})"
+    );
+    let eff = format!(
+        "(CASE WHEN duration_ms > 0 THEN duration_ms \
+         WHEN ts_end - ts_start > 0 AND ts_end - ts_start <= {max} THEN ts_end - ts_start \
+         ELSE 0 END)"
+    );
+    format!(
+        "COALESCE(SUM(CASE WHEN {timed} THEN input_tokens ELSE 0 END),0), \
+         COALESCE(SUM(CASE WHEN {timed} THEN output_tokens ELSE 0 END),0), \
+         COALESCE(SUM({eff}),0), \
+         COALESCE(SUM(CASE WHEN {est} THEN ts_end - ts_start ELSE 0 END),0), \
+         COALESCE(SUM(CASE WHEN {timed} THEN 1 ELSE 0 END),0), \
+         COALESCE(SUM(CASE WHEN ttft_ms > 0 THEN input_tokens ELSE 0 END),0), \
+         COALESCE(SUM(CASE WHEN ttft_ms > 0 THEN ttft_ms ELSE 0 END),0), \
+         COALESCE(SUM(CASE WHEN ttft_ms > 0 THEN 1 ELSE 0 END),0), \
+         COALESCE(SUM(CASE WHEN ttft_ms > 0 AND {eff} > ttft_ms THEN output_tokens ELSE 0 END),0), \
+         COALESCE(SUM(CASE WHEN ttft_ms > 0 AND {eff} > ttft_ms THEN {eff} - ttft_ms ELSE 0 END),0)"
+    )
+}
+
+/// Map the ten `speed_exprs` columns starting at `offset` into a `SpeedSums`.
+fn speed_from_row(r: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<SpeedSums> {
+    let n = |i: usize| r.get::<_, i64>(offset + i).map(|v| v as u64);
+    Ok(SpeedSums {
+        speed_in: n(0)?,
+        speed_out: n(1)?,
+        speed_ms: n(2)?,
+        speed_est_ms: n(3)?,
+        timed_events: n(4)?,
+        prefill_in: n(5)?,
+        ttft_ms: n(6)?,
+        ttft_events: n(7)?,
+        decode_out: n(8)?,
+        decode_ms: n(9)?,
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -246,6 +366,16 @@ pub struct RateMetric {
     pub output_tokens_per_min: f64,
     pub cost_per_hour: f64,
     pub requests_per_min: f64,
+    /// Request-level speed aggregates for the window (timed events only).
+    pub speed: SpeedSums,
+    /// End-to-end output throughput in tokens/s — `None` when nothing timed.
+    pub output_tps: Option<f64>,
+    /// Generation-only throughput in tokens/s — `None` without TTFT data.
+    pub decode_tps: Option<f64>,
+    /// Prefill (input per TTFT second) in tokens/s — `None` without TTFT.
+    pub prefill_tps: Option<f64>,
+    /// Mean time-to-first-token in ms — `None` without TTFT data.
+    pub avg_ttft_ms: Option<f64>,
 }
 
 impl RateMetric {
@@ -279,6 +409,11 @@ impl RateMetric {
             output_tokens_per_min: t.output_tokens as f64 / mins,
             cost_per_hour: t.cost_usd / hours,
             requests_per_min: t.events as f64 / mins,
+            speed: t.speed.clone(),
+            output_tps: t.speed.output_tps(),
+            decode_tps: t.speed.decode_tps(),
+            prefill_tps: t.speed.prefill_tps(),
+            avg_ttft_ms: t.speed.avg_ttft_ms(),
         }
     }
 }
@@ -294,6 +429,16 @@ pub struct ModelRateItem {
     pub tokens_per_sec: f64,
     pub cost_usd: f64,
     pub percentage: f64,
+    /// Request-level speed aggregates for this model/app in the window.
+    pub speed: SpeedSums,
+    /// End-to-end output throughput in tokens/s — `None` when nothing timed.
+    pub output_tps: Option<f64>,
+    /// Generation-only throughput in tokens/s — `None` without TTFT data.
+    pub decode_tps: Option<f64>,
+    /// Prefill (input per TTFT second) in tokens/s — `None` without TTFT.
+    pub prefill_tps: Option<f64>,
+    /// Mean time-to-first-token in ms — `None` without TTFT data.
+    pub avg_ttft_ms: Option<f64>,
 }
 
 /// One bucket in the rate timeline chart (e.g. 1 minute slice over past hour).
@@ -351,6 +496,7 @@ impl super::Store {
         models: Option<&[String]>,
     ) -> Result<Totals> {
         let (w, p) = scope_where(from_ms, to_ms, apps, models);
+        let speed = speed_exprs();
         self.conn()
             .query_row(
                 &format!(
@@ -358,7 +504,7 @@ impl super::Store {
                         COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cache_read_tokens),0),
                         COALESCE(SUM(cache_write_5m_tokens+cache_write_1h_tokens),0),
                         COALESCE(SUM(credits),0), COALESCE(SUM(cost_usd),0),
-                        COALESCE(SUM(active_ms),0)
+                        COALESCE(SUM(active_ms),0), {speed}
                  FROM usage_events {w}"
             ),
                 rusqlite::params_from_iter(p.iter()),
@@ -373,6 +519,7 @@ impl super::Store {
                         credits: r.get(6)?,
                         cost_usd: r.get(7)?,
                         active_ms: r.get::<_, i64>(8)? as u64,
+                        speed: speed_from_row(r, 9)?,
                     })
                 },
             )
@@ -685,6 +832,7 @@ impl super::Store {
                         credits: r.get(6)?,
                         cost_usd: r.get(7)?,
                         active_ms: r.get::<_, i64>(8)? as u64,
+                        speed: SpeedSums::default(),
                     })
                 },
             )
@@ -1232,6 +1380,7 @@ impl super::Store {
                     credits: 0.0,
                     cost_usd: r.get(7)?,
                     active_ms: 0,
+                    speed: SpeedSums::default(),
                 },
             ))
         })?;
@@ -1311,6 +1460,7 @@ impl super::Store {
                     credits: 0.0,
                     cost_usd: r.get(7)?,
                     active_ms: 0,
+                    speed: SpeedSums::default(),
                 };
                 Ok(RateMetric::from_totals("1m_peak_24h", start, end, &tot))
             })
@@ -1322,10 +1472,12 @@ impl super::Store {
 
         // 5. Top Models in past 1 hour (sorted by tokens)
         let total_tokens_1h = h1.total_tokens as f64;
+        let speed = speed_exprs();
         let mut st_models = self.conn().prepare(&format!(
             "SELECT {MODEL_EXPR}, app, COUNT(*),
                     COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens), 0) AS total_tok,
-                    COALESCE(SUM(cost_usd), 0)
+                    COALESCE(SUM(cost_usd), 0),
+                    {speed}
              FROM usage_events
              {w_1h}
              GROUP BY 1, 2
@@ -1339,6 +1491,7 @@ impl super::Store {
                 let events = r.get::<_, i64>(2)? as u64;
                 let total_tokens = r.get::<_, i64>(3)? as u64;
                 let cost_usd: f64 = r.get(4)?;
+                let speed = speed_from_row(r, 5)?;
                 let tokens_per_min = total_tokens as f64 / 60.0;
                 let tokens_per_sec = total_tokens as f64 / 3600.0;
                 let percentage = if total_tokens_1h > 0.0 {
@@ -1355,6 +1508,11 @@ impl super::Store {
                     tokens_per_sec,
                     cost_usd,
                     percentage,
+                    output_tps: speed.output_tps(),
+                    decode_tps: speed.decode_tps(),
+                    prefill_tps: speed.prefill_tps(),
+                    avg_ttft_ms: speed.avg_ttft_ms(),
+                    speed,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -1363,7 +1521,8 @@ impl super::Store {
         let mut st_apps = self.conn().prepare(&format!(
             "SELECT app, COUNT(*),
                     COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens), 0) AS total_tok,
-                    COALESCE(SUM(cost_usd), 0)
+                    COALESCE(SUM(cost_usd), 0),
+                    {speed}
              FROM usage_events
              {w_1h}
              GROUP BY app
@@ -1376,6 +1535,7 @@ impl super::Store {
                 let events = r.get::<_, i64>(1)? as u64;
                 let total_tokens = r.get::<_, i64>(2)? as u64;
                 let cost_usd: f64 = r.get(3)?;
+                let speed = speed_from_row(r, 4)?;
                 let tokens_per_min = total_tokens as f64 / 60.0;
                 let tokens_per_sec = total_tokens as f64 / 3600.0;
                 let percentage = if total_tokens_1h > 0.0 {
@@ -1392,6 +1552,11 @@ impl super::Store {
                     tokens_per_sec,
                     cost_usd,
                     percentage,
+                    output_tps: speed.output_tps(),
+                    decode_tps: speed.decode_tps(),
+                    prefill_tps: speed.prefill_tps(),
+                    avg_ttft_ms: speed.avg_ttft_ms(),
+                    speed,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;

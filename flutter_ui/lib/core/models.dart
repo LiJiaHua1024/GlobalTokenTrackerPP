@@ -290,6 +290,50 @@ class OverviewData {
   }
 }
 
+/// Request-level speed aggregates (timed events only) — every rate is a
+/// weighted Σtokens / Σms over the scope, computed on the Rust side.
+class SpeedSums {
+  final int speedIn;
+  final int speedOut;
+  final int speedMs;
+  final int speedEstMs;
+  final int timedEvents;
+  final int prefillIn;
+  final int ttftMs;
+  final int ttftEvents;
+  final int decodeOut;
+  final int decodeMs;
+
+  SpeedSums({
+    required this.speedIn,
+    required this.speedOut,
+    required this.speedMs,
+    required this.speedEstMs,
+    required this.timedEvents,
+    required this.prefillIn,
+    required this.ttftMs,
+    required this.ttftEvents,
+    required this.decodeOut,
+    required this.decodeMs,
+  });
+
+  factory SpeedSums.fromJson(Map<String, dynamic> json) {
+    int i(String k) => (json[k] as num?)?.toInt() ?? 0;
+    return SpeedSums(
+      speedIn: i('speed_in'),
+      speedOut: i('speed_out'),
+      speedMs: i('speed_ms'),
+      speedEstMs: i('speed_est_ms'),
+      timedEvents: i('timed_events'),
+      prefillIn: i('prefill_in'),
+      ttftMs: i('ttft_ms'),
+      ttftEvents: i('ttft_events'),
+      decodeOut: i('decode_out'),
+      decodeMs: i('decode_ms'),
+    );
+  }
+}
+
 class RateMetric {
   final String window;
   final int windowSecs;
@@ -309,6 +353,11 @@ class RateMetric {
   final double outputTokensPerMin;
   final double costPerHour;
   final double requestsPerMin;
+  final SpeedSums speed;
+  final double? outputTps;
+  final double? decodeTps;
+  final double? prefillTps;
+  final double? avgTtftMs;
 
   RateMetric({
     required this.window,
@@ -329,6 +378,11 @@ class RateMetric {
     required this.outputTokensPerMin,
     required this.costPerHour,
     required this.requestsPerMin,
+    required this.speed,
+    this.outputTps,
+    this.decodeTps,
+    this.prefillTps,
+    this.avgTtftMs,
   });
 
   factory RateMetric.fromJson(Map<String, dynamic> json) {
@@ -351,6 +405,11 @@ class RateMetric {
       outputTokensPerMin: (json['output_tokens_per_min'] as num?)?.toDouble() ?? 0.0,
       costPerHour: (json['cost_per_hour'] as num?)?.toDouble() ?? 0.0,
       requestsPerMin: (json['requests_per_min'] as num?)?.toDouble() ?? 0.0,
+      speed: SpeedSums.fromJson(json['speed'] as Map<String, dynamic>? ?? {}),
+      outputTps: (json['output_tps'] as num?)?.toDouble(),
+      decodeTps: (json['decode_tps'] as num?)?.toDouble(),
+      prefillTps: (json['prefill_tps'] as num?)?.toDouble(),
+      avgTtftMs: (json['avg_ttft_ms'] as num?)?.toDouble(),
     );
   }
 }
@@ -364,6 +423,11 @@ class ModelRateItem {
   final double tokensPerSec;
   final double costUsd;
   final double percentage;
+  final SpeedSums speed;
+  final double? outputTps;
+  final double? decodeTps;
+  final double? prefillTps;
+  final double? avgTtftMs;
 
   ModelRateItem({
     required this.model,
@@ -374,6 +438,11 @@ class ModelRateItem {
     required this.tokensPerSec,
     required this.costUsd,
     required this.percentage,
+    required this.speed,
+    this.outputTps,
+    this.decodeTps,
+    this.prefillTps,
+    this.avgTtftMs,
   });
 
   factory ModelRateItem.fromJson(Map<String, dynamic> json) {
@@ -386,6 +455,11 @@ class ModelRateItem {
       tokensPerSec: (json['tokens_per_sec'] as num?)?.toDouble() ?? 0.0,
       costUsd: (json['cost_usd'] as num?)?.toDouble() ?? 0.0,
       percentage: (json['percentage'] as num?)?.toDouble() ?? 0.0,
+      speed: SpeedSums.fromJson(json['speed'] as Map<String, dynamic>? ?? {}),
+      outputTps: (json['output_tps'] as num?)?.toDouble(),
+      decodeTps: (json['decode_tps'] as num?)?.toDouble(),
+      prefillTps: (json['prefill_tps'] as num?)?.toDouble(),
+      avgTtftMs: (json['avg_ttft_ms'] as num?)?.toDouble(),
     );
   }
 }

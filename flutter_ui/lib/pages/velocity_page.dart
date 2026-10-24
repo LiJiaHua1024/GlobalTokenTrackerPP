@@ -36,7 +36,7 @@ class _VelocityPageState extends State<VelocityPage>
   final List<String> _selectedModels = [];
 
   String _selectedWindow = '1h'; // '1m' | '5m' | '15m' | '1h' | '24h'
-  bool _isLiveMonitoring = false;
+  bool _isLiveMonitoring = true;
   Timer? _pollingTimer;
 
   late final AnimationController _pulseController;
@@ -62,6 +62,10 @@ class _VelocityPageState extends State<VelocityPage>
     } else {
       _loadInitialData();
     }
+
+    // Live polling is on by default — the rate page is meant to watch
+    // activity as it happens.
+    _startPolling();
   }
 
   @override
@@ -105,17 +109,23 @@ class _VelocityPageState extends State<VelocityPage>
     }
   }
 
+  void _startPolling() {
+    _pollingTimer?.cancel();
+    _pollingTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      _refreshRates(silent: true);
+    });
+    _refreshRates(silent: true);
+  }
+
   void _toggleLiveMonitoring() {
     setState(() {
       _isLiveMonitoring = !_isLiveMonitoring;
     });
 
-    _pollingTimer?.cancel();
     if (_isLiveMonitoring) {
-      _pollingTimer = Timer.periodic(const Duration(seconds: 3), (_) {
-        _refreshRates(silent: true);
-      });
-      _refreshRates(silent: true);
+      _startPolling();
+    } else {
+      _pollingTimer?.cancel();
     }
   }
 
@@ -181,6 +191,7 @@ class _VelocityPageState extends State<VelocityPage>
         outputTokensPerMin: 0,
         costPerHour: 0,
         requestsPerMin: 0,
+        speed: SpeedSums.fromJson(const {}),
       );
     }
     switch (_selectedWindow) {
@@ -229,6 +240,51 @@ class _VelocityPageState extends State<VelocityPage>
       return '${(tps / 1000).toStringAsFixed(1)}k';
     }
     return tps.toStringAsFixed(1);
+  }
+
+  String _formatTtft(double? ms) {
+    if (ms == null) return '—';
+    if (ms >= 1000) {
+      final s = ms / 1000;
+      return '${s >= 10 ? s.toStringAsFixed(0) : s.toStringAsFixed(1)} s';
+    }
+    return '${ms.round()} ms';
+  }
+
+  /// `≈` prefix marks timing that includes timestamp-estimated spans.
+  String _formatTpsApprox(double? tps, {required bool estimated}) {
+    if (tps == null) return '—';
+    return '${estimated ? '≈' : ''}${_formatTps(tps)} tok/s';
+  }
+
+  /// Full speed breakdown for a model/app row tooltip: total / input /
+  /// output over the timed span, prefill (input/TTFT), decode
+  /// (output/(timed−TTFT)), mean TTFT and how much timing was estimated.
+  String _speedTooltip(ModelRateItem m) {
+    final lines = <String>[];
+    final estimated = m.speed.speedEstMs > 0;
+    if (m.speed.speedMs > 0) {
+      final total = (m.speed.speedIn + m.speed.speedOut) / m.speed.speedMs * 1000;
+      final input = m.speed.speedIn / m.speed.speedMs * 1000;
+      lines.add('总 ${_formatTpsApprox(total, estimated: estimated)}');
+      lines.add('输入 ${_formatTpsApprox(input, estimated: estimated)}');
+      lines.add('输出 ${_formatTpsApprox(m.outputTps, estimated: estimated)}');
+    }
+    if (m.speed.decodeMs > 0) {
+      lines.add('解码 ${_formatTps(m.decodeTps ?? 0)} tok/s');
+    }
+    if (m.speed.ttftEvents > 0) {
+      lines.add('预填 ${_formatTps(m.prefillTps ?? 0)} tok/s');
+      lines.add('平均 TTFT ${_formatTtft(m.avgTtftMs)}');
+    }
+    if (m.speed.speedMs > 0) {
+      final tail = estimated
+          ? ' · 估算 ${(m.speed.speedEstMs / m.speed.speedMs * 100).toStringAsFixed(0)}%'
+          : '';
+      lines.add(
+          '${m.speed.timedEvents} 次计时请求 · 有效 ${(m.speed.speedMs / 1000).toStringAsFixed(1)} 秒$tail');
+    }
+    return lines.isEmpty ? '暂无计时数据（速度统计需请求时长或首尾时间戳）' : lines.join('\n');
   }
 
   @override
@@ -555,14 +611,18 @@ class _VelocityPageState extends State<VelocityPage>
   ) {
     return LayoutBuilder(builder: (context, constraints) {
       final cols =
-          constraints.maxWidth > 950 ? 4 : (constraints.maxWidth > 550 ? 2 : 1);
+          constraints.maxWidth > 950 ? 3 : (constraints.maxWidth > 550 ? 2 : 1);
+      // Fixed card height derived from content (title row + value + subtitle
+      // + padding) — an aspect ratio alone would grow the card on wide
+      // windows and leave it mostly empty.
+      final cardWidth = (constraints.maxWidth - 14.0 * (cols - 1)) / cols;
       return GridView.count(
         crossAxisCount: cols,
         crossAxisSpacing: 14,
         mainAxisSpacing: 14,
         shrinkWrap: true,
         physics: const NeverScrollableScrollPhysics(),
-        childAspectRatio: constraints.maxWidth > 950 ? 1.55 : 1.7,
+        childAspectRatio: cardWidth / 122,
         children: [
           // 1. Overall Velocity
           _buildKpiCard(
@@ -575,7 +635,28 @@ class _VelocityPageState extends State<VelocityPage>
             icon: Icons.trending_up_rounded,
             color: const Color(0xFF1A73E8),
           ),
-          // 2. Input / Output Split
+          // 2. Output speed (request-level, timed events only)
+          _buildKpiCard(
+            context,
+            title: '输出速度',
+            value: _formatTpsApprox(metric.outputTps,
+                estimated: metric.speed.speedEstMs > 0),
+            subtitle:
+                '解码 ${metric.decodeTps != null ? '${_formatTps(metric.decodeTps!)} tok/s' : '—'} · ${metric.speed.timedEvents} 次请求',
+            icon: Icons.speed_rounded,
+            color: const Color(0xFFEA4335),
+          ),
+          // 3. Mean TTFT
+          _buildKpiCard(
+            context,
+            title: '平均 TTFT',
+            value: _formatTtft(metric.avgTtftMs),
+            subtitle:
+                '预填 ${metric.prefillTps != null ? '${_formatTps(metric.prefillTps!)} tok/s' : '—'} · ${metric.speed.ttftEvents} 次请求',
+            icon: Icons.hourglass_top_rounded,
+            color: const Color(0xFF12B5CB),
+          ),
+          // 4. Input / Output Split
           _buildKpiCard(
             context,
             title: '输入 / 输出 速率分布',
@@ -586,7 +667,7 @@ class _VelocityPageState extends State<VelocityPage>
             icon: Icons.sync_alt_rounded,
             color: const Color(0xFF8E24AA),
           ),
-          // 3. Burn Rate (USD / hour)
+          // 5. Burn Rate (USD / hour)
           _buildKpiCard(
             context,
             title: '预估费用增速',
@@ -595,7 +676,7 @@ class _VelocityPageState extends State<VelocityPage>
             icon: Icons.local_fire_department_rounded,
             color: const Color(0xFF34A853),
           ),
-          // 4. Concurrency & Burst Peak
+          // 6. Concurrency & Burst Peak
           _buildKpiCard(
             context,
             title: '并发请求数与峰值',
@@ -924,104 +1005,117 @@ class _VelocityPageState extends State<VelocityPage>
               )
             else
               ...models.map((m) {
-                return Container(
-                  margin: const EdgeInsets.only(bottom: 10),
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: theme.colorScheme.surfaceContainerHighest
-                        .withValues(alpha: 0.25),
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(
-                      color: theme.colorScheme.outlineVariant
-                          .withValues(alpha: 0.2),
+                return Tooltip(
+                  message: _speedTooltip(m),
+                  waitDuration: const Duration(milliseconds: 400),
+                  child: Container(
+                    margin: const EdgeInsets.only(bottom: 10),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.surfaceContainerHighest
+                          .withValues(alpha: 0.25),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color: theme.colorScheme.outlineVariant
+                            .withValues(alpha: 0.2),
+                      ),
                     ),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 6, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: theme.colorScheme.primary
-                                  .withValues(alpha: 0.12),
-                              borderRadius: BorderRadius.circular(4),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: theme.colorScheme.primary
+                                    .withValues(alpha: 0.12),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(
+                                m.app,
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: theme.colorScheme.primary,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
                             ),
-                            child: Text(
-                              m.app,
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                m.model,
+                                style: theme.textTheme.bodyMedium?.copyWith(
+                                  fontWeight: FontWeight.bold,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            Text(
+                              '${themeProvider.formatTokens(m.tokensPerMin.round())} /min',
                               style: TextStyle(
-                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
                                 color: theme.colorScheme.primary,
-                                fontWeight: FontWeight.bold,
                               ),
                             ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              m.model,
-                              style: theme.textTheme.bodyMedium?.copyWith(
-                                fontWeight: FontWeight.bold,
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
+                          ],
+                        ),
+                        if (m.outputTps != null || m.avgTtftMs != null) ...[
+                          const SizedBox(height: 6),
                           Text(
-                            '${themeProvider.formatTokens(m.tokensPerMin.round())} /min',
-                            style: TextStyle(
-                              fontWeight: FontWeight.bold,
-                              color: theme.colorScheme.primary,
-                            ),
-                          ),
-                          const SizedBox(width: 6),
-                          Text(
-                            '(${_formatTps(m.tokensPerSec)} TPS)',
+                            [
+                              if (m.outputTps != null)
+                                '输出 ${_formatTpsApprox(m.outputTps, estimated: m.speed.speedEstMs > 0)}',
+                              if (m.decodeTps != null)
+                                '解码 ${_formatTps(m.decodeTps!)} tok/s',
+                              if (m.avgTtftMs != null)
+                                'TTFT ${_formatTtft(m.avgTtftMs)}',
+                            ].join(' · '),
                             style: TextStyle(
                               fontSize: 11,
                               color: theme.colorScheme.outline,
                             ),
                           ),
                         ],
-                      ),
-                      const SizedBox(height: 8),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: ClipRRect(
-                              borderRadius: BorderRadius.circular(4),
-                              child: LinearProgressIndicator(
-                                value: (m.percentage / 100.0).clamp(0.0, 1.0),
-                                minHeight: 6,
-                                backgroundColor: theme
-                                    .colorScheme.outlineVariant
-                                    .withValues(alpha: 0.2),
-                                valueColor: AlwaysStoppedAnimation<Color>(
-                                  theme.colorScheme.primary,
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(4),
+                                child: LinearProgressIndicator(
+                                  value: (m.percentage / 100.0).clamp(0.0, 1.0),
+                                  minHeight: 6,
+                                  backgroundColor: theme
+                                      .colorScheme.outlineVariant
+                                      .withValues(alpha: 0.2),
+                                  valueColor: AlwaysStoppedAnimation<Color>(
+                                    theme.colorScheme.primary,
+                                  ),
                                 ),
                               ),
                             ),
-                          ),
-                          const SizedBox(width: 12),
-                          Text(
-                            '${m.percentage.toStringAsFixed(1)}%',
-                            style: const TextStyle(
-                                fontWeight: FontWeight.w600, fontSize: 12),
-                          ),
-                          const SizedBox(width: 12),
-                          Text(
-                            '\$${m.costUsd.toStringAsFixed(2)}',
-                            style: const TextStyle(
-                              color: Color(0xFF34A853),
-                              fontWeight: FontWeight.bold,
-                              fontSize: 12,
+                            const SizedBox(width: 12),
+                            Text(
+                              '${m.percentage.toStringAsFixed(1)}%',
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.w600, fontSize: 12),
                             ),
-                          ),
-                        ],
-                      ),
-                    ],
+                            const SizedBox(width: 12),
+                            Text(
+                              '\$${m.costUsd.toStringAsFixed(2)}',
+                              style: const TextStyle(
+                                color: Color(0xFF34A853),
+                                fontWeight: FontWeight.bold,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
                   ),
                 );
               }),

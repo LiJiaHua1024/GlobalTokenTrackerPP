@@ -11,7 +11,7 @@ pub use cursor::{CursorAction, FileCursor, tail_fingerprint};
 pub use query::{
     ActivityDay, AppSummary, ArchiveReport, DailyRow, EventRow, ModelRateItem, MODEL_EXPR,
     PriceQuote, PriceRow, QuotaRow, RateMetric, RateTimeSeriesBucket, ShareRow, SourceHealth,
-    TokenRateOverview, Totals, filter_prices,
+    SpeedSums, TokenRateOverview, Totals, filter_prices,
 };
 
 const SCHEMA: &str = include_str!("schema.sql");
@@ -1543,6 +1543,8 @@ mod tests {
         assert_eq!(overview.top_models_1h.len(), 0);
         assert_eq!(overview.top_apps_1h.len(), 0);
         assert_eq!(overview.peak_1m_in_1h.total_tokens, 0);
+        assert_eq!(overview.m1.output_tps, None);
+        assert_eq!(overview.m1.avg_ttft_ms, None);
     }
 
     #[test]
@@ -1607,5 +1609,75 @@ mod tests {
         assert_eq!(overview.top_models_1h[0].total_tokens, 18_000);
         let pct = overview.top_models_1h[0].percentage;
         assert!((pct - (18_000.0 / 22_000.0 * 100.0)).abs() < 0.1);
+    }
+
+    #[test]
+    fn token_rate_overview_speed_and_ttft() {
+        let s = Store::open_memory().unwrap();
+        let anchor = 1_700_000_000_000i64;
+
+        // Event A: measured duration + TTFT — feeds every speed figure.
+        let mut a = ev("s1", 300, Some(0.02));
+        a.model = Some("glm-4.7".into());
+        a.input_tokens = 2_000;
+        a.ts_start = Some(anchor - 30_000);
+        a.duration_ms = Some(4_000);
+        a.ttft_ms = Some(1_000);
+        s.upsert_event(&a).unwrap();
+
+        // Event B: no duration, but a bounded ts_end−ts_start span — timed,
+        // yet flagged timestamp-estimated. No TTFT.
+        let mut b = ev("s2", 100, Some(0.01));
+        b.model = Some("glm-4.7".into());
+        b.input_tokens = 500;
+        b.ts_start = Some(anchor - 60_000);
+        b.ts_end = Some(anchor - 58_000);
+        s.upsert_event(&b).unwrap();
+
+        // Event C: untimed — must stay out of every speed figure.
+        let mut c = ev("s3", 99_999, Some(0.01));
+        c.model = Some("untimed-model".into());
+        c.input_tokens = 99_999;
+        c.ts_start = Some(anchor - 10_000);
+        s.upsert_event(&c).unwrap();
+
+        let o = s.token_rate_overview(Some(anchor), None, None).unwrap();
+
+        // Weighted over the two timed events: Σout 400 over Σeff 6,000 ms.
+        assert_eq!(o.h1.speed.timed_events, 2);
+        assert_eq!(o.h1.speed.speed_out, 400);
+        assert_eq!(o.h1.speed.speed_in, 2_500);
+        assert_eq!(o.h1.speed.speed_ms, 6_000);
+        assert_eq!(o.h1.speed.speed_est_ms, 2_000);
+        assert!((o.h1.output_tps.unwrap() - 400.0 / 6.0).abs() < 1e-9);
+        assert!((o.h1.speed.est_ratio() - 1.0 / 3.0).abs() < 1e-9);
+
+        // TTFT figures come from event A alone: prefill 2,000 tok / 1 s,
+        // decode 300 tok / (4,000 − 1,000) ms, mean TTFT 1,000 ms.
+        assert_eq!(o.h1.speed.ttft_events, 1);
+        assert_eq!(o.h1.speed.ttft_ms, 1_000);
+        assert!((o.h1.prefill_tps.unwrap() - 2_000.0).abs() < 1e-9);
+        assert!((o.h1.decode_tps.unwrap() - 100.0).abs() < 1e-9);
+        assert!((o.h1.avg_ttft_ms.unwrap() - 1_000.0).abs() < 1e-9);
+
+        // The untimed event still counts toward wall-clock totals but never
+        // toward speed.
+        assert_eq!(o.h1.events, 3);
+        assert_eq!(o.h1.speed.timed_events, 2);
+
+        // Per-model rows carry the same aggregates.
+        let glm = o.top_models_1h.iter().find(|m| m.model == "glm-4.7").unwrap();
+        assert_eq!(glm.speed.speed_ms, 6_000);
+        assert_eq!(glm.speed.timed_events, 2);
+        assert!((glm.output_tps.unwrap() - 400.0 / 6.0).abs() < 1e-9);
+        assert!((glm.avg_ttft_ms.unwrap() - 1_000.0).abs() < 1e-9);
+        let untimed = o
+            .top_models_1h
+            .iter()
+            .find(|m| m.model == "untimed-model")
+            .unwrap();
+        assert_eq!(untimed.speed.timed_events, 0);
+        assert_eq!(untimed.output_tps, None);
+        assert_eq!(untimed.avg_ttft_ms, None);
     }
 }
