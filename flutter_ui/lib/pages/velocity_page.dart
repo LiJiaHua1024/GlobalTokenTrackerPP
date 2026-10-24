@@ -32,10 +32,12 @@ class _VelocityPageState extends State<VelocityPage>
   TokenRateOverview? _rates;
   List<String> _availableApps = [];
   List<String> _availableModels = [];
-  final List<String> _selectedApps = [];
-  final List<String> _selectedModels = [];
+  // MainShell's page transition disposes the page tree on every tab switch,
+  // so user-picked window/filters live on the class to survive rebuilds.
+  static final List<String> _selectedApps = [];
+  static final List<String> _selectedModels = [];
 
-  String _selectedWindow = '1h'; // '1m' | '5m' | '15m' | '1h' | '24h'
+  static String _selectedWindow = '1h'; // '1m' | '5m' | '15m' | '1h' | '24h'
   bool _isLiveMonitoring = true;
   Timer? _pollingTimer;
 
@@ -612,9 +614,10 @@ class _VelocityPageState extends State<VelocityPage>
     return LayoutBuilder(builder: (context, constraints) {
       final cols =
           constraints.maxWidth > 950 ? 3 : (constraints.maxWidth > 550 ? 2 : 1);
-      // Fixed card height derived from content (title row + value + subtitle
-      // + padding) — an aspect ratio alone would grow the card on wide
-      // windows and leave it mostly empty.
+      // Fixed card height derived from content — an aspect ratio alone would
+      // grow the card on wide windows and leave it mostly empty. Content
+      // (title row 30 + gaps 10 + value 32 + subtitle 16) + card padding 32
+      // + default card margin 8 ≈ 128; round up to breathe.
       final cardWidth = (constraints.maxWidth - 14.0 * (cols - 1)) / cols;
       return GridView.count(
         crossAxisCount: cols,
@@ -622,7 +625,7 @@ class _VelocityPageState extends State<VelocityPage>
         mainAxisSpacing: 14,
         shrinkWrap: true,
         physics: const NeverScrollableScrollPhysics(),
-        childAspectRatio: cardWidth / 122,
+        childAspectRatio: cardWidth / 132,
         children: [
           // 1. Overall Velocity
           _buildKpiCard(

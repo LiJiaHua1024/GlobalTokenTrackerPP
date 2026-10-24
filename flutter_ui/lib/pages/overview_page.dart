@@ -37,9 +37,11 @@ class _OverviewPageState extends State<OverviewPage> {
     _overviewCache[key] = data;
   }
 
-  String _selectedRange = 'week';
-  final List<String> _selectedApps = [];
-  final List<String> _selectedModels = [];
+  // MainShell's page transition disposes the page tree on every tab switch,
+  // so user-picked range/filters live on the class to survive rebuilds.
+  static String _selectedRange = 'week';
+  static final List<String> _selectedApps = [];
+  static final List<String> _selectedModels = [];
 
   bool _loading = false;
   String? _error;

@@ -322,9 +322,16 @@ void main() {
       );
       await tester.pump(const Duration(milliseconds: 50));
 
+      // Live monitoring starts on by default
+      expect(find.text('实时轮询中 (3s)'), findsOneWidget);
+
+      // Tap toggle chip — polling turns off
+      await tester.tap(find.text('实时轮询中 (3s)'));
+      await tester.pump();
+
       expect(find.text('开启实时监控'), findsOneWidget);
 
-      // Tap toggle chip
+      // Tap again — back on
       await tester.tap(find.text('开启实时监控'));
       await tester.pump();
 
