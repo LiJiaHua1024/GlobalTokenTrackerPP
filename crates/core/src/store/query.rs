@@ -78,6 +78,19 @@ pub struct SpeedSums {
 }
 
 impl SpeedSums {
+    pub(crate) fn merge(&mut self, other: &Self) {
+        self.speed_in += other.speed_in;
+        self.speed_out += other.speed_out;
+        self.speed_ms += other.speed_ms;
+        self.speed_est_ms += other.speed_est_ms;
+        self.timed_events += other.timed_events;
+        self.prefill_in += other.prefill_in;
+        self.ttft_ms += other.ttft_ms;
+        self.ttft_events += other.ttft_events;
+        self.decode_out += other.decode_out;
+        self.decode_ms += other.decode_ms;
+    }
+
     /// End-to-end output throughput in tokens/s over the timed span
     /// (TTFT wait included) — the headline "output speed" figure.
     pub fn output_tps(&self) -> Option<f64> {
@@ -120,7 +133,7 @@ impl SpeedSums {
 /// `ts_end - ts_start` when in `(0, MAX_DERIVED_DURATION_MS]` — longer gaps
 /// span idle time between sessions, so the event stays untimed and out of
 /// every speed figure.
-pub(super) fn speed_exprs() -> String {
+pub(crate) fn speed_exprs() -> String {
     let max = crate::normalize::MAX_DERIVED_DURATION_MS;
     let timed = format!(
         "(unclassified_tokens=0 AND (duration_ms > 0 OR (ts_end - ts_start > 0 AND ts_end - ts_start <= {max})))"
@@ -149,7 +162,7 @@ pub(super) fn speed_exprs() -> String {
 }
 
 /// Map the ten `speed_exprs` columns starting at `offset` into a `SpeedSums`.
-pub(super) fn speed_from_row(r: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<SpeedSums> {
+pub(crate) fn speed_from_row(r: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<SpeedSums> {
     let n = |i: usize| r.get::<_, i64>(offset + i).map(|v| v as u64);
     Ok(SpeedSums {
         speed_in: n(0)?,

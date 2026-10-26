@@ -12,7 +12,7 @@
 //! `input+output+cache_read` headline tokens, and NULL-timestamp rows counting
 //! in unbounded totals only.
 
-use crate::store::{AppSummary, MODEL_EXPR, ShareRow, Store, Totals};
+use crate::store::{AppSummary, MODEL_EXPR, ShareRow, SpeedSums, Store, Totals};
 use crate::viewmodel::{
     HeatDay, Range, TrendBucket, day_start_ms, local_utc_offset, utc_offset_ms,
 };
@@ -43,6 +43,7 @@ struct Group {
     cost: f64,
     active_ms: u64,
     duration_ms: u64,
+    speed: SpeedSums,
 }
 
 impl Group {
@@ -106,17 +107,20 @@ struct Raw {
     cost: f64,
     active_ms: u64,
     duration_ms: u64,
+    speed: SpeedSums,
 }
 
 impl Cube {
     /// Scan the whole ledger once.
     pub fn build(store: &Store) -> Result<Self> {
+        let transaction = store.conn().unchecked_transaction()?;
         let off_ms = current_offset_ms();
         let mut cube = Self::empty(off_ms);
         let raws = query_groups(store, off_ms, None)?;
         cube.absorb(raws);
         cube.reload_hours(store)?;
         cube.sort();
+        transaction.commit()?;
         Ok(cube)
     }
 
@@ -197,6 +201,7 @@ impl Cube {
                 cost: r.cost,
                 active_ms: r.active_ms,
                 duration_ms: r.duration_ms,
+                speed: r.speed,
             });
         }
     }
@@ -504,7 +509,8 @@ impl Cube {
     /// A local midnight has passed since the cube's "today" was loaded — its
     /// hourly bars and today totals are yesterday's; refresh before trusting it.
     pub fn is_day_stale(&self) -> bool {
-        day_index(current_offset_ms(), now_ms()) != self.today_day
+        current_offset_ms() != self.off_ms
+            || day_index(current_offset_ms(), now_ms()) != self.today_day
     }
 
     /// Approximate resident size — for the memory report.
@@ -543,6 +549,7 @@ fn add(t: &mut Totals, g: &Group) {
     t.credits += g.credits;
     t.cost_usd += g.cost;
     t.active_ms += g.active_ms;
+    t.speed.merge(&g.speed);
 }
 
 fn cost_desc(a: f64, b: f64) -> std::cmp::Ordering {
@@ -651,13 +658,14 @@ fn query_groups(store: &Store, off_ms: i64, days: Option<&BTreeSet<i64>>) -> Res
             (format!("WHERE {}", conds.join(" OR ")), params)
         }
     };
+    let speed = crate::store::query::speed_exprs();
     let mut st = store.conn().prepare(&format!(
         "SELECT (ts_start + {off_ms}) / {DAY_MS} AS d, app, {MODEL_EXPR} AS m, COUNT(*),
                 COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
                 COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cache_read_tokens),0),
                 COALESCE(SUM(cache_write_5m_tokens+cache_write_1h_tokens),0),
                 COALESCE(SUM(credits),0), COALESCE(SUM(cost_usd),0), COALESCE(SUM(active_ms),0),
-                COALESCE(SUM(duration_ms),0), COALESCE(SUM(unclassified_tokens),0)
+                COALESCE(SUM(duration_ms),0), COALESCE(SUM(unclassified_tokens),0), {speed}
          FROM usage_events {filter} GROUP BY d, app, m"
     ))?;
     let rows = st.query_map(rusqlite::params_from_iter(params.iter()), |r| {
@@ -676,6 +684,7 @@ fn query_groups(store: &Store, off_ms: i64, days: Option<&BTreeSet<i64>>) -> Res
             active_ms: r.get::<_, i64>(11)? as u64,
             duration_ms: r.get::<_, i64>(12)? as u64,
             unclassified: r.get::<_, i64>(13)? as u64,
+            speed: crate::store::query::speed_from_row(r, 14)?,
         })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -759,6 +768,11 @@ mod tests {
     }
 
     fn assert_totals(a: &Totals, b: &Totals, what: &str) {
+        assert_eq!(
+            a.unclassified_tokens, b.unclassified_tokens,
+            "{what} unclassified"
+        );
+        assert_eq!(a.speed, b.speed, "{what} speeds");
         assert_eq!(a.events, b.events, "{what} events");
         assert_eq!(a.input_tokens, b.input_tokens, "{what} input");
         assert_eq!(a.output_tokens, b.output_tokens, "{what} output");

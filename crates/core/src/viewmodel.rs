@@ -328,6 +328,53 @@ pub fn utc_offset_ms(s: &str) -> Option<i64> {
 }
 
 impl Store {
+    /// Cube serves aligned statistics; arbitrary hour bounds retain SQL semantics.
+    pub fn overview_from_cube(
+        &self,
+        cube: &crate::Cube,
+        range: Range,
+        apps: Option<&[String]>,
+        models: Option<&[String]>,
+    ) -> Result<OverviewVm> {
+        let Some(p) = cube.overview_parts(range, apps, models) else {
+            return self.overview(range, apps, models);
+        };
+        let quotas = self.latest_quotas()?;
+        let activity = cube
+            .heat(apps, models)
+            .into_iter()
+            .map(|h| ActivityDay {
+                date: h.date,
+                events: h.events,
+                tokens: h.tokens,
+                cost_usd: h.cost_usd,
+            })
+            .collect();
+        let daily_30d = cube
+            .overview_parts(Range::Month, apps, models)
+            .map(|p| p.daily)
+            .unwrap_or_default();
+        Ok(OverviewVm {
+            today: p.today,
+            span: p.span,
+            all: p.all,
+            range,
+            by_app: p.by_app,
+            by_model: p.by_model,
+            daily: p.daily,
+            daily_30d,
+            activity,
+            apps: p.apps,
+            models: p.models,
+            quota_groups: group_quotas(quotas.clone()),
+            quotas,
+            unpriced: self.unpriced_models()?,
+            heat: cube.heat(apps, models),
+            tz_offset: local_utc_offset(),
+            token_rates: self.token_rate_overview(None, apps, models)?,
+        })
+    }
+
     pub fn overview(
         &self,
         range: Range,

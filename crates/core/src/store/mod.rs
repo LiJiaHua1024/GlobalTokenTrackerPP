@@ -1,7 +1,7 @@
 //! SQLite storage layer (spec §5). WAL mode, single writer, UPSERT-by-completeness.
 
 mod cursor;
-mod query;
+pub(crate) mod query;
 mod speed;
 pub use speed::{SpeedQuery, SpeedRanking, SpeedRow};
 
@@ -570,6 +570,15 @@ impl Store {
                     q.limit_value, q.used_percent, q.resets_at, q.raw_json],
         )?;
         Ok(true)
+    }
+
+    /// Read-connection revision detects both external commits and local writes.
+    pub fn revision(&self) -> Result<(i64, u64)> {
+        Ok((
+            self.conn
+                .pragma_query_value(None, "data_version", |r| r.get(0))?,
+            self.conn.total_changes(),
+        ))
     }
 
     pub(crate) fn path(&self) -> Option<&Path> {

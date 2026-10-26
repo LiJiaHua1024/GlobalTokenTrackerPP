@@ -10,7 +10,13 @@ use globaltokentracker_core::store::{Store, default_db_path};
 use globaltokentracker_core::viewmodel::Range;
 use serde::Serialize;
 
+struct CachedCube {
+    revision: (i64, u64),
+    cube: globaltokentracker_core::Cube,
+}
+
 pub struct GttContext {
+    cube: Mutex<Option<CachedCube>>,
     /// Long-lived engine. Only `scan` runs against it, so its lock is
     /// effectively a scan mutex — never taken by the read endpoints.
     inner: Mutex<Engine>,
@@ -164,6 +170,7 @@ unsafe fn gtt_engine_open_impl(db_path: *const c_char) -> *mut GttContext {
     };
 
     Box::into_raw(Box::new(GttContext {
+        cube: Mutex::new(None),
         inner: Mutex::new(engine),
         reads: Mutex::new(reads),
         db_path: path,
@@ -270,7 +277,30 @@ unsafe fn gtt_get_overview_impl(
     let apps = unsafe { parse_string_list(filter_apps_json) };
     let models = unsafe { parse_string_list(filter_models_json) };
 
-    match store.overview(range, apps.as_deref(), models.as_deref()) {
+    let mut cache = gtt
+        .cube
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let revision = match store.revision() {
+        Ok(v) => v,
+        Err(e) => return to_error_c_string(e),
+    };
+    if cache
+        .as_ref()
+        .is_none_or(|cached| cached.revision != revision || cached.cube.is_day_stale())
+    {
+        match globaltokentracker_core::Cube::build(&store) {
+            Ok(cube) => *cache = Some(CachedCube { revision, cube }),
+            Err(e) => return to_error_c_string(e),
+        }
+    }
+    let result = store.overview_from_cube(
+        &cache.as_ref().unwrap().cube,
+        range,
+        apps.as_deref(),
+        models.as_deref(),
+    );
+    match result {
         Ok(vm) => to_json_c_string(&vm),
         Err(e) => to_error_c_string(e),
     }
@@ -571,6 +601,7 @@ mod tests {
         let store = Store::open_memory().unwrap();
         let engine = Engine::new(store).unwrap();
         let ctx = Box::into_raw(Box::new(GttContext {
+            cube: Mutex::new(None),
             inner: Mutex::new(engine),
             // Reads go through their own connection; an empty in-memory store
             // is enough to exercise the JSON shape.
@@ -616,5 +647,52 @@ mod tests {
         let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap();
         assert!(s.contains("internal panic"));
         unsafe { gtt_free_string(ptr) };
+    }
+
+    #[test]
+    fn cube_cache_observes_writes_from_the_scan_connection() {
+        let dir = std::env::temp_dir().join(format!(
+            "gtt-cube-{}-{}",
+            std::process::id(),
+            globaltokentracker_core::store::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = CString::new(dir.join("ledger.db").to_str().unwrap()).unwrap();
+        let ctx = unsafe { gtt_engine_open(path.as_ptr()) };
+        let overview = || {
+            let p = unsafe {
+                gtt_get_overview(
+                    ctx,
+                    std::ptr::null(),
+                    0,
+                    0,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            };
+            let v: serde_json::Value =
+                serde_json::from_str(unsafe { CStr::from_ptr(p) }.to_str().unwrap()).unwrap();
+            unsafe { gtt_free_string(p) };
+            v
+        };
+        assert_eq!(overview()["all"]["events"], 0);
+        unsafe { &*ctx }
+            .inner
+            .lock()
+            .unwrap()
+            .store
+            .upsert_event(&globaltokentracker_core::UsageEvent {
+                dedup_key: "cache-test".into(),
+                app: "codex".into(),
+                input_tokens: 100,
+                output_tokens: 50,
+                duration_ms: Some(1000),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(overview()["all"]["events"], 1);
+        assert_eq!(overview()["all"]["speed"]["speed_out"], 50);
+        unsafe { gtt_engine_close(ctx) };
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
