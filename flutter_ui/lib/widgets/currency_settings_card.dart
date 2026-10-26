@@ -2,11 +2,20 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../core/theme.dart';
 
-class CurrencySettingsCard extends StatelessWidget {
+class CurrencySettingsCard extends StatefulWidget {
   const CurrencySettingsCard({super.key});
+
+  @override
+  State<CurrencySettingsCard> createState() => _CurrencySettingsCardState();
+}
+
+class _CurrencySettingsCardState extends State<CurrencySettingsCard> {
+  final _currencyField = GlobalKey<FormFieldState<String>>();
+
   @override
   Widget build(BuildContext context) {
     final p = context.watch<ThemeProvider>();
+    final colors = Theme.of(context).colorScheme;
     return Card(
         child: Padding(
             padding: const EdgeInsets.all(20),
@@ -19,36 +28,67 @@ class CurrencySettingsCard extends StatelessWidget {
                   runSpacing: 8,
                   crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
-                    DropdownButton<String>(
-                        value: p.requestedCurrency,
-                        items: [
-                          for (final code in {
-                            'USD',
-                            'CNY',
-                            'EUR',
-                            'GBP',
-                            'JPY',
-                            'HKD',
-                            'SGD',
-                            'AUD',
-                            'CAD',
-                            'CHF',
-                            'KRW', p.requestedCurrency
-                          })
-                            DropdownMenuItem(value: code, child: Text(code))
-                        ],
-                        onChanged: p.currencyBusy
-                            ? null
-                            : (code) async {
-                                try {
-                                  await p.setCurrency(code!);
-                                } catch (e) {
-                                  if (context.mounted) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                        SnackBar(content: Text('切换货币失败：$e')));
+                    SizedBox(
+                      width: 180,
+                      child: DropdownButtonFormField<String>(
+                          key: _currencyField,
+                          initialValue: p.requestedCurrency,
+                          isExpanded: true,
+                          borderRadius: BorderRadius.circular(12),
+                          dropdownColor: colors.surfaceContainer,
+                          focusColor: colors.surfaceContainerLow,
+                          decoration: InputDecoration(
+                            labelText: '显示货币',
+                            filled: true,
+                            fillColor: colors.surfaceContainerLow,
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 14, vertical: 12),
+                          ),
+                          items: [
+                            for (final code in {
+                              'USD',
+                              'CNY',
+                              'EUR',
+                              'GBP',
+                              'JPY',
+                              'HKD',
+                              'SGD',
+                              'AUD',
+                              'CAD',
+                              'CHF',
+                              'KRW',
+                              p.requestedCurrency,
+                            })
+                              DropdownMenuItem(value: code, child: Text(code))
+                          ],
+                          onChanged: p.currencyBusy
+                              ? null
+                              : (code) async {
+                                  if (code == null ||
+                                      code == p.requestedCurrency) {
+                                    return;
                                   }
-                                }
-                              }),
+                                  try {
+                                    await p.setCurrency(code);
+                                  } catch (e) {
+                                    if (context.mounted) {
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(SnackBar(
+                                              content: Text('切换货币失败：$e')));
+                                    }
+                                  } finally {
+                                    if (mounted &&
+                                        _currencyField.currentState?.value !=
+                                            p.requestedCurrency) {
+                                      _currencyField.currentState
+                                          ?.didChange(p.requestedCurrency);
+                                    }
+                                  }
+                                }),
+                    ),
                     OutlinedButton.icon(
                         onPressed: p.currencyBusy ? null : p.refreshCurrency,
                         icon: const Icon(Icons.currency_exchange),

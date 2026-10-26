@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:window_manager/window_manager.dart';
 import '../core/app_info.dart';
+import '../core/installer_files.dart';
 import '../core/ps_quote.dart';
 import '../widgets/custom_title_bar.dart';
 
@@ -241,74 +242,45 @@ $edit
     await windowManager.setPreventClose(true);
 
     try {
-      // 1. Terminate old running process (excluding current installer process)
+      // Wait for the installed app to exit before replacing its loaded DLLs.
       _safeSetState(() {
         _statusMessage = '结束正在运行的实例...';
         _progress = 0.10;
       });
-      final myPid = pid;
-      await Process.run('taskkill', [
-        '/F',
-        '/FI',
-        'PID ne $myPid',
-        '/IM',
-        'globaltokentracker_ui.exe',
+      final stopResult = await Process.run('powershell', [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        '''
+        \$ErrorActionPreference = 'Stop'
+        \$dir = [IO.Path]::GetFullPath("${psDoubleQuote(dest)}").TrimEnd('\\') + '\\'
+        \$apps = @(Get-Process -Name globaltokentracker_ui -ErrorAction SilentlyContinue | Where-Object {
+          \$_.Id -ne $pid -and \$_.Path -and \$_.Path.StartsWith(\$dir, [StringComparison]::OrdinalIgnoreCase)
+        })
+        foreach (\$app in \$apps) {
+          Stop-Process -Id \$app.Id -Force
+          if (-not \$app.WaitForExit(10000)) { throw '等待旧程序退出超时，请关闭后重试。' }
+        }
+        ''',
       ]);
-
-      // 2. Create destination directory
-      final destDir = Directory(dest);
-      if (!await destDir.exists()) {
-        await destDir.create(recursive: true);
+      if (stopResult.exitCode != 0) {
+        throw InstallFilesException('无法结束旧程序，请关闭后重试。\n${stopResult.stderr}');
       }
 
-      // 3. Copy files from installer source
+      // Stage and verify every file before replacement; restore old files if
+      // a locked DLL or another filesystem error prevents the full upgrade.
       final srcDir = _installerSource.isNotEmpty
           ? Directory(_installerSource)
           : File(Platform.resolvedExecutable).parent;
-      final entities = await srcDir.list(recursive: true).toList();
-      final totalFiles = entities.whereType<File>().length;
-
-      int copiedFiles = 0;
-      for (final entity in entities) {
-        final relativePath = entity.path
-            .substring(srcDir.path.length)
-            .replaceFirst(RegExp(r'^[/\\]'), '');
-
-        // Skip installer helper launcher
-        if (relativePath.toLowerCase() == 'installer_ui.exe') {
-          continue;
-        }
-
-        final targetPath = '$dest\\$relativePath';
-
-        if (entity is Directory) {
-          final d = Directory(targetPath);
-          if (!await d.exists()) await d.create(recursive: true);
-        } else if (entity is File) {
-          final targetFile = File(targetPath);
-          final parent = targetFile.parent;
-          if (!await parent.exists()) await parent.create(recursive: true);
-
-          await entity.copy(targetPath);
-          copiedFiles++;
-
-          if (mounted) {
-            _safeSetState(() {
-              _statusMessage = '正在释放: $relativePath';
-              _progress = 0.15 +
-                  (0.55 * (copiedFiles / (totalFiles > 0 ? totalFiles : 1)));
-            });
-          }
-        }
-      }
-
-      // 4. Save installer as uninstaller
-      if (_installerExe.isNotEmpty && await File(_installerExe).exists()) {
-        final targetUninstaller = '$dest\\globaltokentrackerpp-setup.exe';
-        if (_installerExe.toLowerCase() != targetUninstaller.toLowerCase()) {
-          await File(_installerExe).copy(targetUninstaller);
-        }
-      }
+      await installBundle(
+        source: srcDir,
+        destination: Directory(dest),
+        installerExecutable: _installerExe.isEmpty ? null : File(_installerExe),
+        onProgress: (name, completed, total) => _safeSetState(() {
+          _statusMessage = '正在校验并安装：$name';
+          _progress = 0.15 + 0.55 * completed / total;
+        }),
+      );
 
       // 5. Register in Windows Uninstall
       _safeSetState(() {

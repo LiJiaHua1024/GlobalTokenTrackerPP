@@ -58,6 +58,11 @@ if (-not (Test-Path (Join-Path $flutterDist 'globaltokentracker_ui.exe'))) {
     throw "missing build output: globaltokentracker_ui.exe in $flutterDist"
 }
 
+# A successful Flutter build does not guarantee the bundled Rust DLL is current.
+# Probe the exact DLL that will be archived, using the UI's ABI requirements.
+& dart (Join-Path $PSScriptRoot 'verify_runtime.dart') (Join-Path $flutterDist 'globaltokentracker_ffi.dll')
+if ($LASTEXITCODE -ne 0) { throw 'bundled FFI runtime is missing or incompatible' }
+
 # Authenticode-sign the distributable binaries BEFORE anything is zipped or
 # hashed — the payload zip, the portable zip and the setup exe must all carry
 # the signature, and the printed SHA256 digests must match the signed files.

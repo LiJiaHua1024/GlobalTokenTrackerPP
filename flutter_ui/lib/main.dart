@@ -16,6 +16,7 @@ import 'pages/settings_page.dart';
 import 'pages/sources_page.dart';
 import 'widgets/custom_title_bar.dart';
 import 'widgets/update_banner.dart';
+import 'widgets/startup_error_app.dart';
 
 void main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -52,9 +53,13 @@ void main(List<String> args) async {
 
   // Initialize native Rust engine via FFI
   try {
-    FfiBridge.instance.openEngine();
+    if (!FfiBridge.instance.openEngine()) {
+      throw StateError('无法打开本地账本，请检查数据目录是否可访问。');
+    }
   } catch (e) {
     debugPrint("Failed to initialize FFI engine on startup: $e");
+    runApp(StartupErrorApp(message: e.toString()));
+    return;
   }
 
   runApp(

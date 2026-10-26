@@ -6,6 +6,7 @@ import 'dart:isolate';
 import 'package:ffi/ffi.dart';
 import 'ffi_envelope.dart';
 import 'models.dart';
+import 'native_runtime.dart';
 
 // Native function typedefs
 typedef _gtt_default_db_path_c = ffi.Pointer<Utf8> Function();
@@ -190,38 +191,28 @@ class FfiBridge {
       dllName,
     ];
 
-    ffi.DynamicLibrary? fallbackLib;
-    String? fallbackPath;
+    // A shipped DLL must match the UI. Falling back to a DLL from the working
+    // directory would hide a broken install and can load another app's copy.
+    final installedLibrary = File(possiblePaths.first);
+    if (installedLibrary.existsSync()) {
+      _resolvedDylibPath = installedLibrary.absolute.path;
+      _dylib = openVerifiedNativeLibrary(_resolvedDylibPath);
+      return;
+    }
+    final failures = <String>[];
 
     for (final p in possiblePaths) {
       if (File(p).existsSync()) {
         final path = File(p).absolute.path;
         try {
-          final lib = ffi.DynamicLibrary.open(path);
-          // Verify required symbols exist so a stale DLL does not shadow a newer build
-          lib.lookup<ffi.NativeFunction<_gtt_get_token_rates_c>>(
-              'gtt_get_token_rates');
-          lib.lookup<ffi.NativeFunction<_gtt_json_request_c>>(
-              'gtt_get_speed_ranking');
-          lib.lookup<ffi.NativeFunction<_gtt_json_request_c>>('gtt_fx');
+          final lib = openVerifiedNativeLibrary(path);
           _resolvedDylibPath = path;
           _dylib = lib;
           return;
-        } catch (_) {
-          if (fallbackLib == null) {
-            try {
-              fallbackLib = ffi.DynamicLibrary.open(path);
-              fallbackPath = path;
-            } catch (_) {}
-          }
+        } catch (error) {
+          failures.add(error.toString());
         }
       }
-    }
-
-    if (fallbackLib != null && fallbackPath != null) {
-      _resolvedDylibPath = fallbackPath;
-      _dylib = fallbackLib;
-      return;
     }
 
     // Last resort: let the OS search its default locations (app dir, cwd,
@@ -229,12 +220,10 @@ class FfiBridge {
     // opaque dynamic-library failure.
     _resolvedDylibPath = dllName;
     try {
-      _dylib = ffi.DynamicLibrary.open(_resolvedDylibPath);
+      _dylib = openVerifiedNativeLibrary(_resolvedDylibPath);
     } catch (e) {
-      throw Exception(
-        '$dllName not found. Expected it next to the executable or in the '
-        'working directory. ($e)',
-      );
+      throw NativeRuntimeException(
+          '应位于程序目录：$exeDir\\$dllName\n${[...failures, e.toString()].join('\n')}');
     }
   }
 
