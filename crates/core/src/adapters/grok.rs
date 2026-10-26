@@ -157,7 +157,7 @@ impl SourceAdapter for Grok {
 /// Works on bytes: the input is tool-controlled text where a literal `%` can
 /// sit next to a multi-byte UTF-8 char, and slicing the `&str` at byte
 /// offsets there panics on a non-char boundary — every scan, forever.
-fn pct_decode(s: &str) -> String {
+pub(crate) fn pct_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;

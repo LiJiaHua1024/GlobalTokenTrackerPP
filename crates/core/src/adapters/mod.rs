@@ -26,6 +26,7 @@ pub mod dsh;
 pub mod freebuff;
 pub mod grok;
 pub mod kimi_code;
+pub mod kiro;
 pub mod minimax_code;
 pub mod opencode;
 pub mod qoder;
@@ -149,6 +150,7 @@ pub fn registry() -> Vec<Box<dyn SourceAdapter>> {
         Box::new(antigravity::Antigravity),
         Box::new(dsh::Dsh),
         Box::new(freebuff::Freebuff::new()),
+        Box::new(kiro::Kiro),
     ]
 }
 
