@@ -441,10 +441,11 @@ class _OverviewPageState extends State<OverviewPage> {
             const SizedBox(height: 28),
 
             // 今日小时用量时间分布 (当选择“今日”时展示细粒度柱状图)
-            if (_selectedRange == 'today') ...[
+            ...[
               TrendChart(
                 daily: data.daily,
-                title: '今日小时用量分布',
+                averages: data.trendAverage,
+                title: _selectedRange == 'today' ? '今日小时用量分布' : '所选区间用量趋势',
               ),
               const SizedBox(height: 28),
             ],

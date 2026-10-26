@@ -232,6 +232,7 @@ class OverviewData {
   final List<AppSummary> byApp;
   final List<ShareRow> byModel;
   final List<TrendBucket> daily;
+  final List<double> trendAverage;
   final List<TrendBucket> daily30d;
   final List<ActivityDay> activity;
   final List<String> apps;
@@ -249,6 +250,7 @@ class OverviewData {
     required this.byApp,
     required this.byModel,
     required this.daily,
+    this.trendAverage = const [],
     this.daily30d = const [],
     this.activity = const [],
     required this.apps,
@@ -271,6 +273,7 @@ class OverviewData {
       byModel: (json['by_model'] as List? ?? [])
           .map((m) => ShareRow.fromJson(m as Map<String, dynamic>))
           .toList(),
+      trendAverage: (json['trend_average'] as List? ?? []).map((v) => (v as num).toDouble()).toList(),
       daily: (json['daily'] as List? ?? [])
           .map((d) => TrendBucket.fromJson(d as Map<String, dynamic>))
           .toList(),

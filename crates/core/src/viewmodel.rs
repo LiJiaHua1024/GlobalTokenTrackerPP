@@ -205,6 +205,7 @@ pub struct OverviewVm {
     /// Trend buckets for the selected range: per local day, or per local hour
     /// for `Today`. Each bucket carries its tooltip payload (top-3 models).
     pub daily: Vec<TrendBucket>,
+    pub trend_average: Vec<f64>,
     /// Rolling 30-day buckets with per-model breakdown for trend spline charts.
     pub daily_30d: Vec<TrendBucket>,
     /// Rolling 365-day per-day activity for the contribution heatmap.
@@ -361,6 +362,7 @@ impl Store {
             range,
             by_app: p.by_app,
             by_model: p.by_model,
+            trend_average: crate::trend::moving_average(&p.daily),
             daily: p.daily,
             daily_30d,
             activity,
@@ -454,6 +456,7 @@ impl Store {
             range,
             by_app: self.by_app(start, end, apps, models)?,
             by_model: self.by_model(start, end, apps, models)?,
+            trend_average: crate::trend::moving_average(&daily),
             daily,
             daily_30d,
             activity,
