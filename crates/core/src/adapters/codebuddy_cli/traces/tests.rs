@@ -75,6 +75,46 @@ fn exact_transcript_arriving_later_replaces_the_overlapping_trace() {
 }
 
 #[test]
+fn partial_exact_coverage_keeps_only_the_unclassified_remainder_and_revises_it() {
+    let f = Fixture::new();
+    let e = engine();
+    let mut v = trace();
+    v["trace"]["sessionId"] = json!("session-a");
+    f.write(&v);
+    let precise = |tokens| UsageEvent {
+        dedup_key: "codebuddy_cli:partial".into(),
+        app: apps::CODEBUDDY_CLI.into(),
+        session_id: Some("session-a".into()),
+        input_tokens: tokens,
+        ..Default::default()
+    };
+    e.store.upsert_event(&precise(200)).unwrap();
+    assert_eq!(f.scan(&e).events_ingested, 1);
+    let t = e.store.totals(None, None, None, None).unwrap();
+    assert_eq!(
+        (t.input_tokens, t.output_tokens, t.unclassified_tokens),
+        (200, 0, 1000)
+    );
+    assert_eq!(f.scan(&e).events_ingested, 0);
+    e.store.upsert_event(&precise(500)).unwrap();
+    assert_eq!(f.scan(&e).events_ingested, 1);
+    assert_eq!(
+        e.store
+            .totals(None, None, None, None)
+            .unwrap()
+            .unclassified_tokens,
+        700
+    );
+    e.store.upsert_event(&precise(1200)).unwrap();
+    assert_eq!(f.scan(&e).events_ingested, 0);
+    let t = e.store.totals(None, None, None, None).unwrap();
+    assert_eq!(
+        (t.events, t.input_tokens, t.unclassified_tokens),
+        (1, 1200, 0)
+    );
+}
+
+#[test]
 fn unknown_totals_survive_queries_cube_repricing_and_archive() {
     let f = Fixture::new();
     let e = engine();
