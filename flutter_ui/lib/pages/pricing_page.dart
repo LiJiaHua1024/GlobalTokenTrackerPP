@@ -19,6 +19,7 @@ class _PricingPageState extends State<PricingPage> {
   bool _loading = false;
   List<PriceRow> _prices = [];
   String _searchQuery = '';
+  bool _disputedOnly = false;
   late final StreamSubscription<int> _priceUpdatesSubscription;
 
   @override
@@ -118,11 +119,7 @@ class _PricingPageState extends State<PricingPage> {
     final theme = Theme.of(context);
     final themeProvider = context.watch<ThemeProvider>();
 
-    final filtered = _prices.where((p) {
-      if (_searchQuery.isEmpty) return true;
-      final q = _searchQuery.toLowerCase();
-      return p.model.toLowerCase().contains(q) || p.source.toLowerCase().contains(q);
-    }).toList();
+    final filtered = filterPriceRows(_prices, _searchQuery, disputedOnly: _disputedOnly);
 
     final headerStyle = theme.textTheme.bodyMedium?.copyWith(
       fontWeight: FontWeight.bold,
@@ -199,6 +196,9 @@ class _PricingPageState extends State<PricingPage> {
           const SizedBox(height: 16),
 
           // Virtualized High-Performance Table Container
+          CheckboxListTile(contentPadding: EdgeInsets.zero, dense: true, controlAffinity: ListTileControlAffinity.leading,
+            title: Text('仅显示报价有分歧的模型（${filtered.length} 项结果）'), value: _disputedOnly,
+            onChanged: (v) => setState(() => _disputedOnly = v ?? false)),
           Expanded(
             child: Card(
               elevation: 1,
@@ -247,7 +247,7 @@ class _PricingPageState extends State<PricingPage> {
                                     final p = filtered[i];
                                     final isEven = i % 2 == 0;
 
-                                    return Container(
+                                    return Tooltip(message: p.quotes.isEmpty ? '尚无多源报价信息' : p.quotes.map((q) => '${q.source} (${q.key}) · 输入 ${themeProvider.formatMoney(q.input, decimals: 4)} / 输出 ${themeProvider.formatMoney(q.output, decimals: 4)} / 缓存 ${themeProvider.formatMoney(q.cacheRead, decimals: 4)} · ${{'agrees':'一致','dissents':'有分歧','nodata':'未报价','no_data':'未报价','ignored':'不参与投票'}[q.stance] ?? q.stance}').join('\n'), child: Container(
                                       padding: const EdgeInsets.symmetric(horizontal: 20),
                                       decoration: BoxDecoration(
                                         color: isEven
@@ -305,7 +305,9 @@ class _PricingPageState extends State<PricingPage> {
                                                   borderRadius: BorderRadius.circular(6),
                                                 ),
                                                 child: Text(
-                                                  p.source,
+                                                  '${p.source} · ${p.agree}/${p.total} 一致',
+                                                  maxLines: 2,
+                                                  overflow: TextOverflow.ellipsis,
                                                   style: TextStyle(
                                                     fontSize: 11,
                                                     fontWeight: FontWeight.w500,
@@ -317,7 +319,7 @@ class _PricingPageState extends State<PricingPage> {
                                           ),
                                         ],
                                       ),
-                                    );
+                                    ));
                                   },
                                 ),
                         ),

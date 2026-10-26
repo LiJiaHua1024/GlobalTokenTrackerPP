@@ -703,6 +703,33 @@ class SourceHealth {
   }
 }
 
+class PriceQuote {
+  final String source, key, stance;
+  final double input, output, cacheRead;
+  PriceQuote.fromJson(Map<String, dynamic> json)
+      : source = json['source'] ?? '', key = json['key'] ?? '',
+        stance = (json['stance'] ?? '').toString().toLowerCase(),
+        input = (json['input'] as num?)?.toDouble() ?? 0,
+        output = (json['output'] as num?)?.toDouble() ?? 0,
+        cacheRead = (json['cache_read'] as num?)?.toDouble() ?? 0;
+}
+
+List<PriceRow> filterPriceRows(List<PriceRow> rows, String query, {bool disputedOnly = false}) {
+  String flatten(String s) => s.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+  final words = query.split(RegExp(r'\s+')).map(flatten).where((w) => w.isNotEmpty).toList();
+  final hits = rows.where((r) {
+    final aliases = [r.model, r.source, ...r.quotes.map((q) => q.key)].map(flatten).join(' ');
+    return (!disputedOnly || r.total > r.agree) && words.every(aliases.contains);
+  }).toList();
+  hits.sort((a,b) {
+    final prefixA = words.isNotEmpty && flatten(a.model).startsWith(words.first);
+    final prefixB = words.isNotEmpty && flatten(b.model).startsWith(words.first);
+    if (prefixA != prefixB) return prefixA ? -1 : 1;
+    return a.model.compareTo(b.model);
+  });
+  return hits;
+}
+
 class PriceRow {
   final String model;
   final double input;
@@ -710,6 +737,8 @@ class PriceRow {
   final double cacheRead;
   final double cacheWrite;
   final String source;
+  final int agree, total;
+  final List<PriceQuote> quotes;
 
   PriceRow({
     required this.model,
@@ -718,6 +747,9 @@ class PriceRow {
     required this.cacheRead,
     required this.cacheWrite,
     required this.source,
+    this.agree = 0,
+    this.total = 0,
+    this.quotes = const [],
   });
 
   factory PriceRow.fromJson(Map<String, dynamic> json) {
@@ -728,6 +760,9 @@ class PriceRow {
       cacheRead: (json['cache_read'] as num?)?.toDouble() ?? 0.0,
       cacheWrite: (json['cache_write'] as num?)?.toDouble() ?? 0.0,
       source: json['source'] ?? '',
+      agree: json['agree'] ?? 0,
+      total: json['total'] ?? 0,
+      quotes: (json['quotes'] as List? ?? []).map((q) => PriceQuote.fromJson(Map<String, dynamic>.from(q))).toList(),
     );
   }
 }
