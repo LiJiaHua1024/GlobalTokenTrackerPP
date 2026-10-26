@@ -12,6 +12,8 @@ class QuotaCardWidget extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final themeProvider = Provider.of<ThemeProvider>(context);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final allExpired = group.rows.isNotEmpty && group.rows.every((r) => r.resetsAt != null && r.resetsAt! < now);
 
     return Card(
       elevation: 1,
@@ -36,7 +38,8 @@ class QuotaCardWidget extends StatelessWidget {
                     ),
                   ],
                 ),
-                if (group.worstPct != null)
+                if (allExpired) const Chip(label: Text('已过期'))
+                else if (group.worstPct != null)
                   Builder(builder: (context) {
                     // Adapters normalize used_percent to 0–100. Do not guess a
                     // 0–1 scale here: a real 1% would otherwise display 100%.
@@ -64,6 +67,7 @@ class QuotaCardWidget extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             ...group.rows.map((row) {
+              final expired = row.resetsAt != null && row.resetsAt! < now;
               final percent = row.usedPercent ??
                   (row.used != null &&
                           row.limitValue != null &&
@@ -82,7 +86,7 @@ class QuotaCardWidget extends StatelessWidget {
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         Text(
-                          _formatWindowKind(row.windowKind),
+                          '${_formatWindowKind(row.windowKind)}${expired ? ' · 已过期' : ''}',
                           style: theme.textTheme.bodyMedium?.copyWith(
                             fontWeight: FontWeight.w500,
                           ),
@@ -108,7 +112,7 @@ class QuotaCardWidget extends StatelessWidget {
                         backgroundColor:
                             theme.colorScheme.surfaceContainerHighest,
                         valueColor: AlwaysStoppedAnimation<Color>(
-                            _getPctColor(normalizedPct, theme)),
+                            expired ? theme.colorScheme.outline : _getPctColor(normalizedPct, theme)),
                       ),
                     ),
                   ],

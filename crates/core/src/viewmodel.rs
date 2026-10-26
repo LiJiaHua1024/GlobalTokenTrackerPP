@@ -283,21 +283,56 @@ pub fn app_display(app: &str) -> &str {
     }
 }
 
-/// Fold flat `latest_quotas` rows into per-app groups, ordered by app name.
+/// Live allowance windows first, then highest usage; unknown percentages follow known ones.
+pub fn rank_quotas(rows: &[QuotaRow], now_ms: i64) -> Vec<QuotaRow> {
+    let live = |q: &QuotaRow| q.resets_at.is_none_or(|t| t >= now_ms);
+    let mut ranked = rows.to_vec();
+    ranked.sort_by(|a, b| {
+        live(b)
+            .cmp(&live(a))
+            .then_with(|| {
+                b.used_percent
+                    .partial_cmp(&a.used_percent)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then(a.app.cmp(&b.app))
+    });
+    ranked
+}
+
+/// Fold allowance windows by app and prioritize active groups closest to their limits.
 pub fn group_quotas(rows: Vec<QuotaRow>) -> Vec<QuotaGroupVm> {
+    let now = crate::store::now_ms();
     let mut map: std::collections::BTreeMap<String, Vec<QuotaRow>> =
         std::collections::BTreeMap::new();
     for r in rows {
         map.entry(r.app.clone()).or_default().push(r);
     }
-    map.into_iter()
+    let mut groups: Vec<_> = map
+        .into_iter()
         .map(|(app, rows)| QuotaGroupVm {
             display: app_display(&app).to_string(),
-            worst_pct: rows.iter().filter_map(|r| r.used_percent).reduce(f64::max),
+            worst_pct: rows
+                .iter()
+                .filter(|r| r.resets_at.is_none_or(|t| t >= now))
+                .filter_map(|r| r.used_percent)
+                .reduce(f64::max),
             app,
-            rows,
+            rows: rank_quotas(&rows, now),
         })
-        .collect()
+        .collect();
+    let live = |g: &QuotaGroupVm| g.rows.iter().any(|r| r.resets_at.is_none_or(|t| t >= now));
+    groups.sort_by(|a, b| {
+        live(b)
+            .cmp(&live(a))
+            .then_with(|| {
+                b.worst_pct
+                    .partial_cmp(&a.worst_pct)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then(a.app.cmp(&b.app))
+    });
+    groups
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -772,6 +807,38 @@ mod tests {
         assert_eq!(groups[1].app, "workbuddy");
         assert_eq!(super::quota_kind_label("session_ctx"), "会话上下文");
         assert_eq!(super::quota_kind_label("brand_new_kind"), "brand_new_kind");
+    }
+
+    #[test]
+    fn quota_ranking_puts_expired_high_usage_after_live_windows() {
+        use crate::store::QuotaRow;
+        let row = |app: &str, pct, reset| QuotaRow {
+            app: app.into(),
+            account: None,
+            captured_at: 0,
+            window_kind: "weekly".into(),
+            used: None,
+            limit_value: None,
+            used_percent: pct,
+            resets_at: reset,
+        };
+        let rows = [
+            row("expired", Some(99.0), Some(50)),
+            row("low", Some(10.0), Some(200)),
+            row("unknown", None, None),
+            row("high", Some(80.0), None),
+        ];
+        let ordered = super::rank_quotas(&rows, 100);
+        assert_eq!(
+            ordered.iter().map(|r| r.app.as_str()).collect::<Vec<_>>(),
+            ["high", "low", "unknown", "expired"]
+        );
+        let groups = super::group_quotas(vec![
+            row("old", Some(100.0), Some(1)),
+            row("active", Some(5.0), None),
+        ]);
+        assert_eq!(groups[0].app, "active");
+        assert_eq!(groups[1].worst_pct, None);
     }
 
     #[test]

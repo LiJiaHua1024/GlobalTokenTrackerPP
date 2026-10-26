@@ -34,6 +34,13 @@ QuotaGroup _group(double percent) => QuotaGroup(
     );
 
 void main() {
+  testWidgets('expired windows are labeled and do not show an active limit badge', (tester) async {
+    final group=QuotaGroup(app:'codex',display:'Codex',worstPct:99,rows:[QuotaRow(app:'codex',capturedAt:0,windowKind:'weekly',usedPercent:99,resetsAt:1)]);
+    await tester.pumpWidget(_wrap(group));
+    expect(find.text('已过期'),findsOneWidget);
+    expect(find.text('已用 99.0%'),findsNothing);
+    expect(find.text('每周限额 · 已过期'),findsOneWidget);
+  });
   testWidgets('renders 1% as 1%, not 100%', (tester) async {
     await tester.pumpWidget(_wrap(_group(1.0)));
 
