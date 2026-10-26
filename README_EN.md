@@ -68,7 +68,7 @@ It incrementally and non-intrusively aggregates local AI coding tool telemetry: 
 | Command Code | Local JSONL | ✅ Exact (with tool-reported cost) |
 | CodeBuddy CLI | Local JSONL session logs | ✅ Exact |
 | CodeBuddy IDE | `state.vscdb` / session store | 🟡 Session-level + model multipliers |
-| Kiro CLI / Kiro IDE | `~/.kiro/sessions` (CLI session metadata, IDE v2 event log) + `kiro.kiroagent` execution files | ✅ Vendor-metered credits per turn (never converted to USD); tokens when recorded |
+| Kiro CLI / Kiro IDE | `~/.kiro/sessions` (CLI session metadata, IDE v2 event log) + `kiro.kiroagent` execution files | ✅ Vendor-metered credits per turn (costed at $0.04/credit); Kiro stores no token counts, so volume is reconstructed from context usage as "unclassified" tokens |
 | Cursor / Qoder | Credentials + official quota APIs | 🟡 Quota-oriented |
 
 ---

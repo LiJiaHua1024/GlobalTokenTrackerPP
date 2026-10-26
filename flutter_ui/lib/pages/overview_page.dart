@@ -319,7 +319,8 @@ class _OverviewPageState extends State<OverviewPage> {
                     title: '累计 Token 用量',
                     value: themeProvider.formatTokens(span.totalTokens),
                     subtitle:
-                        '输入: ${themeProvider.formatTokens(span.inputTokens)} · 输出: ${themeProvider.formatTokens(span.outputTokens)}',
+                        '输入: ${themeProvider.formatTokens(span.inputTokens)} · 输出: ${themeProvider.formatTokens(span.outputTokens)}'
+                        '${span.unclassifiedTokens > 0 ? ' · 未分类: ${themeProvider.formatTokens(span.unclassifiedTokens)}' : ''}',
                     icon: Icons.token,
                     color: const Color(0xFF1A73E8),
                   ),

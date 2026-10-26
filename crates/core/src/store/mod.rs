@@ -329,6 +329,23 @@ impl Store {
             )?;
             tx.commit()?;
         }
+        // Kiro rows first shipped without a USD cost or token volume. Drop
+        // the Kiro cursors so every source is re-read; same dedup_key +
+        // higher completeness → the upsert fills the rows in.
+        const RESCAN_KIRO_COST: &str = "mig_rescan_kiro_cost_v1";
+        if self.get_state(RESCAN_KIRO_COST)?.is_none() {
+            let tx = self.conn.unchecked_transaction()?;
+            tx.execute(
+                "DELETE FROM sync_cursors WHERE source = ?1",
+                [crate::model::apps::KIRO],
+            )?;
+            tx.execute(
+                "INSERT INTO app_state(key, value) VALUES (?1, '1')
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [RESCAN_KIRO_COST],
+            )?;
+            tx.commit()?;
+        }
         // Gemini Antigravity unpriced fix + Qoder credit-based project transcript upgrade.
         // Dropping cursors makes both re-read from offset 0:
         // Antigravity maps `gemini-3.8-flash-n` to `gemini-3.8-flash` with accurate pricing.
