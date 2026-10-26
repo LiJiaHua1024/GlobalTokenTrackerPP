@@ -27,6 +27,21 @@ pub enum Range {
 }
 
 impl Range {
+    /// A custom interval contained in one local calendar day uses hourly bars.
+    pub fn hourly(self) -> bool {
+        match self {
+            Self::Today => true,
+            Self::Custom { start_ms, end_ms } => {
+                let day = |ms| {
+                    jiff::Timestamp::from_millisecond(ms)
+                        .ok()
+                        .map(|t| t.to_zoned(jiff::tz::TimeZone::system()).date())
+                };
+                day(start_ms).is_some() && day(start_ms) == day(end_ms.saturating_sub(1))
+            }
+            _ => false,
+        }
+    }
     pub const LIST: [Range; 4] = [Self::Today, Self::Week, Self::Month, Self::All];
 
     /// Ordered, non-empty custom window (swaps inverted ends).
@@ -328,7 +343,7 @@ impl Store {
         // tooltip payload (events + top-3 models by tokens).
         let mut buckets: std::collections::BTreeMap<String, TrendBucket> =
             std::collections::BTreeMap::new();
-        for r in self.bucket_models(start, end, range == Range::Today, &tz, apps, models)? {
+        for r in self.bucket_models(start, end, range.hourly(), &tz, apps, models)? {
             let key = r.bucket.clone();
             let b = buckets.entry(key.clone()).or_insert_with(|| TrendBucket {
                 date: key,
@@ -579,6 +594,31 @@ pub mod fmt {
 #[cfg(test)]
 mod tests {
     use super::fmt;
+
+    #[test]
+    fn custom_hours_filter_both_bounds_and_use_hourly_buckets() {
+        use super::{Range, day_start_ms};
+        let store = crate::Store::open_memory().unwrap();
+        let day = day_start_ms(0);
+        for (id, hour) in [("before", 7), ("inside", 9), ("end", 11)] {
+            store
+                .upsert_event(&crate::model::UsageEvent {
+                    dedup_key: id.into(),
+                    app: "fixture".into(),
+                    input_tokens: 10,
+                    ts_start: Some(day + hour * 3_600_000),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        let range = Range::custom(day + 9 * 3_600_000, day + 11 * 3_600_000);
+        assert!(range.hourly());
+        let vm = store.overview(range, None, None).unwrap();
+        assert_eq!(vm.span.events, 1);
+        assert_eq!(vm.daily.len(), 1);
+        assert_eq!(vm.daily[0].date.len(), 5);
+        assert!(!Range::custom(day, day + 3 * 86_400_000).hourly());
+    }
 
     #[test]
     fn tokens_exact_groups() {

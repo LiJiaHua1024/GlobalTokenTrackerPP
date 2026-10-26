@@ -2205,6 +2205,7 @@ class ShareStatCard extends StatelessWidget {
 class ShareCardDialog extends StatefulWidget {
   final OverviewData initialData;
   final String currentRange;
+  final String? customPeriodLabel;
 
   /// Synchronous lookup into the caller's in-memory overview cache, keyed by
   /// range ('today' / 'week' / 'month' / 'all'); null means a cache miss.
@@ -2214,6 +2215,7 @@ class ShareCardDialog extends StatefulWidget {
     super.key,
     required this.initialData,
     required this.currentRange,
+    this.customPeriodLabel,
     this.cacheLookup,
   });
 
@@ -2280,6 +2282,8 @@ class _ShareCardDialogState extends State<ShareCardDialog> {
 
   String _getRangeLabel(String range) {
     switch (range) {
+      case 'custom':
+        return widget.customPeriodLabel ?? '自定义区间';
       case 'today':
         return '今日用量';
       case 'week':
@@ -2295,6 +2299,10 @@ class _ShareCardDialogState extends State<ShareCardDialog> {
 
   Future<void> _switchRange(String range) async {
     if (_selectedRange == range) return;
+    if (range == 'custom') {
+      setState(() { _selectedRange = range; _data = widget.initialData; _loadingRange = false; });
+      return;
+    }
     final requested = range;
     final cached = widget.cacheLookup?.call(range);
     if (cached != null) {
@@ -2736,11 +2744,12 @@ class _ShareCardDialogState extends State<ShareCardDialog> {
                           ),
                           const SizedBox(height: 8),
                           SegmentedButton<String>(
-                            segments: const [
-                              ButtonSegment(value: 'today', label: Text('今日')),
-                              ButtonSegment(value: 'week', label: Text('近 7 天')),
-                              ButtonSegment(value: 'month', label: Text('近 30 天')),
-                              ButtonSegment(value: 'all', label: Text('全周期')),
+                            segments: [
+                              const ButtonSegment(value: 'today', label: Text('今日')),
+                              const ButtonSegment(value: 'week', label: Text('近 7 天')),
+                              const ButtonSegment(value: 'month', label: Text('近 30 天')),
+                              const ButtonSegment(value: 'all', label: Text('全周期')),
+                              if (widget.currentRange == 'custom') const ButtonSegment(value: 'custom', label: Text('自定义')),
                             ],
                             selected: {_selectedRange},
                             onSelectionChanged: (val) =>
@@ -2968,6 +2977,7 @@ void showShareCardDialog(
   BuildContext context,
   OverviewData data,
   String currentRange, {
+  String? customPeriodLabel,
   OverviewData? Function(String rangeKey)? cacheLookup,
 }) {
   showDialog(
@@ -2975,6 +2985,7 @@ void showShareCardDialog(
     builder: (ctx) => ShareCardDialog(
       initialData: data,
       currentRange: currentRange,
+      customPeriodLabel: customPeriodLabel,
       cacheLookup: cacheLookup,
     ),
   );

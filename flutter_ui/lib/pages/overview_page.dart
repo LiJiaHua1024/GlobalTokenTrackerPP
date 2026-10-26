@@ -12,6 +12,7 @@ import '../widgets/charts/trend_chart.dart';
 import '../widgets/quota_card.dart';
 import '../widgets/share_card.dart';
 import '../widgets/stat_card.dart';
+import '../widgets/statistics_range_picker.dart';
 import '../widgets/token_rate_card.dart';
 
 class OverviewPage extends StatefulWidget {
@@ -40,6 +41,7 @@ class _OverviewPageState extends State<OverviewPage> {
   // MainShell's page transition disposes the page tree on every tab switch,
   // so user-picked range/filters live on the class to survive rebuilds.
   static String _selectedRange = 'week';
+  static StatisticsWindow _statisticsWindow = const StatisticsWindow('week');
   static final List<String> _selectedApps = [];
   static final List<String> _selectedModels = [];
 
@@ -49,7 +51,7 @@ class _OverviewPageState extends State<OverviewPage> {
   late final StreamSubscription<int> _priceUpdatesSubscription;
 
   String _cacheKey(String range) =>
-      '${range}_${_selectedApps.join(",")}_${_selectedModels.join(",")}';
+      '${range}_${range == 'custom' ? '${_statisticsWindow.startMs}_${_statisticsWindow.endMs}' : ''}_${_selectedApps.join(",")}_${_selectedModels.join(",")}';
 
   @override
   void initState() {
@@ -99,6 +101,8 @@ class _OverviewPageState extends State<OverviewPage> {
       // FfiBridge executes SQLite query & JSON deserialization inside Isolate.run (background OS thread)
       final data = await FfiBridge.instance.getOverview(
         rangeKey: range,
+        customStartMs: _statisticsWindow.startMs ?? 0,
+        customEndMs: _statisticsWindow.endMs ?? 0,
         filterApps: _selectedApps.isNotEmpty ? _selectedApps : null,
         filterModels: _selectedModels.isNotEmpty ? _selectedModels : null,
       );
@@ -106,6 +110,7 @@ class _OverviewPageState extends State<OverviewPage> {
       _cacheOverview(key, data);
 
       if (mounted && _selectedRange == range) {
+        if (range != _selectedRange || key != _cacheKey(range)) return;
         setState(() {
           _data = data;
           _loading = false;
@@ -216,33 +221,10 @@ class _OverviewPageState extends State<OverviewPage> {
                 spacing: 12,
                 runSpacing: 12,
                 children: [
-                  SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: SegmentedButton<String>(
-                      segments: const [
-                        ButtonSegment(value: 'today', label: Text('今日')),
-                        ButtonSegment(value: 'week', label: Text('近 7 天')),
-                        ButtonSegment(value: 'month', label: Text('近 30 天')),
-                        ButtonSegment(value: 'all', label: Text('全部')),
-                      ],
-                      selected: {_selectedRange},
-                      onSelectionChanged: (val) {
-                        final newRange = val.first;
-                        final key = _cacheKey(newRange);
-                        // Instant optimistic update (0ms latency):
-                        setState(() {
-                          _selectedRange = newRange;
-                          if (_overviewCache.containsKey(key)) {
-                            _data = _overviewCache[key];
-                            _loading = false;
-                          } else {
-                            _loading = true; // Show subtle progress bar, keep page mounted
-                          }
-                        });
-                        _loadData(newRange);
-                      },
-                    ),
-                  ),
+                  StatisticsRangePicker(value: _statisticsWindow, onChanged: (window) {
+                    setState(() { _statisticsWindow = window; _selectedRange = window.key; });
+                    _loadData(window.key);
+                  }),
                   Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -251,6 +233,7 @@ class _OverviewPageState extends State<OverviewPage> {
                           context,
                           data,
                           _selectedRange,
+                          customPeriodLabel: _statisticsWindow.label,
                           cacheLookup: (range) => _overviewCache[_cacheKey(range)],
                         ),
                         icon: const Icon(Icons.share_outlined, size: 18),
