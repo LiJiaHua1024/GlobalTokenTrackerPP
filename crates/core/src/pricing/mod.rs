@@ -169,6 +169,9 @@ impl PriceBook {
     /// repricing path go through it, so they cannot diverge. Estimated iff the
     /// match needed a peel (`prefix`).
     pub fn price(&self, ev: &UsageEvent) -> (Option<String>, f64, CostSource) {
+        if ev.unclassified_tokens > 0 {
+            return (None, 0.0, CostSource::Unpriced);
+        }
         // 1) Response-side real model wins (spec §7.3); fall back to the
         //    client-requested alias only when no response model exists.
         let Some(raw) = ev.model.as_deref().or(ev.request_model.as_deref()) else {
@@ -511,7 +514,7 @@ fn reprice_rows(store: &Store, book: &PriceBook, filter: &str) -> Result<u64> {
         "SELECT rowid, model, request_model, provider_id,
                 input_tokens, output_tokens, reasoning_tokens,
                 cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens,
-                cost_usd, cost_source, pricing_model
+                cost_usd, cost_source, pricing_model, unclassified_tokens
          FROM usage_events WHERE {filter}"
     ))?;
     type Old = (Option<f64>, Option<String>, Option<String>);
@@ -529,6 +532,7 @@ fn reprice_rows(store: &Store, book: &PriceBook, filter: &str) -> Result<u64> {
                     cache_read_tokens: r.get::<_, i64>(7)? as u64,
                     cache_write_5m_tokens: r.get::<_, i64>(8)? as u64,
                     cache_write_1h_tokens: r.get::<_, i64>(9)? as u64,
+                    unclassified_tokens: r.get::<_, i64>(13)? as u64,
                     ..Default::default()
                 },
                 (r.get(10)?, r.get(11)?, r.get(12)?),

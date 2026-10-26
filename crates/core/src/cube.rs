@@ -36,6 +36,7 @@ struct Group {
     input: u64,
     output: u64,
     reasoning: u64,
+    unclassified: u64,
     cache_read: u64,
     cache_write: u64,
     credits: f64,
@@ -47,7 +48,7 @@ struct Group {
 impl Group {
     /// Headline token count of the trend/pie convention: input+output+cache_read.
     fn headline(&self) -> u64 {
-        self.input + self.output + self.cache_read
+        self.input + self.output + self.cache_read + self.unclassified
     }
 }
 
@@ -98,6 +99,7 @@ struct Raw {
     input: u64,
     output: u64,
     reasoning: u64,
+    unclassified: u64,
     cache_read: u64,
     cache_write: u64,
     credits: f64,
@@ -188,6 +190,7 @@ impl Cube {
                 input: r.input,
                 output: r.output,
                 reasoning: r.reasoning,
+                unclassified: r.unclassified,
                 cache_read: r.cache_read,
                 cache_write: r.cache_write,
                 credits: r.credits,
@@ -208,7 +211,7 @@ impl Cube {
         let mut st = store.conn().prepare(&format!(
             "SELECT ((ts_start + ?1) % {DAY_MS}) / {HOUR_MS} AS h, app, {MODEL_EXPR},
                     COUNT(*),
-                    COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens),0),
+                    COALESCE(SUM(input_tokens+output_tokens+cache_read_tokens+unclassified_tokens),0),
                     COALESCE(SUM(cost_usd),0)
              FROM usage_events WHERE ts_start >= ?2 GROUP BY h, app, 3"
         ))?;
@@ -355,6 +358,7 @@ impl Cube {
                 input_tokens: 0,
                 output_tokens: 0,
                 reasoning_tokens: 0,
+                unclassified_tokens: 0,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
                 credits: 0.0,
@@ -364,6 +368,7 @@ impl Cube {
             a.input_tokens += g.input;
             a.output_tokens += g.output;
             a.reasoning_tokens += g.reasoning;
+            a.unclassified_tokens += g.unclassified;
             a.cache_read_tokens += g.cache_read;
             a.cache_write_tokens += g.cache_write;
             a.credits += g.credits;
@@ -532,6 +537,7 @@ fn add(t: &mut Totals, g: &Group) {
     t.input_tokens += g.input;
     t.output_tokens += g.output;
     t.reasoning_tokens += g.reasoning;
+    t.unclassified_tokens += g.unclassified;
     t.cache_read_tokens += g.cache_read;
     t.cache_write_tokens += g.cache_write;
     t.credits += g.credits;
@@ -651,7 +657,7 @@ fn query_groups(store: &Store, off_ms: i64, days: Option<&BTreeSet<i64>>) -> Res
                 COALESCE(SUM(reasoning_tokens),0), COALESCE(SUM(cache_read_tokens),0),
                 COALESCE(SUM(cache_write_5m_tokens+cache_write_1h_tokens),0),
                 COALESCE(SUM(credits),0), COALESCE(SUM(cost_usd),0), COALESCE(SUM(active_ms),0),
-                COALESCE(SUM(duration_ms),0)
+                COALESCE(SUM(duration_ms),0), COALESCE(SUM(unclassified_tokens),0)
          FROM usage_events {filter} GROUP BY d, app, m"
     ))?;
     let rows = st.query_map(rusqlite::params_from_iter(params.iter()), |r| {
@@ -669,6 +675,7 @@ fn query_groups(store: &Store, off_ms: i64, days: Option<&BTreeSet<i64>>) -> Res
             cost: r.get(10)?,
             active_ms: r.get::<_, i64>(11)? as u64,
             duration_ms: r.get::<_, i64>(12)? as u64,
+            unclassified: r.get::<_, i64>(13)? as u64,
         })
     })?;
     Ok(rows.collect::<std::result::Result<_, _>>()?)

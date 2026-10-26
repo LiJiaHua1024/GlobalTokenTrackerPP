@@ -240,6 +240,15 @@ impl Store {
 
     fn migrate(&self) -> Result<()> {
         self.conn.execute_batch(SCHEMA)?;
+        for table in ["usage_events", "daily_rollups"] {
+            let has: i64 = self.conn.query_row(
+                &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name='unclassified_tokens'"), [], |r| r.get(0))?;
+            if has == 0 {
+                self.conn.execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN unclassified_tokens INTEGER NOT NULL DEFAULT 0"
+                ))?;
+            }
+        }
         // v2: sync_cursors.adapter_state — idempotent for existing DBs.
         let has: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM pragma_table_info('sync_cursors') WHERE name='adapter_state'",
@@ -417,9 +426,9 @@ impl Store {
                  input_tokens, output_tokens, reasoning_tokens,
                  cache_read_tokens, cache_write_5m_tokens, cache_write_1h_tokens,
                  credits, cost_usd, cost_source, provenance,
-                 duration_ms, ttft_ms, active_ms, status, error, raw_ref, completeness)
+                 duration_ms, ttft_ms, active_ms, status, error, raw_ref, completeness, unclassified_tokens)
                VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,
-                       ?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)
+                       ?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)
                ON CONFLICT(dedup_key) DO UPDATE SET
                  session_id=excluded.session_id, project=excluded.project,
                  account_id=excluded.account_id, provider_id=excluded.provider_id,
@@ -436,7 +445,7 @@ impl Store {
                  duration_ms=excluded.duration_ms, ttft_ms=excluded.ttft_ms,
                  active_ms=excluded.active_ms, status=excluded.status,
                  error=excluded.error, raw_ref=excluded.raw_ref,
-                 completeness=excluded.completeness
+                 unclassified_tokens=excluded.unclassified_tokens, completeness=excluded.completeness
                WHERE excluded.completeness >= usage_events.completeness
                  -- Only when something actually differs. A source that re-emits
                  -- the same row every pass (OpenCode's in-flight message) used
@@ -451,7 +460,7 @@ impl Store {
                       usage_events.credits, usage_events.cost_usd, usage_events.cost_source,
                       usage_events.provenance, usage_events.duration_ms, usage_events.ttft_ms,
                       usage_events.active_ms, usage_events.status, usage_events.error,
-                      usage_events.raw_ref, usage_events.completeness)
+                      usage_events.raw_ref, usage_events.completeness, usage_events.unclassified_tokens)
                      IS NOT
                      (excluded.session_id, excluded.project, excluded.account_id,
                       excluded.provider_id, excluded.model, excluded.request_model,
@@ -462,7 +471,7 @@ impl Store {
                       excluded.credits, excluded.cost_usd, excluded.cost_source,
                       excluded.provenance, excluded.duration_ms, excluded.ttft_ms,
                       excluded.active_ms, excluded.status, excluded.error,
-                      excluded.raw_ref, excluded.completeness)"#,
+                      excluded.raw_ref, excluded.completeness, excluded.unclassified_tokens)"#,
             params![
                 ev.dedup_key,
                 ev.app,
@@ -492,6 +501,7 @@ impl Store {
                 ev.error,
                 ev.raw_ref,
                 completeness,
+                ev.unclassified_tokens as i64,
             ],
         )?;
         Ok(n > 0)

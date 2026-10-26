@@ -216,7 +216,7 @@ class _DetailsPageState extends State<DetailsPage> {
                                           Expanded(
                                             flex: 2,
                                             child: Text(
-                                              themeProvider.formatTokens(row.totalTokens),
+                                              '${themeProvider.formatTokens(row.totalTokens)}${row.unclassifiedTokens > 0 ? '（含未分类 ${themeProvider.formatTokens(row.unclassifiedTokens)}）' : ''}',
                                               style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
                                             ),
                                           ),

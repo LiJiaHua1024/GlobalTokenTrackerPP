@@ -3,6 +3,7 @@ class Totals {
   final int inputTokens;
   final int outputTokens;
   final int reasoningTokens;
+  final int unclassifiedTokens;
   final int cacheReadTokens;
   final int cacheWriteTokens;
   final double credits;
@@ -14,6 +15,7 @@ class Totals {
     required this.inputTokens,
     required this.outputTokens,
     required this.reasoningTokens,
+    this.unclassifiedTokens = 0,
     required this.cacheReadTokens,
     required this.cacheWriteTokens,
     required this.credits,
@@ -21,7 +23,7 @@ class Totals {
     required this.activeMs,
   });
 
-  int get totalTokens => inputTokens + outputTokens + cacheReadTokens;
+  int get totalTokens => inputTokens + outputTokens + cacheReadTokens + unclassifiedTokens;
 
   factory Totals.fromJson(Map<String, dynamic> json) {
     return Totals(
@@ -29,6 +31,7 @@ class Totals {
       inputTokens: json['input_tokens'] ?? 0,
       outputTokens: json['output_tokens'] ?? 0,
       reasoningTokens: json['reasoning_tokens'] ?? 0,
+      unclassifiedTokens: json['unclassified_tokens'] ?? 0,
       cacheReadTokens: json['cache_read_tokens'] ?? 0,
       cacheWriteTokens: json['cache_write_tokens'] ?? 0,
       credits: (json['credits'] as num?)?.toDouble() ?? 0.0,
@@ -44,6 +47,7 @@ class AppSummary {
   final int inputTokens;
   final int outputTokens;
   final int reasoningTokens;
+  final int unclassifiedTokens;
   final int cacheReadTokens;
   final int cacheWriteTokens;
   final double credits;
@@ -55,13 +59,14 @@ class AppSummary {
     required this.inputTokens,
     required this.outputTokens,
     required this.reasoningTokens,
+    this.unclassifiedTokens = 0,
     required this.cacheReadTokens,
     required this.cacheWriteTokens,
     required this.credits,
     required this.costUsd,
   });
 
-  int get totalTokens => inputTokens + outputTokens + cacheReadTokens;
+  int get totalTokens => inputTokens + outputTokens + cacheReadTokens + unclassifiedTokens;
 
   factory AppSummary.fromJson(Map<String, dynamic> json) {
     return AppSummary(
@@ -70,6 +75,7 @@ class AppSummary {
       inputTokens: json['input_tokens'] ?? 0,
       outputTokens: json['output_tokens'] ?? 0,
       reasoningTokens: json['reasoning_tokens'] ?? 0,
+      unclassifiedTokens: json['unclassified_tokens'] ?? 0,
       cacheReadTokens: json['cache_read_tokens'] ?? 0,
       cacheWriteTokens: json['cache_write_tokens'] ?? 0,
       credits: (json['credits'] as num?)?.toDouble() ?? 0.0,
@@ -571,6 +577,7 @@ class EventRow {
   final int inputTokens;
   final int outputTokens;
   final int reasoningTokens;
+  final int unclassifiedTokens;
   final int cacheReadTokens;
   final int cacheWriteTokens;
   final double? credits;
@@ -589,6 +596,7 @@ class EventRow {
     required this.inputTokens,
     required this.outputTokens,
     required this.reasoningTokens,
+    this.unclassifiedTokens = 0,
     required this.cacheReadTokens,
     required this.cacheWriteTokens,
     this.credits,
@@ -598,7 +606,7 @@ class EventRow {
     this.rawRef,
   });
 
-  int get totalTokens => inputTokens + outputTokens + cacheReadTokens;
+  int get totalTokens => inputTokens + outputTokens + cacheReadTokens + unclassifiedTokens;
 
   factory EventRow.fromJson(Map<String, dynamic> json) {
     return EventRow(
@@ -611,6 +619,7 @@ class EventRow {
       inputTokens: json['input_tokens'] ?? 0,
       outputTokens: json['output_tokens'] ?? 0,
       reasoningTokens: json['reasoning_tokens'] ?? 0,
+      unclassifiedTokens: json['unclassified_tokens'] ?? 0,
       cacheReadTokens: json['cache_read_tokens'] ?? 0,
       cacheWriteTokens: json['cache_write_tokens'] ?? 0,
       credits: (json['credits'] as num?)?.toDouble(),

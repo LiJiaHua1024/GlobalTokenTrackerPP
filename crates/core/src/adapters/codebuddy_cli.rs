@@ -29,6 +29,8 @@ use std::path::{Path, PathBuf};
 /// `messageId` can never collide across products.
 const DEDUP_PREFIX: &str = "codebuddy_cli";
 
+mod traces;
+
 pub struct CodeBuddyCli;
 
 /// `~/.codebuddy/projects` — JSONL root only. The rest of `~/.codebuddy`
@@ -65,18 +67,32 @@ impl SourceAdapter for CodeBuddyCli {
     }
 
     fn watch_roots(&self) -> Vec<PathBuf> {
-        vec![projects_root()]
+        vec![projects_root(), crate::sync::home(".codebuddy/traces")]
     }
 
     fn discover(&self) -> Result<Vec<SourceItem>> {
-        Ok(crate::sync::collect_files(&projects_root(), "jsonl", 5)
+        let mut items: Vec<SourceItem> = crate::sync::collect_files(&projects_root(), "jsonl", 5)
             .into_iter()
             .map(|p| SourceItem {
                 key: p.to_string_lossy().to_string(),
                 path: p,
                 kind: SourceKind::Jsonl,
             })
-            .collect())
+            .collect();
+        items.extend(
+            crate::sync::collect_files(&crate::sync::home(".codebuddy/traces"), "json", 6)
+                .into_iter()
+                .map(|path| SourceItem {
+                    key: path.to_string_lossy().into_owned(),
+                    path,
+                    kind: SourceKind::Sqlite,
+                }),
+        );
+        Ok(items)
+    }
+
+    fn scan_sqlite(&self, item: &SourceItem, store: &crate::Store) -> Result<ScanOutcome> {
+        traces::scan(item, store)
     }
 
     fn parse_jsonl(

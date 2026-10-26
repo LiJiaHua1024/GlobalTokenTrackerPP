@@ -123,6 +123,9 @@ impl Engine {
         let mut report = self.scan_items(adapter, &items)?;
         if adapters::codebuddy::is_codebuddy(adapter.id()) {
             let pending = format!("{}_rollups_pending", adapter.id());
+            if report.events_ingested > 0 {
+                self.store.set_state(&pending, "1")?;
+            }
             if self.store.get_state(&pending)?.as_deref() == Some("1") {
                 self.store
                     .rebuild_source_rollups(&local_utc_offset(), adapter.id())?;

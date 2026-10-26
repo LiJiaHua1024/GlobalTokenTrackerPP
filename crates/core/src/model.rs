@@ -104,6 +104,8 @@ pub struct UsageEvent {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub reasoning_tokens: u64,
+    /// Vendor total without trustworthy input/output dimensions; never priced.
+    pub unclassified_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_write_5m_tokens: u64,
     pub cache_write_1h_tokens: u64,
@@ -127,6 +129,7 @@ impl UsageEvent {
     /// carries at least as much information (spec §5, avoids cc-switch #6994).
     pub fn completeness(&self) -> i32 {
         let mut n = 0;
+        n += (self.unclassified_tokens > 0) as i32;
         n += (self.input_tokens > 0) as i32;
         n += (self.output_tokens > 0) as i32;
         n += (self.reasoning_tokens > 0) as i32;
@@ -142,7 +145,8 @@ impl UsageEvent {
     /// (Anthropic bills input+cache from request start; requiring output>0
     /// would systematically undercount — spec §6.1).
     pub fn is_billable(&self) -> bool {
-        self.input_tokens > 0
+        self.unclassified_tokens > 0
+            || self.input_tokens > 0
             || self.output_tokens > 0
             || self.reasoning_tokens > 0
             || self.cache_read_tokens > 0
