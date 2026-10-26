@@ -155,7 +155,7 @@ class _DetailsPageState extends State<DetailsPage> {
                               Expanded(flex: 2, child: Text('总 Tokens', style: headerStyle)),
                               Expanded(flex: 3, child: Text('输入 / 缓存读', style: headerStyle)),
                               Expanded(flex: 2, child: Text('输出', style: headerStyle)),
-                              Expanded(flex: 2, child: Text('预估成本 (USD)', style: headerStyle)),
+                              Expanded(flex: 2, child: Text('预估成本 (${themeProvider.displayCurrency})', style: headerStyle)),
                               Expanded(flex: 2, child: Text('耗时 / 输出速度', style: headerStyle)),
                             ],
                           ),
@@ -237,7 +237,7 @@ class _DetailsPageState extends State<DetailsPage> {
                                           Expanded(
                                             flex: 2,
                                             child: Text(
-                                              row.costUsd != null ? '\$${row.costUsd!.toStringAsFixed(4)}' : '-',
+                                              row.costUsd != null ? themeProvider.formatMoney(row.costUsd!, decimals: 4) : '-',
                                               style: TextStyle(
                                                 color: Colors.green.shade700,
                                                 fontWeight: FontWeight.bold,

@@ -1,6 +1,8 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import '../core/theme.dart';
 import '../core/ffi_bridge.dart';
 import '../core/models.dart';
 
@@ -114,6 +116,7 @@ class _PricingPageState extends State<PricingPage> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final themeProvider = context.watch<ThemeProvider>();
 
     final filtered = _prices.where((p) {
       if (_searchQuery.isEmpty) return true;
@@ -149,7 +152,7 @@ class _PricingPageState extends State<PricingPage> {
                     ),
                     const SizedBox(height: 4),
                     Text(
-                      '单位：美元 / 1M Tokens (支持模糊实时检索)',
+                      '单位：${themeProvider.displayCurrency} / 1M Tokens (支持模糊实时检索)',
                       style: TextStyle(color: theme.colorScheme.outline, fontSize: 12),
                     ),
                   ],
@@ -219,9 +222,9 @@ class _PricingPageState extends State<PricingPage> {
                           child: Row(
                             children: [
                               Expanded(flex: 4, child: Text('模型标识 (Model ID)', style: headerStyle)),
-                              Expanded(flex: 2, child: Text('输入 (\$ / 1M)', style: headerStyle)),
-                              Expanded(flex: 2, child: Text('输出 (\$ / 1M)', style: headerStyle)),
-                              Expanded(flex: 2, child: Text('缓存读取 (\$ / 1M)', style: headerStyle)),
+                              Expanded(flex: 2, child: Text('输入 (${themeProvider.displayCurrency} / 1M)', style: headerStyle)),
+                              Expanded(flex: 2, child: Text('输出 (${themeProvider.displayCurrency} / 1M)', style: headerStyle)),
+                              Expanded(flex: 2, child: Text('缓存读取 (${themeProvider.displayCurrency} / 1M)', style: headerStyle)),
                               Expanded(flex: 2, child: Text('数据来源', style: headerStyle)),
                             ],
                           ),
@@ -270,21 +273,21 @@ class _PricingPageState extends State<PricingPage> {
                                           Expanded(
                                             flex: 2,
                                             child: Text(
-                                              '\$${p.input.toStringAsFixed(2)}',
+                                              themeProvider.formatMoney(p.input, decimals: 2),
                                               style: const TextStyle(fontSize: 13),
                                             ),
                                           ),
                                           Expanded(
                                             flex: 2,
                                             child: Text(
-                                              '\$${p.output.toStringAsFixed(2)}',
+                                              themeProvider.formatMoney(p.output, decimals: 2),
                                               style: const TextStyle(fontSize: 13),
                                             ),
                                           ),
                                           Expanded(
                                             flex: 2,
                                             child: Text(
-                                              '\$${p.cacheRead.toStringAsFixed(2)}',
+                                              themeProvider.formatMoney(p.cacheRead, decimals: 2),
                                               style: TextStyle(
                                                 fontSize: 13,
                                                 color: p.cacheRead > 0 ? Colors.green.shade700 : theme.colorScheme.outline,

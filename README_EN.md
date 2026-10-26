@@ -125,7 +125,7 @@ flutter build windows --release
 ## Privacy & Security
 
 - **100% Local**: No external telemetry or data collection.
-- **Sole Network Request**: Synced model prices from `llmpricing.dev` (with built-in offline seed fallback).
+- **Network Requests**: Public model prices, display-currency rates (Frankfurter / open.er-api.com / ECB), GitHub update checks, and requested vendor quota lookups. Local sessions are not uploaded; offline price seeds and cached exchange rates remain available.
 - **Read-Only**: Original logs are strictly untouched.
 - **Ledger Path**: `%USERPROFILE%\.globaltokentracker\ledger.db`.
 

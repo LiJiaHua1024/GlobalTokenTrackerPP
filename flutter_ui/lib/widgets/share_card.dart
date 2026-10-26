@@ -931,7 +931,7 @@ class ShareStatCard extends StatelessWidget {
                       Expanded(
                         child: _buildMetricTile(
                           title: '预估费用',
-                          value: '\$${span.costUsd.toStringAsFixed(2)}',
+                          value: themeProvider.formatMoney(span.costUsd, decimals: 2),
                           subtext: span.credits > 0
                               ? '抵扣: ${span.credits.toStringAsFixed(1)}'
                               : '按官方价目折算',
@@ -2539,7 +2539,7 @@ class _ShareCardDialogState extends State<ShareCardDialog> {
     buffer.writeln('📊 累计消耗: ${themeProvider.formatTokens(span.totalTokens)} Tokens '
         '(输入: ${themeProvider.formatTokens(span.inputTokens)} · 输出: ${themeProvider.formatTokens(span.outputTokens)})');
     if (_showCost) {
-      buffer.writeln('💰 预估费用: \$${span.costUsd.toStringAsFixed(2)} USD');
+      buffer.writeln('💰 预估费用: ${themeProvider.formatMoney(span.costUsd, decimals: 2)} ${themeProvider.displayCurrency}');
     }
     if (_showActivity) {
       buffer.writeln('⚡ API 请求: ${_formatCount(span.events)} 次 · '

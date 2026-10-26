@@ -60,7 +60,7 @@ void main(List<String> args) async {
   runApp(
     MultiProvider(
       providers: [
-        ChangeNotifierProvider(create: (_) => ThemeProvider()),
+        ChangeNotifierProvider(create: (_) => ThemeProvider()..initializeCurrency()),
         ChangeNotifierProvider(create: (_) => UpdateProvider()),
       ],
       child: const GlobalTokenTrackerApp(),

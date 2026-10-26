@@ -7,6 +7,7 @@ import '../core/theme.dart';
 import '../core/update_models.dart';
 import '../core/update_provider.dart';
 import '../widgets/update_dialog.dart';
+import '../widgets/currency_settings_card.dart';
 
 class SettingsPage extends StatelessWidget {
   const SettingsPage({Key? key}) : super(key: key);
@@ -33,6 +34,8 @@ class SettingsPage extends StatelessWidget {
       padding: const EdgeInsets.all(24.0),
       child: ListView(
         children: [
+          const CurrencySettingsCard(),
+          const SizedBox(height: 16),
           Text(
             '设置与外观偏好',
             style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),

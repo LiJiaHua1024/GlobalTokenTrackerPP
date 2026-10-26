@@ -677,8 +677,8 @@ class _VelocityPageState extends State<VelocityPage>
           _buildKpiCard(
             context,
             title: '预估费用增速',
-            value: '\$${metric.costPerHour.toStringAsFixed(2)} /h',
-            subtitle: '该窗口实际花费: \$${metric.costUsd.toStringAsFixed(4)}',
+            value: '${themeProvider.formatMoney(metric.costPerHour, decimals: 2)} /h',
+            subtitle: '该窗口实际花费: ${themeProvider.formatMoney(metric.costUsd, decimals: 4)}',
             icon: Icons.local_fire_department_rounded,
             color: const Color(0xFF34A853),
           ),
@@ -918,7 +918,7 @@ class _VelocityPageState extends State<VelocityPage>
                             '${b.label}\n'
                             '速率: ${themeProvider.formatTokens(b.totalTokens)} tokens/min\n'
                             '${_formatTps(b.tokensPerSec)} TPS · ${b.events} 请求\n'
-                            '费用: \$${b.costUsd.toStringAsFixed(4)}',
+                            '费用: ${themeProvider.formatMoney(b.costUsd, decimals: 4)}',
                             TextStyle(
                               color: theme.colorScheme.onInverseSurface,
                               fontSize: 11,
@@ -1111,7 +1111,7 @@ class _VelocityPageState extends State<VelocityPage>
                             ),
                             const SizedBox(width: 12),
                             Text(
-                              '\$${m.costUsd.toStringAsFixed(2)}',
+                              themeProvider.formatMoney(m.costUsd, decimals: 2),
                               style: const TextStyle(
                                 color: Color(0xFF34A853),
                                 fontWeight: FontWeight.bold,

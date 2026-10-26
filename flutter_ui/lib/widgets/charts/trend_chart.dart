@@ -138,7 +138,7 @@ class _TrendChartState extends State<TrendChart> {
                   ),
                   child: Text(
                     _touchedIndex >= 0 && _touchedIndex < widget.daily.length
-                        ? '${widget.daily[_touchedIndex].date} · ${themeProvider.formatTokens(widget.daily[_touchedIndex].tokens)} Tokens · \$${widget.daily[_touchedIndex].costUsd.toStringAsFixed(3)}'
+                        ? '${widget.daily[_touchedIndex].date} · ${themeProvider.formatTokens(widget.daily[_touchedIndex].tokens)} Tokens · ${themeProvider.formatMoney(widget.daily[_touchedIndex].costUsd, decimals: 3)}'
                         : '悬停柱状图查看每日明细',
                     style: theme.textTheme.bodySmall?.copyWith(
                       color: _touchedIndex >= 0
@@ -211,7 +211,7 @@ class _TrendChartState extends State<TrendChart> {
                                   ),
                                 ),
                                 TextSpan(
-                                  text: '成本: \$${bucket.costUsd.toStringAsFixed(3)}',
+                                  text: '成本: ${themeProvider.formatMoney(bucket.costUsd, decimals: 3)}',
                                   style: const TextStyle(
                                     color: Color(0xFF4ADE80), // Soft Pastel Green
                                     fontSize: 11,

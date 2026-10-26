@@ -7,6 +7,7 @@
 pub mod adapters;
 pub mod cube;
 pub mod engine;
+pub mod fx;
 pub mod model;
 pub mod normalize;
 pub mod otel;

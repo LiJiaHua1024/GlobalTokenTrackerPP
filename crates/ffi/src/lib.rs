@@ -502,6 +502,41 @@ unsafe fn gtt_poll_quotas_impl(ctx: *mut GttContext) -> *mut c_char {
     })
 }
 
+/// Read cached FX state, change display currency, or refresh rates on a separate connection.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gtt_fx(ctx: *mut GttContext, request: *const c_char) -> *mut c_char {
+    catch_unwind_json(|| {
+        let result = (|| -> anyhow::Result<_> {
+            anyhow::ensure!(!ctx.is_null(), "Engine context is null");
+            let raw = unsafe { parse_opt_str(request) }.unwrap_or_else(|| "{}".into());
+            let q: serde_json::Value = serde_json::from_str(&raw)?;
+            let gtt = unsafe { &*ctx };
+            // Network refreshes never hold either of the UI's connection locks.
+            let store = Store::open(&gtt.db_path)?;
+            match q["action"].as_str().unwrap_or("status") {
+                "set" => {
+                    let code = q["currency"].as_str().unwrap_or("USD");
+                    anyhow::ensure!(
+                        code.len() == 3 && code.bytes().all(|b| b.is_ascii_uppercase()),
+                        "invalid currency code"
+                    );
+                    globaltokentracker_core::fx::set_display_currency(&store, code)?;
+                }
+                "refresh" => {
+                    return globaltokentracker_core::fx::refresh(&store);
+                }
+                "status" => {}
+                _ => anyhow::bail!("unknown FX operation"),
+            }
+            Ok(globaltokentracker_core::fx::status(&store))
+        })();
+        match result {
+            Ok(r) => to_json_c_string(&r),
+            Err(e) => to_error_c_string(e),
+        }
+    })
+}
+
 /// Historical speed ranking; request and response are UTF-8 JSON.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gtt_get_speed_ranking(

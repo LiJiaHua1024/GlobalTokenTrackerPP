@@ -324,8 +324,8 @@ class _OverviewPageState extends State<OverviewPage> {
                     color: const Color(0xFF1A73E8),
                   ),
                   StatCard(
-                    title: '预估费用 (USD)',
-                    value: '\$${span.costUsd.toStringAsFixed(2)}',
+                    title: '预估费用 (${themeProvider.displayCurrency})',
+                    value: themeProvider.formatMoney(span.costUsd, decimals: 2),
                     subtitle: span.credits > 0
                         ? '订阅抵扣: ${span.credits.toStringAsFixed(1)} credits'
                         : '按价目表计算',
@@ -386,9 +386,9 @@ class _OverviewPageState extends State<OverviewPage> {
                   // 1. 按工具 · 成本
                   PieDonutChart(
                     title: '按工具 · 成本分布',
-                    centerUnit: '美元',
+                    centerUnit: themeProvider.displayCurrency,
                     initialIsDonut: false,
-                    valueFormatter: (v) => '\$${v.toStringAsFixed(2)}',
+                    valueFormatter: (v) => themeProvider.formatMoney(v, decimals: 2),
                     items: data.byApp
                         .map((a) => PieDonutChartItem(
                               label: a.app,
@@ -399,9 +399,9 @@ class _OverviewPageState extends State<OverviewPage> {
                   // 2. 按模型 · 成本
                   PieDonutChart(
                     title: '按模型 · 成本分布',
-                    centerUnit: '美元',
+                    centerUnit: themeProvider.displayCurrency,
                     initialIsDonut: true,
-                    valueFormatter: (v) => '\$${v.toStringAsFixed(2)}',
+                    valueFormatter: (v) => themeProvider.formatMoney(v, decimals: 2),
                     items: data.byModel
                         .map((m) => PieDonutChartItem(
                               label: m.name,

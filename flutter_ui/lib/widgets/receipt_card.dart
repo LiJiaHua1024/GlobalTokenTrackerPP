@@ -3,6 +3,8 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:provider/provider.dart';
+import '../core/theme.dart';
 
 import '../core/models.dart';
 
@@ -417,6 +419,7 @@ class ReceiptPaper extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final span = data.span;
+    final themeProvider = context.watch<ThemeProvider?>() ?? ThemeProvider();
 
     final sortedModels = List<ShareRow>.from(data.byModel)
       ..sort((a, b) => b.tokens.compareTo(a.tokens));
@@ -489,7 +492,7 @@ class ReceiptPaper extends StatelessWidget {
                       _columnHeader(),
                       const SizedBox(height: 7),
                       for (final m in modelLines)
-                        _modelRow(m, span.totalTokens),
+                        _modelRow(m, span.totalTokens, themeProvider),
                       if (hiddenModels > 0)
                         Padding(
                           padding: const EdgeInsets.only(top: 3),
@@ -513,14 +516,14 @@ class ReceiptPaper extends StatelessWidget {
                     if (showCost)
                       _totalRow(
                         'TOTAL COST',
-                        '\$${span.costUsd.toStringAsFixed(2)}',
+                        themeProvider.formatMoney(span.costUsd, decimals: 2),
                         size: 19,
                         weight: FontWeight.w800,
                       ),
                     if (showCost)
                       _totalRow(
                         'UNIT PRICE',
-                        '\$${perMillion.toStringAsFixed(4)} / 1M',
+                        '${themeProvider.formatMoney(perMillion, decimals: 4)} / 1M',
                         size: 10,
                         color: _Ink.soft,
                       ),
@@ -629,7 +632,7 @@ class ReceiptPaper extends StatelessWidget {
     );
   }
 
-  Widget _modelRow(ShareRow m, int spanTokens) {
+  Widget _modelRow(ShareRow m, int spanTokens, ThemeProvider themeProvider) {
     final share = spanTokens > 0 ? m.tokens / spanTokens : 0.0;
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
@@ -663,7 +666,7 @@ class ReceiptPaper extends StatelessWidget {
               SizedBox(
                 width: 76,
                 child: Text(
-                  '\$${m.costUsd.toStringAsFixed(2)}',
+                  themeProvider.formatMoney(m.costUsd, decimals: 2),
                   textAlign: TextAlign.right,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,

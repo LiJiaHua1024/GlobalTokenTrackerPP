@@ -337,7 +337,7 @@ class _TokenActivityCalendarState extends State<TokenActivityCalendar> {
                             final tooltipText =
                                 '$dStr\n${themeProvider.formatTokens(dailyTokens)} Tokens'
                                 '${events > 0 ? ' · $events 次请求' : ''}'
-                                '${cost > 0 ? ' · \$${cost.toStringAsFixed(3)}' : ''}';
+                                '${cost > 0 ? ' · ${themeProvider.formatMoney(cost, decimals: 3)}' : ''}';
 
                             return Padding(
                               padding: EdgeInsets.only(bottom: d < daysPerWeek - 1 ? actualSpacing : 0),

@@ -203,6 +203,7 @@ class FfiBridge {
               'gtt_get_token_rates');
           lib.lookup<ffi.NativeFunction<_gtt_json_request_c>>(
               'gtt_get_speed_ranking');
+          lib.lookup<ffi.NativeFunction<_gtt_json_request_c>>('gtt_fx');
           _resolvedDylibPath = path;
           _dylib = lib;
           return;
