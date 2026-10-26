@@ -13,6 +13,9 @@ void main() {
       expect(rates.m1, isNotNull);
       expect(rates.h1, isNotNull);
       expect(rates.h24, isNotNull);
+      final ranking = await bridge.queryJson('gtt_get_speed_ranking', {'range_key': 'all', 'group_by': 'model', 'metric': 'output'});
+      expect(ranking['total'], 0);
+      expect(ranking['rows'], isEmpty);
     } finally {
       bridge.closeEngine();
     }

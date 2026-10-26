@@ -584,6 +584,8 @@ class EventRow {
   final double? costUsd;
   final String? costSource;
   final int? durationMs;
+  final int? tsEnd;
+  final int? ttftMs;
   final String? rawRef;
 
   EventRow({
@@ -603,11 +605,31 @@ class EventRow {
     this.costUsd,
     this.costSource,
     this.durationMs,
+    this.tsEnd,
+    this.ttftMs,
     this.rawRef,
   });
 
   int get totalTokens => inputTokens + outputTokens + cacheReadTokens + unclassifiedTokens;
 
+  int? get effectiveDurationMs {
+    if (durationMs != null && durationMs! > 0) return durationMs;
+    if (tsEnd == null || tsStart == null) return null;
+    final ms = tsEnd! - tsStart!;
+    return ms > 0 && ms <= 1800000 ? ms : null;
+  }
+  double? get outputTps => unclassifiedTokens > 0 || effectiveDurationMs == null ? null : outputTokens * 1000 / effectiveDurationMs!;
+  String get speedDescription {
+    final ms = effectiveDurationMs;
+    if (ms == null || unclassifiedTokens > 0) return '缺少有效计时或 Token 分项';
+    final parts = ['输出 ${outputTps!.toStringAsFixed(1)} tok/s', '总吞吐 ${((inputTokens + outputTokens) * 1000 / ms).toStringAsFixed(1)} tok/s', '输入 ${(inputTokens * 1000 / ms).toStringAsFixed(1)} tok/s'];
+    if (ttftMs != null && ttftMs! > 0) {
+      parts.add('TTFT $ttftMs ms · 预填 ${(inputTokens * 1000 / ttftMs!).toStringAsFixed(1)} tok/s');
+      if (ms > ttftMs!) parts.add('解码 ${(outputTokens * 1000 / (ms - ttftMs!)).toStringAsFixed(1)} tok/s');
+    }
+    if (durationMs == null || durationMs! <= 0) parts.add('时长由时间戳估算');
+    return parts.join('\n');
+  }
   factory EventRow.fromJson(Map<String, dynamic> json) {
     return EventRow(
       app: json['app'] ?? '',
@@ -626,6 +648,8 @@ class EventRow {
       costUsd: (json['cost_usd'] as num?)?.toDouble(),
       costSource: json['cost_source'],
       durationMs: json['duration_ms'],
+      tsEnd: json['ts_end'],
+      ttftMs: json['ttft_ms'],
       rawRef: json['raw_ref'],
     );
   }

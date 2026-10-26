@@ -92,7 +92,31 @@ typedef _gtt_poll_quotas_c = ffi.Pointer<Utf8> Function(
 typedef _gtt_poll_quotas_dart = ffi.Pointer<Utf8> Function(
     ffi.Pointer<ffi.Void> ctx);
 
+typedef _gtt_json_request_c = ffi.Pointer<Utf8> Function(ffi.Pointer<ffi.Void>, ffi.Pointer<Utf8>);
+typedef _gtt_json_request_dart = ffi.Pointer<Utf8> Function(ffi.Pointer<ffi.Void>, ffi.Pointer<Utf8>);
+
 class FfiBridge {
+  /// Executes JSON endpoints on a worker isolate and frees both ABI buffers.
+  Future<Map<String, dynamic>> queryJson(String symbol, Map<String, dynamic> request) async {
+    if (_context == null) throw StateError('Engine not initialized');
+    final address = _context!.address;
+    final path = _resolvedDylibPath;
+    return Isolate.run(() {
+      final library = ffi.DynamicLibrary.open(path);
+      final call = library.lookupFunction<_gtt_json_request_c, _gtt_json_request_dart>(symbol);
+      final free = library.lookupFunction<_gtt_free_string_c, _gtt_free_string_dart>('gtt_free_string');
+      final input = jsonEncode(request).toNativeUtf8();
+      ffi.Pointer<Utf8> output = ffi.nullptr;
+      try {
+        output = call(ffi.Pointer<ffi.Void>.fromAddress(address), input);
+        if (output == ffi.nullptr) throw StateError('Empty native response');
+        return Map<String, dynamic>.from(decodeFfiEnvelope(output.toDartString()) as Map);
+      } finally {
+        calloc.free(input);
+        if (output != ffi.nullptr) free(output);
+      }
+    });
+  }
   static const _autoPriceRefreshInterval = Duration(hours: 12);
 
   static FfiBridge? _instance;
@@ -177,6 +201,8 @@ class FfiBridge {
           // Verify required symbols exist so a stale DLL does not shadow a newer build
           lib.lookup<ffi.NativeFunction<_gtt_get_token_rates_c>>(
               'gtt_get_token_rates');
+          lib.lookup<ffi.NativeFunction<_gtt_json_request_c>>(
+              'gtt_get_speed_ranking');
           _resolvedDylibPath = path;
           _dylib = lib;
           return;

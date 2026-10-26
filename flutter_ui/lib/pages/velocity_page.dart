@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import '../core/ffi_bridge.dart';
 import '../core/models.dart';
 import '../core/theme.dart';
+import 'speed_ranking_page.dart';
 
 class VelocityPage extends StatefulWidget {
   final TokenRateOverview? initialRates;
@@ -331,6 +332,8 @@ class _VelocityPageState extends State<VelocityPage>
           children: [
             // Top Header: Page Title, Status Badge, Live Toggle & Action Buttons
             _buildHeaderBar(context, rates),
+            const SizedBox(height: 12),
+            FilledButton.tonalIcon(onPressed: () => Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => SpeedRankingPage(apps: _availableApps, models: _availableModels))), icon: const Icon(Icons.leaderboard), label: const Text('历史速度排行榜')),
             const SizedBox(height: 16),
 
             // Tool Filters (if available)

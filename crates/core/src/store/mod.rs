@@ -2,6 +2,8 @@
 
 mod cursor;
 mod query;
+mod speed;
+pub use speed::{SpeedQuery, SpeedRanking, SpeedRow};
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};

@@ -156,7 +156,7 @@ class _DetailsPageState extends State<DetailsPage> {
                               Expanded(flex: 3, child: Text('输入 / 缓存读', style: headerStyle)),
                               Expanded(flex: 2, child: Text('输出', style: headerStyle)),
                               Expanded(flex: 2, child: Text('预估成本 (USD)', style: headerStyle)),
-                              Expanded(flex: 2, child: Text('耗时', style: headerStyle)),
+                              Expanded(flex: 2, child: Text('耗时 / 输出速度', style: headerStyle)),
                             ],
                           ),
                         ),
@@ -247,10 +247,10 @@ class _DetailsPageState extends State<DetailsPage> {
                                           ),
                                           Expanded(
                                             flex: 2,
-                                            child: Text(
-                                              row.durationMs != null ? '${row.durationMs}ms' : '-',
+                                            child: Tooltip(message: row.speedDescription, child: Text(
+                                              row.effectiveDurationMs == null ? '—' : '${row.effectiveDurationMs}ms · ${row.outputTps?.toStringAsFixed(1) ?? '—'} tok/s',
                                               style: const TextStyle(fontSize: 12),
-                                            ),
+                                            )),
                                           ),
                                         ],
                                       ),

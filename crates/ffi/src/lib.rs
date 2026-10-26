@@ -502,6 +502,31 @@ unsafe fn gtt_poll_quotas_impl(ctx: *mut GttContext) -> *mut c_char {
     })
 }
 
+/// Historical speed ranking; request and response are UTF-8 JSON.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gtt_get_speed_ranking(
+    ctx: *mut GttContext,
+    request: *const c_char,
+) -> *mut c_char {
+    catch_unwind_json(|| {
+        let result = (|| -> anyhow::Result<_> {
+            anyhow::ensure!(!ctx.is_null(), "Engine context is null");
+            let raw = unsafe { parse_opt_str(request) }.unwrap_or_else(|| "{}".into());
+            let query = serde_json::from_str::<globaltokentracker_core::store::SpeedQuery>(&raw)?;
+            let gtt = unsafe { &*ctx };
+            let store = gtt
+                .reads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            store.speed_ranking(&query)
+        })();
+        match result {
+            Ok(r) => to_json_c_string(&r),
+            Err(e) => to_error_c_string(e),
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -120,16 +120,17 @@ impl SpeedSums {
 /// `ts_end - ts_start` when in `(0, MAX_DERIVED_DURATION_MS]` — longer gaps
 /// span idle time between sessions, so the event stays untimed and out of
 /// every speed figure.
-fn speed_exprs() -> String {
+pub(super) fn speed_exprs() -> String {
     let max = crate::normalize::MAX_DERIVED_DURATION_MS;
-    let timed =
-        format!("(duration_ms > 0 OR (ts_end - ts_start > 0 AND ts_end - ts_start <= {max}))");
+    let timed = format!(
+        "(unclassified_tokens=0 AND (duration_ms > 0 OR (ts_end - ts_start > 0 AND ts_end - ts_start <= {max})))"
+    );
     let est = format!(
         "((duration_ms IS NULL OR duration_ms <= 0) \
          AND ts_end - ts_start > 0 AND ts_end - ts_start <= {max})"
     );
     let eff = format!(
-        "(CASE WHEN duration_ms > 0 THEN duration_ms \
+        "(CASE WHEN unclassified_tokens>0 THEN 0 WHEN duration_ms > 0 THEN duration_ms \
          WHEN ts_end - ts_start > 0 AND ts_end - ts_start <= {max} THEN ts_end - ts_start \
          ELSE 0 END)"
     );
@@ -139,16 +140,16 @@ fn speed_exprs() -> String {
          COALESCE(SUM({eff}),0), \
          COALESCE(SUM(CASE WHEN {est} THEN ts_end - ts_start ELSE 0 END),0), \
          COALESCE(SUM(CASE WHEN {timed} THEN 1 ELSE 0 END),0), \
-         COALESCE(SUM(CASE WHEN ttft_ms > 0 THEN input_tokens ELSE 0 END),0), \
-         COALESCE(SUM(CASE WHEN ttft_ms > 0 THEN ttft_ms ELSE 0 END),0), \
-         COALESCE(SUM(CASE WHEN ttft_ms > 0 THEN 1 ELSE 0 END),0), \
+         COALESCE(SUM(CASE WHEN unclassified_tokens=0 AND ttft_ms > 0 THEN input_tokens ELSE 0 END),0), \
+         COALESCE(SUM(CASE WHEN unclassified_tokens=0 AND ttft_ms > 0 THEN ttft_ms ELSE 0 END),0), \
+         COALESCE(SUM(CASE WHEN unclassified_tokens=0 AND ttft_ms > 0 THEN 1 ELSE 0 END),0), \
          COALESCE(SUM(CASE WHEN ttft_ms > 0 AND {eff} > ttft_ms THEN output_tokens ELSE 0 END),0), \
          COALESCE(SUM(CASE WHEN ttft_ms > 0 AND {eff} > ttft_ms THEN {eff} - ttft_ms ELSE 0 END),0)"
     )
 }
 
 /// Map the ten `speed_exprs` columns starting at `offset` into a `SpeedSums`.
-fn speed_from_row(r: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<SpeedSums> {
+pub(super) fn speed_from_row(r: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<SpeedSums> {
     let n = |i: usize| r.get::<_, i64>(offset + i).map(|v| v as u64);
     Ok(SpeedSums {
         speed_in: n(0)?,
@@ -296,6 +297,8 @@ pub struct SourceHealth {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct EventRow {
+    pub ts_end: Option<i64>,
+    pub ttft_ms: Option<i64>,
     pub app: String,
     pub model: Option<String>,
     pub pricing_model: Option<String>,
@@ -313,6 +316,25 @@ pub struct EventRow {
     pub cost_source: Option<String>,
     pub duration_ms: Option<i64>,
     pub raw_ref: Option<String>,
+}
+
+impl EventRow {
+    pub fn effective_duration_ms(&self) -> Option<i64> {
+        self.duration_ms.filter(|v| *v > 0).or_else(|| {
+            self.ts_end
+                .zip(self.ts_start)
+                .map(|(end, start)| end.saturating_sub(start))
+                .filter(|v| *v > 0 && *v <= crate::normalize::MAX_DERIVED_DURATION_MS)
+        })
+    }
+
+    pub fn output_tps(&self) -> Option<f64> {
+        if self.unclassified_tokens > 0 {
+            return None;
+        }
+        self.effective_duration_ms()
+            .map(|ms| self.output_tokens as f64 * 1000.0 / ms as f64)
+    }
 }
 
 /// One row of the trend tooltip query: bucket ("YYYY-MM-DD"/"HH:00") × model.
@@ -1007,7 +1029,7 @@ impl super::Store {
             "SELECT app, model, pricing_model, project, session_id, ts_start,
                     input_tokens, output_tokens, reasoning_tokens,
                     cache_read_tokens, cache_write_5m_tokens+cache_write_1h_tokens,
-                    credits, cost_usd, cost_source, duration_ms, raw_ref, unclassified_tokens
+                    credits, cost_usd, cost_source, duration_ms, raw_ref, unclassified_tokens, ts_end, ttft_ms
              FROM usage_events {w} ORDER BY ts_start DESC LIMIT ?{li} OFFSET ?{oi}"
         ))?;
         let rows = st.query_map(rusqlite::params_from_iter(p.iter()), |r| {
@@ -1029,6 +1051,8 @@ impl super::Store {
                 cost_source: r.get(13)?,
                 duration_ms: r.get(14)?,
                 raw_ref: r.get(15)?,
+                ts_end: r.get("ts_end")?,
+                ttft_ms: r.get("ttft_ms")?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -1207,7 +1231,7 @@ impl super::Store {
             "SELECT app, model, pricing_model, project, session_id, ts_start,
                     input_tokens, output_tokens, reasoning_tokens,
                     cache_read_tokens, cache_write_5m_tokens+cache_write_1h_tokens,
-                    credits, cost_usd, cost_source, duration_ms, raw_ref, unclassified_tokens
+                    credits, cost_usd, cost_source, duration_ms, raw_ref, unclassified_tokens, ts_end, ttft_ms
              FROM usage_events {w} ORDER BY ts_start"
         ))?;
         let rows = st.query_map(rusqlite::params_from_iter(p.iter()), |r| {
@@ -1229,6 +1253,8 @@ impl super::Store {
                 cost_source: r.get(13)?,
                 duration_ms: r.get(14)?,
                 raw_ref: r.get(15)?,
+                ts_end: r.get("ts_end")?,
+                ttft_ms: r.get("ttft_ms")?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<_, _>>()?)
@@ -1631,7 +1657,7 @@ pub const MODEL_EXPR: &str =
 /// `None` → no clause; `Some(list)` → `IN (?,?,…)` bound as params;
 /// `Some(empty)` (user unchecked everything) → `WHERE 0`, an honest empty
 /// result.
-fn scope_where(
+pub(super) fn scope_where(
     from_ms: Option<i64>,
     to_ms: Option<i64>,
     apps: Option<&[String]>,
