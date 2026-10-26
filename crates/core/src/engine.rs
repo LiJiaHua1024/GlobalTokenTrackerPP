@@ -114,10 +114,23 @@ impl Engine {
         }
     }
 
-    fn scan_adapter(&self, adapter: &dyn SourceAdapter) -> Result<ScanReport> {
+    pub(crate) fn scan_adapter(&self, adapter: &dyn SourceAdapter) -> Result<ScanReport> {
         let t0 = std::time::Instant::now();
         let items = adapter.discover()?;
-        let report = self.scan_items(adapter, &items)?;
+        if adapter.id() == crate::model::apps::CODEBUDDY_IDE && !items.is_empty() {
+            adapters::codebuddy::backup_legacy(&self.store)?;
+        }
+        let mut report = self.scan_items(adapter, &items)?;
+        if adapters::codebuddy::is_codebuddy(adapter.id()) {
+            let pending = format!("{}_rollups_pending", adapter.id());
+            if self.store.get_state(&pending)?.as_deref() == Some("1") {
+                self.store
+                    .rebuild_source_rollups(&local_utc_offset(), adapter.id())?;
+                self.store.set_state(&pending, "0")?;
+            }
+            report.rollup_days.clear();
+            report.rollup_full = false;
+        }
         debug!(
             adapter = adapter.id(),
             ms = t0.elapsed().as_millis() as u64,
@@ -135,7 +148,11 @@ impl Engine {
         Ok(report)
     }
 
-    fn scan_items(&self, adapter: &dyn SourceAdapter, items: &[SourceItem]) -> Result<ScanReport> {
+    pub(crate) fn scan_items(
+        &self,
+        adapter: &dyn SourceAdapter,
+        items: &[SourceItem],
+    ) -> Result<ScanReport> {
         let mut report = ScanReport {
             files_seen: items.len() as u64,
             ..Default::default()
@@ -226,22 +243,40 @@ impl Engine {
 
         // SQLite sources (adapter-managed watermarks).
         for item in sqlite {
+            // Mutable CodeBuddy snapshots, legacy replacement, events and
+            // watermarks must all commit together or remain replayable.
+            let codebuddy = adapters::codebuddy::is_codebuddy(adapter.id());
+            let tx = if codebuddy {
+                Some(self.store.conn().unchecked_transaction()?)
+            } else {
+                None
+            };
             match adapter.scan_sqlite(item, &self.store) {
                 Ok(outcome) => {
+                    if codebuddy {
+                        for event in &outcome.events {
+                            anyhow::ensure!(event.app == adapter.id(), "CodeBuddy app mismatch");
+                            self.store.conn().execute(
+                                "DELETE FROM usage_events WHERE app=?1 AND dedup_key=?2",
+                                rusqlite::params![event.app, event.dedup_key],
+                            )?;
+                        }
+                    }
+                    let mut local = ScanReport::default();
                     if let Err(e) = self.ingest(
                         adapter.id(),
                         adapter.capability(),
                         outcome.events,
                         outcome.quotas,
-                        &mut report,
+                        &mut local,
                     ) {
                         report
                             .errors
                             .push(format!("{}: {e:#}", item.path.display()));
                         continue; // watermark stays put; the batch is re-read
                     }
-                    report.events_skipped += outcome.skipped;
-                    report.files_scanned += 1;
+                    local.events_skipped += outcome.skipped;
+                    local.files_scanned += 1;
                     if let Some(pc) = outcome.pending_cursor {
                         self.store.save_cursor(
                             adapter.id(),
@@ -252,6 +287,14 @@ impl Engine {
                             pc.state.as_deref(),
                         )?;
                     }
+                    if codebuddy && local.events_ingested > 0 {
+                        self.store
+                            .set_state(&format!("{}_rollups_pending", adapter.id()), "1")?;
+                    }
+                    if let Some(tx) = tx {
+                        tx.commit()?;
+                    }
+                    merge(&mut report, local);
                 }
                 Err(e) => report
                     .errors

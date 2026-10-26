@@ -379,12 +379,7 @@ pub struct RateMetric {
 }
 
 impl RateMetric {
-    pub fn from_totals(
-        window: impl Into<String>,
-        start_ms: i64,
-        end_ms: i64,
-        t: &Totals,
-    ) -> Self {
+    pub fn from_totals(window: impl Into<String>, start_ms: i64, end_ms: i64, t: &Totals) -> Self {
         let duration_ms = (end_ms - start_ms).max(1);
         let secs = duration_ms as f64 / 1000.0;
         let mins = secs / 60.0;
@@ -1089,12 +1084,23 @@ impl super::Store {
     /// offset change), local-date aligned via `utc_offset`.
     /// Returns rows written.
     pub fn rebuild_rollups(&self, utc_offset: &str) -> Result<u64> {
+        self.rebuild_rollups_for(utc_offset, None)
+    }
+
+    pub(crate) fn rebuild_source_rollups(&self, utc_offset: &str, source: &str) -> Result<u64> {
+        self.rebuild_rollups_for(utc_offset, Some(source))
+    }
+
+    fn rebuild_rollups_for(&self, utc_offset: &str, source: Option<&str>) -> Result<u64> {
         anyhow::ensure!(
             crate::viewmodel::utc_offset_ms(utc_offset).is_some(),
             "invalid utc_offset: {utc_offset}"
         );
         let tx = self.conn().unchecked_transaction()?;
-        tx.execute("DELETE FROM daily_rollups", [])?;
+        tx.execute(
+            "DELETE FROM daily_rollups WHERE ?1 IS NULL OR app=?1",
+            [source],
+        )?;
         let n = tx.execute(
             &format!(
                 "INSERT INTO daily_rollups
@@ -1109,10 +1115,10 @@ impl super::Store {
                         COALESCE(SUM(cache_write_5m_tokens),0),
                         COALESCE(SUM(cache_write_1h_tokens),0),
                         SUM(credits), SUM(cost_usd), COALESCE(SUM(active_ms),0)
-                 FROM usage_events
+                 FROM usage_events WHERE ?1 IS NULL OR app=?1
                  GROUP BY 1,2,3,4,5"
             ),
-            [],
+            [source],
         )?;
         tx.commit()?;
         Ok(n as u64)

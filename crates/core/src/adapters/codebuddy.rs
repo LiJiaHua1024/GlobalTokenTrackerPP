@@ -1,59 +1,67 @@
-//! CodeBuddy adapter (spec §6.11) — Tencent's `tencent-cloud.coding-copilot`
-//! extension, hosted by CodeBuddy IDE and VS Code. Sibling of WorkBuddy (same
-//! vendor/account plane) but a **separate product**: it gets its own app id
-//! and its own ledger rows, never folded into `workbuddy`.
-//!
-//! Local layout (Windows/macOS share `dirs::data_local_dir()`):
-//!   `CodeBuddyExtension/Data/<user>/<host>/<acct>/history/<ws>/<conv>/`
-//!     `index.json`      — conversation list (fingerprint file for the cursor)
-//!     `messages/*.json` — one message per file; `role`/`createdAt`/`extra`
-//!
-//! Assistant messages carry `extra` (JSON string) with a cumulative
-//! `statsSnapshot`: {inputTokens, outputTokens, cachedInputTokens,
-//! cacheWriteTokens, thinkingTokens, elapsedMs, credit}. The last snapshot in
-//! a conversation IS its exact token total; component-wise deltas between
-//! consecutive snapshots bundle one or more LLM calls into one event — totals
-//! stay exact, per-call granularity is traded away (Capability::Estimate).
-//!
-//! Every conversation dir is one `Sqlite`-kind SourceItem so `scan_sqlite`
-//! owns the watermark: `adapter_state` persists processed file names and the
-//! last cumulative snapshot, making incremental scans O(new files).
+//! CodeBuddy IDE/Agent request snapshots. Messages are mutable: the Agent
+//! writes statsSnapshot after streaming into the same file. Fingerprints track
+//! revisions; snapshots aggregate calls within a request, never a conversation.
+//! Version-2 cursors recover legacy seen-only state and retain orphaned history.
 
-use super::{Capability, PendingCursor, ScanOutcome, SourceAdapter, SourceItem, SourceKind};
+use super::{Capability, ScanOutcome, SourceAdapter, SourceItem, SourceKind};
 use crate::model::{Provenance, UsageEvent, apps};
 use crate::normalize::{epoch_ms, num, text};
 use crate::store::Store;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
-/// `messages` directory mtimes seen at the end of a clean pass, keyed by
-/// conversation. Adapter objects live only for one scan (`Engine::new` builds
-/// a fresh registry each time), so this has to be process-wide.
-///
-/// A conversation whose `messages` directory has not changed since is skipped
-/// outright — before, every pass paid a cursor read, a JSON parse of the whole
-/// `seen` set and a directory listing for each of ~57 conversations (~80ms).
-/// Only directories that were already quiet for `QUIET` when scanned are
-/// trusted: NTFS stamps directory changes with a coarse clock, so a file added
-/// moments after our listing can carry the *same* timestamp and would
-/// otherwise be missed until the next change.
-fn dir_memo() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::SystemTime>>
-{
-    static M: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, std::time::SystemTime>>,
-    > = std::sync::OnceLock::new();
-    M.get_or_init(Default::default)
+// Manual refresh forces a content check, including equal-size rewrites.
+static REFRESH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn forget_scan_memo() {
+    REFRESH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
-const QUIET: std::time::Duration = std::time::Duration::from_secs(2);
+pub(crate) fn is_codebuddy(id: &str) -> bool {
+    matches!(id, apps::CODEBUDDY_IDE | apps::CODEBUDDY_CLI)
+}
 
-/// Forget which conversations were last seen unchanged (manual refresh: trust
-/// nothing, re-read everything against the cursors).
-pub fn forget_scan_memo() {
-    dir_memo().lock().unwrap_or_else(|e| e.into_inner()).clear();
+/// A separate, durable snapshot precedes the first legacy replacement. This
+/// does not prune quota rows or rotate the ordinary daily backup generations.
+pub(crate) fn backup_legacy(store: &Store) -> Result<()> {
+    let Some(path) = store.path() else {
+        return Ok(());
+    };
+    let legacy: bool = store.conn().query_row(
+        "SELECT EXISTS(SELECT 1 FROM usage_events WHERE app=?1 AND dedup_key NOT LIKE 'codebuddy_ide:v2:%')",
+        [apps::CODEBUDDY_IDE], |r| r.get(0),
+    )?;
+    if !legacy {
+        return Ok(());
+    }
+    if store
+        .get_state("codebuddy_v2_backup")?
+        .is_some_and(|p| Path::new(&p).is_file())
+    {
+        return Ok(());
+    }
+    let dir = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("backups");
+    std::fs::create_dir_all(&dir)?;
+    let backup = dir.join(format!("codebuddy-before-v2-{}.db", crate::store::now_ms()));
+    store
+        .conn()
+        .execute("VACUUM INTO ?1", [backup.to_string_lossy().as_ref()])?;
+    let conn =
+        rusqlite::Connection::open_with_flags(&backup, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    anyhow::ensure!(
+        conn.query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0))? == "ok",
+        "CodeBuddy backup verification failed"
+    );
+    store.set_state("codebuddy_v2_backup", backup.to_string_lossy().as_ref())?;
+    Ok(())
 }
 
 pub struct CodeBuddyIde {
@@ -135,56 +143,132 @@ fn session_dirs() -> BTreeMap<String, String> {
     map
 }
 
-/// Cumulative counters carried by `statsSnapshot` — component-wise `max`
-/// against the persisted watermark yields the delta for a new message.
-#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
-struct Cum {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Stamp {
+    size: u64,
+    modified_ns: u128,
+}
+
+impl Stamp {
+    fn read(path: &Path) -> Result<Self> {
+        let m = std::fs::metadata(path)?;
+        Ok(Self {
+            size: m.len(),
+            modified_ns: m
+                .modified()?
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos(),
+        })
+    }
+}
+
+pub(super) fn read_json(path: &Path) -> Result<Vec<u8>> {
+    const LIMIT: u64 = 32 * 1024 * 1024;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(LIMIT + 1)
+        .read_to_end(&mut bytes)?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= LIMIT,
+        "CodeBuddy record exceeds size limit"
+    );
+    Ok(bytes)
+}
+
+pub(super) fn fingerprint(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Snapshot {
+    request: String,
+    model: Option<String>,
+    ts: i64,
     input: u64,
     output: u64,
     cached: u64,
     cache_write: u64,
     thinking: u64,
-    elapsed_ms: i64,
-    credit: f64,
+    elapsed_ms: Option<i64>,
+    credit: Option<f64>,
 }
 
-impl Cum {
-    fn from_snap(s: &Value) -> Self {
-        Self {
-            input: num(&s["inputTokens"]),
-            output: num(&s["outputTokens"]),
+impl Snapshot {
+    fn parse(v: &Value, stem: &str) -> Option<Self> {
+        if v["role"].as_str()? != "assistant" {
+            return None;
+        }
+        let extra = match &v["extra"] {
+            Value::String(s) => serde_json::from_str::<Value>(s).ok()?,
+            Value::Object(_) => v["extra"].clone(),
+            _ => return None,
+        };
+        let s = &extra["statsSnapshot"];
+        let input = s["inputTokens"].as_u64()?;
+        let output = s["outputTokens"].as_u64()?;
+        let credit = crate::normalize::fnum(&s["credit"]).filter(|x| x.is_finite() && *x > 0.0);
+        if input == 0 && output == 0 && credit.is_none() {
+            return None;
+        }
+        Some(Self {
+            // responseId is often added later; requestId remains stable.
+            request: text(&extra["requestId"])
+                .or_else(|| text(&extra["responseId"]))
+                .unwrap_or_else(|| format!("message:{stem}")),
+            model: text(&extra["modelId"]).or_else(|| text(&extra["modelName"])),
+            ts: epoch_ms(&v["createdAt"])?,
+            input,
+            output,
             cached: num(&s["cachedInputTokens"]),
             cache_write: num(&s["cacheWriteTokens"]),
             thinking: num(&s["thinkingTokens"]),
-            elapsed_ms: s["elapsedMs"].as_i64().unwrap_or(0),
-            credit: crate::normalize::fnum(&s["credit"]).unwrap_or(0.0),
-        }
+            elapsed_ms: s["elapsedMs"].as_i64().filter(|n| *n > 0),
+            credit,
+        })
     }
-    /// `self - base` with per-component clamp at 0 (a late-discovered older
-    /// message would otherwise produce negative deltas).
-    fn delta(&self, base: &Cum) -> Cum {
-        Cum {
-            input: self.input.saturating_sub(base.input),
-            output: self.output.saturating_sub(base.output),
-            cached: self.cached.saturating_sub(base.cached),
-            cache_write: self.cache_write.saturating_sub(base.cache_write),
-            thinking: self.thinking.saturating_sub(base.thinking),
-            elapsed_ms: self.elapsed_ms.saturating_sub(base.elapsed_ms),
-            credit: (self.credit - base.credit).max(0.0),
+
+    fn event(&self, conv: &str, project: Option<String>, path: &Path) -> UsageEvent {
+        UsageEvent {
+            dedup_key: format!("codebuddy_ide:v2:{conv}:{}", self.request),
+            app: apps::CODEBUDDY_IDE.into(),
+            session_id: Some(conv.into()),
+            project,
+            model: self.model.clone(),
+            ts_start: Some(self.ts),
+            input_tokens: crate::normalize::input_excludes_cache(
+                self.input,
+                self.cached,
+                self.cache_write,
+            ),
+            output_tokens: self.output,
+            reasoning_tokens: self.thinking,
+            cache_read_tokens: self.cached,
+            cache_write_5m_tokens: self.cache_write,
+            credits: self.credit,
+            duration_ms: self.elapsed_ms,
+            provenance: Provenance::LocalJsonl,
+            raw_ref: Some(path.to_string_lossy().into_owned()),
+            ..Default::default()
         }
-    }
-    fn any(&self) -> bool {
-        self.input > 0 || self.output > 0 || self.cached > 0 || self.cache_write > 0
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
+struct FileState {
+    stamp: Stamp,
+    hash: String,
+    snapshot: Option<Snapshot>,
+}
+
+#[derive(Default, Serialize, Deserialize)]
 struct ConvState {
-    /// Processed message file names (stem) — append-only.
-    seen: BTreeSet<String>,
-    /// High-water cumulative snapshot; deltas are `snap - cum`.
-    #[serde(default)]
-    cum: Cum,
+    version: u8,
+    generation: u64,
+    files: BTreeMap<String, FileState>,
+    emitted: BTreeMap<String, String>,
 }
 
 impl SourceAdapter for CodeBuddyIde {
@@ -194,22 +278,19 @@ impl SourceAdapter for CodeBuddyIde {
     fn display_name(&self) -> &'static str {
         "CodeBuddy"
     }
-    /// Totals are vendor-exact; events bundle ≥1 LLM call per delta.
+    // Each event aggregates the internal calls of one Agent request.
     fn capability(&self) -> Capability {
         Capability::Estimate
     }
-
     fn watch_roots(&self) -> Vec<PathBuf> {
         vec![
             data_root()
                 .parent()
-                .map(|p| p.to_path_buf())
+                .map(Path::to_path_buf)
                 .unwrap_or_else(data_root),
         ]
     }
-
     fn discover(&self) -> Result<Vec<SourceItem>> {
-        // Data/<user>/<host>/<acct>/history/<ws>/<conv>/messages/
         let mut out = Vec::new();
         for user in subdirs(&data_root()) {
             for host in subdirs(&user) {
@@ -218,7 +299,7 @@ impl SourceAdapter for CodeBuddyIde {
                         for conv in subdirs(&ws) {
                             if conv.join("messages").is_dir() {
                                 out.push(SourceItem {
-                                    key: conv.to_string_lossy().to_string(),
+                                    key: conv.to_string_lossy().into_owned(),
                                     path: conv,
                                     kind: SourceKind::Sqlite,
                                 });
@@ -230,246 +311,157 @@ impl SourceAdapter for CodeBuddyIde {
         }
         Ok(out)
     }
-
     fn scan_sqlite(&self, item: &SourceItem, store: &Store) -> Result<ScanOutcome> {
-        // Read the directory stamp BEFORE listing it: a file that lands after
-        // this read moves the stamp past what we record, so it is seen next pass.
-        let stamp = std::fs::metadata(item.path.join("messages"))
-            .and_then(|m| m.modified())
-            .ok();
-        if let Some(t) = stamp
-            && dir_memo()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(&item.key)
-                == Some(&t)
-        {
-            return Ok(ScanOutcome::default());
-        }
-        let out = self.scan_conversation(item, store)?;
-        if let Some(t) = stamp
-            && std::time::SystemTime::now()
-                .duration_since(t)
-                .is_ok_and(|age| age >= QUIET)
-        {
-            dir_memo()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(item.key.clone(), t);
-        }
-        Ok(out)
+        self.scan_conversation(item, store)
     }
 }
 
 impl CodeBuddyIde {
     fn scan_conversation(&self, item: &SourceItem, store: &Store) -> Result<ScanOutcome> {
         let cur = store.load_cursor(&item.key)?;
-        let mut state: ConvState = cur
+        let mut state = cur
             .state
             .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
+            .and_then(|s| serde_json::from_str::<ConvState>(s).ok())
+            .filter(|s| s.version == 2)
             .unwrap_or_default();
-        let conv = item
-            .path
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
+        let generation = REFRESH.load(std::sync::atomic::Ordering::Relaxed);
+        let force = state.version != 2 || state.generation != generation;
+        let conv = item.path.file_name().unwrap_or_default().to_string_lossy();
         let project = {
-            let mut g = self.cwds.lock().unwrap_or_else(|e| e.into_inner());
+            let mut g = self
+                .cwds
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             g.get_or_insert_with(session_dirs)
-                .get(&conv)
+                .get(conv.as_ref())
                 .and_then(|cwd| {
                     Path::new(cwd)
                         .file_name()
-                        .map(|s| s.to_string_lossy().to_string())
+                        .map(|s| s.to_string_lossy().into_owned())
                 })
         };
-
-        // New message files, oldest first so deltas walk the timeline forward.
-        // Each candidate is read exactly once; unparseable files are still
-        // marked seen (a corrupt stub shouldn't wedge the watermark).
-        let mut files: Vec<(i64, String, PathBuf, Value)> =
-            std::fs::read_dir(item.path.join("messages"))
-                .map(|rd| {
-                    rd.flatten()
-                        .filter_map(|e| {
-                            let p = e.path();
-                            if p.extension().is_none_or(|x| x != "json") {
-                                return None;
-                            }
-                            let stem = p.file_stem()?.to_string_lossy().to_string();
-                            if state.seen.contains(&stem) {
-                                return None;
-                            }
-                            let v: Value =
-                                serde_json::from_str(&std::fs::read_to_string(&p).ok()?).ok()?;
-                            Some((epoch_ms(&v["createdAt"]).unwrap_or(0), stem, p, v))
-                        })
-                        .collect()
+        let mut changed = force;
+        let mut fingerprint_file = None;
+        for entry in std::fs::read_dir(item.path.join("messages"))? {
+            let path = entry?.path();
+            if path.extension().is_none_or(|x| x != "json") {
+                continue;
+            }
+            let stem = path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let stamp = Stamp::read(&path)?;
+            let old = state.files.get(&stem);
+            if !force && old.is_some_and(|f| f.stamp == stamp) {
+                continue;
+            }
+            let bytes = read_json(&path)?;
+            let hash = fingerprint(&bytes);
+            if let Some(old) = old
+                && old.hash == hash
+            {
+                state.files.get_mut(&stem).unwrap().stamp = stamp;
+                changed = true;
+                continue;
+            }
+            // An in-flight/torn JSON is retried, never committed as "seen".
+            let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+                continue;
+            };
+            let snapshot =
+                Snapshot::parse(&value, &stem).or_else(|| old.and_then(|f| f.snapshot.clone()));
+            if snapshot.is_some() {
+                // Retire only legacy rows whose original snapshot is readable.
+                // Missing/pruned source files and unrelated apps remain untouched.
+                store.conn().execute(
+                    "DELETE FROM usage_events WHERE app=?1 AND replace(raw_ref, char(92), '/')=?2
+                     AND dedup_key NOT LIKE 'codebuddy_ide:v2:%'",
+                    rusqlite::params![
+                        apps::CODEBUDDY_IDE,
+                        path.to_string_lossy().replace('\\', "/")
+                    ],
+                )?;
+            }
+            fingerprint_file = Some(path);
+            state.files.insert(
+                stem,
+                FileState {
+                    stamp,
+                    hash,
+                    snapshot,
+                },
+            );
+            changed = true;
+        }
+        let mut requests: BTreeMap<&str, (&str, &FileState, &Snapshot)> = BTreeMap::new();
+        for (stem, file) in &state.files {
+            let Some(snap) = &file.snapshot else {
+                continue;
+            };
+            let candidate = (snap.ts, file.stamp.modified_ns, stem.as_str());
+            if requests
+                .get(snap.request.as_str())
+                .is_none_or(|(old_stem, old, old_snap)| {
+                    candidate > (old_snap.ts, old.stamp.modified_ns, *old_stem)
                 })
-                .unwrap_or_default();
-        files.sort_by_key(|(ts, ..)| *ts);
-        let had_new = !files.is_empty();
-
+            {
+                requests.insert(&snap.request, (stem, file, snap));
+            }
+        }
         let mut out = ScanOutcome::default();
-        for (_ts, stem, f, v) in files {
-            state.seen.insert(stem.clone());
-            if text(&v["role"]).as_deref() != Some("assistant") {
+        for (request, (stem, _, snap)) in &requests {
+            let digest = fingerprint(&serde_json::to_vec(snap)?);
+            if state.emitted.get(*request) == Some(&digest) {
                 continue;
             }
-            let extra: Value = match v.get("extra").and_then(|e| e.as_str()) {
-                Some(s) => serde_json::from_str(s).unwrap_or_default(),
-                None => continue,
-            };
-            let snap_v = &extra["statsSnapshot"];
-            if !snap_v.is_object() {
-                // No cumulative counter — its tokens are already inside the
-                // surrounding snapshots; `lastStep*` would double-count.
-                continue;
-            }
-            let snap = Cum::from_snap(snap_v);
-            let d = snap.delta(&state.cum);
-            state.cum = Cum {
-                input: state.cum.input.max(snap.input),
-                output: state.cum.output.max(snap.output),
-                cached: state.cum.cached.max(snap.cached),
-                cache_write: state.cum.cache_write.max(snap.cache_write),
-                thinking: state.cum.thinking.max(snap.thinking),
-                elapsed_ms: state.cum.elapsed_ms.max(snap.elapsed_ms),
-                credit: state.cum.credit.max(snap.credit),
-            };
-            if !d.any() {
-                continue;
-            }
-            let msg_id = text(&extra["responseId"])
-                .or_else(|| text(&extra["requestId"]))
-                .unwrap_or_else(|| stem.clone());
-            out.events.push(UsageEvent {
-                dedup_key: format!("codebuddy_ide:{conv}:{msg_id}"),
-                app: apps::CODEBUDDY_IDE.into(),
-                session_id: Some(conv.clone()),
-                project: project.clone(),
-                model: text(&extra["modelId"]).or_else(|| text(&extra["modelName"])),
-                ts_start: epoch_ms(&v["createdAt"]),
-                input_tokens: crate::normalize::input_excludes_cache(
-                    d.input,
-                    d.cached,
-                    d.cache_write,
-                ),
-                output_tokens: d.output,
-                reasoning_tokens: d.thinking,
-                cache_read_tokens: d.cached,
-                cache_write_5m_tokens: d.cache_write,
-                credits: (d.credit > 0.0).then_some(d.credit),
-                duration_ms: (d.elapsed_ms > 0).then_some(d.elapsed_ms),
-                provenance: Provenance::LocalJsonl,
-                raw_ref: Some(f.to_string_lossy().to_string()),
-                ..Default::default()
-            });
+            out.events.push(snap.event(
+                &conv,
+                project.clone(),
+                &item.path.join("messages").join(format!("{stem}.json")),
+            ));
+            state.emitted.insert((*request).into(), digest);
+            changed = true;
         }
-
-        // Persist via the conversation's index.json (a real file — the dir
-        // itself can't produce a tail fingerprint). Skip the write entirely
-        // when nothing new was processed — otherwise every quiet tick issues
-        // one adapter_state UPDATE per conversation.
-        let fp_file = [
-            item.path.join("index.json"),
-            item.path.join("..").join("index.json"),
-        ]
-        .into_iter()
-        .find(|p| p.is_file());
-        if !had_new && cur.state.is_some() {
-            return Ok(out);
+        let retired: Vec<String> = state
+            .emitted
+            .keys()
+            .filter(|id| !requests.contains_key(id.as_str()))
+            .cloned()
+            .collect();
+        for id in retired {
+            store.conn().execute(
+                "DELETE FROM usage_events WHERE app=?1 AND dedup_key=?2",
+                rusqlite::params![apps::CODEBUDDY_IDE, format!("codebuddy_ide:v2:{conv}:{id}")],
+            )?;
+            state.emitted.remove(&id);
         }
-        if let Some(fp) = fp_file {
-            out.pending_cursor = Some(PendingCursor {
-                key: item.key.clone(),
-                path: fp,
-                offset: state.seen.len() as u64,
-                mtime_ms: 0,
-                state: Some(serde_json::to_string(&state)?),
+        if changed {
+            state.version = 2;
+            state.generation = generation;
+            let fp = fingerprint_file.or_else(|| {
+                std::fs::read_dir(item.path.join("messages"))
+                    .ok()?
+                    .flatten()
+                    .map(|e| e.path())
+                    .find(|p| p.is_file())
             });
+            if let Some(fp) = fp {
+                store.save_cursor(
+                    self.id(),
+                    &item.key,
+                    &fp,
+                    0,
+                    0,
+                    Some(&serde_json::to_string(&state)?),
+                )?;
+            }
         }
         Ok(out)
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::adapters::scan_and_commit;
-
-    fn msg(dir: &Path, name: &str, role: &str, created: &str, extra: Option<Value>) {
-        let mut v = serde_json::json!({"role": role, "id": name, "createdAt": created});
-        if let Some(e) = extra {
-            v["extra"] = Value::String(e.to_string());
-        }
-        std::fs::write(dir.join(format!("{name}.json")), v.to_string()).unwrap();
-    }
-
-    #[test]
-    fn stats_snapshot_deltas_accumulate() {
-        let dir = std::env::temp_dir().join(format!("gtt-cb-{}", std::process::id()));
-        let conv = dir.join("convX");
-        let msgs = conv.join("messages");
-        std::fs::create_dir_all(&msgs).unwrap();
-        std::fs::write(conv.join("index.json"), "{}").unwrap();
-        let snap = |i: u64, o: u64, c: u64, t: u64, cr: f64| {
-            serde_json::json!({
-                "requestId": format!("req-{i}-{o}"),
-                "modelId": "glm-5.3",
-                "statsSnapshot": {
-                    "inputTokens": i, "outputTokens": o,
-                    "cachedInputTokens": c, "cacheWriteTokens": 0,
-                    "thinkingTokens": t, "elapsedMs": 1000 * i, "credit": cr
-                }
-            })
-        };
-        msg(&msgs, "a", "user", "2026-09-03T10:00:00Z", None);
-        msg(
-            &msgs,
-            "b",
-            "assistant",
-            "2026-09-03T10:00:10Z",
-            Some(snap(1000, 50, 800, 10, 1.5)),
-        );
-        msg(
-            &msgs,
-            "c",
-            "assistant",
-            "2026-09-03T10:01:00Z",
-            Some(snap(3000, 120, 2000, 30, 2.0)),
-        );
-        msg(&msgs, "d", "assistant", "2026-09-03T10:02:00Z", None); // no snapshot
-
-        let store = Store::open_memory().unwrap();
-        let item = SourceItem {
-            key: "convX".into(),
-            path: conv.clone(),
-            kind: SourceKind::Sqlite,
-        };
-        let out = scan_and_commit(&CodeBuddyIde::default(), &store, &item);
-        assert_eq!(out.events.len(), 2);
-        let first = &out.events[0];
-        assert_eq!(first.dedup_key, "codebuddy_ide:convX:req-1000-50");
-        assert_eq!(first.app, apps::CODEBUDDY_IDE);
-        // input excludes cache-read: 1000 - 800
-        assert_eq!(first.input_tokens, 200);
-        assert_eq!(first.cache_read_tokens, 800);
-        assert_eq!(first.output_tokens, 50);
-        assert_eq!(first.reasoning_tokens, 10);
-        assert_eq!(first.credits, Some(1.5));
-        let second = &out.events[1];
-        // delta vs first snapshot: d_input=2000, d_cached=1200 → 800 fresh
-        assert_eq!(second.input_tokens, 800);
-        assert_eq!(second.cache_read_tokens, 1200);
-        assert_eq!(second.output_tokens, 70);
-        assert_eq!(second.credits, Some(0.5));
-
-        // Re-scan: cursor state persists → zero new events.
-        let out2 = scan_and_commit(&CodeBuddyIde::default(), &store, &item);
-        assert_eq!(out2.events.len(), 0);
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-}
+mod tests;

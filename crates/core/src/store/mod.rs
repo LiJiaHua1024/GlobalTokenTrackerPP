@@ -9,7 +9,7 @@ use std::path::Path;
 
 pub use cursor::{CursorAction, FileCursor, tail_fingerprint};
 pub use query::{
-    ActivityDay, AppSummary, ArchiveReport, DailyRow, EventRow, ModelRateItem, MODEL_EXPR,
+    ActivityDay, AppSummary, ArchiveReport, DailyRow, EventRow, MODEL_EXPR, ModelRateItem,
     PriceQuote, PriceRow, QuotaRow, RateMetric, RateTimeSeriesBucket, ShareRow, SourceHealth,
     SpeedSums, TokenRateOverview, Totals, filter_prices,
 };
@@ -558,6 +558,10 @@ impl Store {
                     q.limit_value, q.used_percent, q.resets_at, q.raw_json],
         )?;
         Ok(true)
+    }
+
+    pub(crate) fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
     }
 
     pub(crate) fn conn(&self) -> &Connection {
@@ -1531,7 +1535,9 @@ mod tests {
     #[test]
     fn token_rate_overview_empty_store() {
         let s = Store::open_memory().unwrap();
-        let overview = s.token_rate_overview(Some(1_700_000_000_000), None, None).unwrap();
+        let overview = s
+            .token_rate_overview(Some(1_700_000_000_000), None, None)
+            .unwrap();
         assert_eq!(overview.anchor_ms, 1_700_000_000_000);
         assert!(!overview.is_active);
         assert_eq!(overview.latest_event_ms, None);
@@ -1666,7 +1672,11 @@ mod tests {
         assert_eq!(o.h1.speed.timed_events, 2);
 
         // Per-model rows carry the same aggregates.
-        let glm = o.top_models_1h.iter().find(|m| m.model == "glm-4.7").unwrap();
+        let glm = o
+            .top_models_1h
+            .iter()
+            .find(|m| m.model == "glm-4.7")
+            .unwrap();
         assert_eq!(glm.speed.speed_ms, 6_000);
         assert_eq!(glm.speed.timed_events, 2);
         assert!((glm.output_tps.unwrap() - 400.0 / 6.0).abs() < 1e-9);
