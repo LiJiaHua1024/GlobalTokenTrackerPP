@@ -136,7 +136,7 @@
 | Command Code | 本地 JSONL | ✅ 精确（含工具自报成本） |
 | CodeBuddy CLI | 本地 JSONL 会话日志 | ✅ 精确 |
 | CodeBuddy IDE | `state.vscdb` / 会话库 | 🟡 会话级 + 模型倍率 |
-| Kiro CLI / Kiro IDE | `~/.kiro/sessions`（CLI 会话元数据、IDE v2 事件日志）+ `kiro.kiroagent` 执行记录 | ✅ 每轮官方 credits（点数，不折算美元）；记录了 token 时一并计量 |
+| Kiro CLI / Kiro IDE | `~/.kiro/sessions`（CLI 会话元数据、IDE v2 事件日志）+ `kiro.kiroagent` 执行记录 | ✅ 每轮官方 credits（按 $0.04/credit 计费用）；Kiro 本地不记 token，按上下文占用推算为“未分类 token” |
 | Cursor / Qoder | 凭据 + 官方配额 API | 🟡 配额为主 |
 
 > [!NOTE]

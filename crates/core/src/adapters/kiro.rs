@@ -1,9 +1,16 @@
 //! Kiro adapter — Kiro CLI + Kiro IDE (both generations).
 //!
-//! Kiro bills in **credits**, never dollars, so credits stay in
-//! `UsageEvent::credits` (spec §7.4: subscription units are never converted).
-//! Token counts are only stored when Kiro itself records them — nothing is
-//! estimated from transcript length.
+//! Kiro bills in **credits**. Credits stay in `UsageEvent::credits`, and —
+//! because Kiro publishes a fixed list price per credit — each event also
+//! carries `cost_usd = credits × USD_PER_CREDIT` as a provider-reported cost
+//! (the book never re-prices it from tokens).
+//!
+//! Kiro writes **no token counters** locally (its `*_token_count` fields are
+//! always 0). The CLI does record how full the context window was after each
+//! turn, so a turn's billed input volume is reconstructed as
+//! `requests × context fill × window` and booked as `unclassified_tokens`
+//! (a vendor total with no trustworthy input/output split — never priced, and
+//! kept out of speed figures). Real counters win whenever Kiro writes them.
 //!
 //! Three stores, all read-only:
 //!
@@ -30,7 +37,7 @@
 use super::{
     Capability, PendingCursor, ScanOutcome, SourceAdapter, SourceItem, SourceKind, complete_lines,
 };
-use crate::model::{Provenance, UsageEvent, apps};
+use crate::model::{CostSource, Provenance, UsageEvent, apps};
 use crate::normalize::{epoch_ms, fnum, num, text};
 use crate::store::Store;
 use anyhow::Result;
@@ -45,6 +52,18 @@ const IDE_V1_PREFIX: &str = "kiro-ide:";
 /// v1 execution files can be large; anything beyond this is a transcript dump,
 /// not a usage record worth holding in memory.
 const MAX_V1_FILE: u64 = 64 * 1024 * 1024;
+/// Kiro's published price per credit (add-on / overage rate, kiro.dev/pricing).
+pub(crate) const USD_PER_CREDIT: f64 = 0.04;
+/// Context window assumed when the session does not record one.
+const DEFAULT_CONTEXT_WINDOW: f64 = 200_000.0;
+
+/// `(cost_usd, cost_source)` for a credit amount.
+fn credit_cost(credits: Option<f64>) -> (Option<f64>, Option<CostSource>) {
+    match credits {
+        Some(c) => (Some(c * USD_PER_CREDIT), Some(CostSource::ProviderReported)),
+        None => (None, None),
+    }
+}
 
 /// `$KIRO_HOME` or `~/.kiro`.
 fn kiro_home() -> PathBuf {
@@ -165,6 +184,10 @@ pub(crate) fn parse_cli_session(doc: &Value, path: &Path) -> Vec<UsageEvent> {
     let Some(turns) = state["conversation_metadata"]["user_turn_metadatas"].as_array() else {
         return Vec::new();
     };
+    let window = fnum(&state["rts_model_state"]["model_info"]["context_window_tokens"])
+        .filter(|w| *w > 0.0)
+        .unwrap_or(DEFAULT_CONTEXT_WINDOW);
+    let mut prev_fill: Option<f64> = None;
     let mut out = Vec::new();
     for (idx, t) in turns.iter().enumerate() {
         let credits = sum_credits(&t["metering_usage"]);
@@ -172,7 +195,28 @@ pub(crate) fn parse_cli_session(doc: &Value, path: &Path) -> Vec<UsageEvent> {
         let output = num(&t["output_token_count"]);
         let cache_read = num(&t["cache_read_input_token_count"]);
         let cache_write = num(&t["cache_write_input_token_count"]);
-        if credits.is_none() && input + output + cache_read + cache_write == 0 {
+        // Every request of a turn re-sends the whole context; the context
+        // grows from where the previous turn left it to this turn's final fill.
+        let pct = |k: &str| fnum(&t[k]).filter(|p| p.is_finite() && *p > 0.0);
+        let end_fill =
+            pct("final_context_usage_percentage").or_else(|| pct("context_usage_percentage"));
+        let start_fill = prev_fill
+            .or_else(|| pct("context_usage_percentage"))
+            .or(end_fill);
+        if end_fill.is_some() {
+            prev_fill = end_fill;
+        }
+        let requests = num(&t["total_request_count"])
+            .max(t["metering_usage"].as_array().map_or(0, |a| a.len() as u64))
+            .max(1);
+        let recorded = input + output + cache_read + cache_write;
+        let estimated = match (recorded, start_fill, end_fill) {
+            (0, Some(s), Some(e)) => {
+                ((s + e) / 2.0 / 100.0 * window * requests as f64).round() as u64
+            }
+            _ => 0,
+        };
+        if credits.is_none() && recorded + estimated == 0 {
             continue;
         }
         // First message id is stable for the life of the turn; the index is
@@ -191,6 +235,7 @@ pub(crate) fn parse_cli_session(doc: &Value, path: &Path) -> Vec<UsageEvent> {
             _ => ts_end,
         };
         let model = model_or_auto(text(&t["model"]).or_else(|| fallback_model.clone()));
+        let (cost_usd, cost_source) = credit_cost(credits);
         out.push(UsageEvent {
             dedup_key: format!("{CLI_PREFIX}{session_id}:{turn_id}"),
             app: apps::KIRO.into(),
@@ -206,8 +251,12 @@ pub(crate) fn parse_cli_session(doc: &Value, path: &Path) -> Vec<UsageEvent> {
             output_tokens: output,
             cache_read_tokens: cache_read,
             cache_write_5m_tokens: cache_write,
+            unclassified_tokens: estimated,
             credits,
+            cost_usd,
+            cost_source,
             duration_ms: dur,
+            active_ms: dur,
             status: text(&t["end_reason"]),
             provenance: Provenance::LocalJsonl,
             raw_ref: Some(format!("{}#turn{idx}", path.display())),
@@ -348,6 +397,8 @@ pub(crate) fn parse_v2(
                     ts_end: ts,
                     duration_ms: crate::normalize::derived_duration(start, ts),
                     credits: Some(credits),
+                    cost_usd: Some(credits * USD_PER_CREDIT),
+                    cost_source: Some(CostSource::ProviderReported),
                     provenance: Provenance::LocalJsonl,
                     raw_ref: Some(format!("{}@{line_start}", item.path.display())),
                     ..Default::default()
@@ -452,6 +503,8 @@ pub(crate) fn parse_v1_execution(
         ts_end,
         duration_ms: crate::normalize::derived_duration(ts_start, ts_end),
         credits: Some(credits),
+        cost_usd: Some(credits * USD_PER_CREDIT),
+        cost_source: Some(CostSource::ProviderReported),
         provenance: Provenance::LocalJsonl,
         raw_ref: Some(path.display().to_string()),
         ..Default::default()
@@ -645,6 +698,9 @@ mod tests {
                             "cache_read_input_token_count": 0,
                             "cache_write_input_token_count": 0,
                             "model": "claude-sonnet-5.5",
+                            "total_request_count": 2,
+                            "context_usage_percentage": 10.0,
+                            "final_context_usage_percentage": 20.0,
                             "metering_usage": [
                                 {"value": 0.5, "unit": "credit", "unitPlural": "credits"},
                                 {"value": 0.25, "unit": "credit", "unitPlural": "credits"}
@@ -665,7 +721,7 @@ mod tests {
                         }
                     ]
                 },
-                "rts_model_state": {"model_info": {"model_id": "auto"}}
+                "rts_model_state": {"model_info": {"model_id": "auto", "context_window_tokens": 100000}}
             }
         })
     }
@@ -680,6 +736,11 @@ mod tests {
         assert_eq!(a.project.as_deref(), Some("F:\\Proj"));
         assert_eq!(a.model.as_deref(), Some("claude-sonnet-5.5"));
         assert_eq!(a.credits, Some(0.75));
+        assert!((a.cost_usd.unwrap() - 0.75 * USD_PER_CREDIT).abs() < 1e-12);
+        assert_eq!(a.cost_source, Some(CostSource::ProviderReported));
+        // 2 requests × avg(10%, 20%) × 100k window.
+        assert_eq!(a.unclassified_tokens, 30_000);
+        assert_eq!(a.active_ms, Some(76_326));
         assert_eq!(a.duration_ms, Some(76_326));
         assert_eq!(a.ts_end.unwrap() - a.ts_start.unwrap(), 76_326);
         assert_eq!(a.status.as_deref(), Some("UserTurnEnd"));
@@ -688,6 +749,8 @@ mod tests {
         let b = &evs[1];
         assert_eq!(b.dedup_key, "kiro-cli:s-1:m-3");
         assert_eq!(b.credits, None);
+        assert_eq!(b.cost_usd, None);
+        assert_eq!(b.unclassified_tokens, 0, "real counters are never padded");
         assert_eq!(
             (b.input_tokens, b.output_tokens, b.cache_read_tokens),
             (100, 20, 5)
